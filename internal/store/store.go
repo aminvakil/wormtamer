@@ -12,7 +12,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const (
 	OutcomeQueued          = "queued"
@@ -54,6 +54,18 @@ type AcceptResult struct {
 	JobID             int64
 	Outcome           string
 	DuplicateDelivery bool
+}
+
+type ReconciledReview struct {
+	GitLabInstance  string
+	ProjectID       int64
+	MergeRequestIID int64
+	HeadSHA         string
+}
+
+type ReconciledResult struct {
+	JobID       int64
+	NewlyQueued bool
 }
 
 type Job struct {
@@ -222,6 +234,62 @@ CREATE TABLE publications (
 
 PRAGMA user_version = 2;
 `
+		case 2:
+			migration = `
+CREATE TABLE review_jobs_v3 (
+    id INTEGER PRIMARY KEY,
+    source_event_id INTEGER REFERENCES webhook_events(id),
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL,
+    merge_request_iid INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    next_attempt_at TEXT,
+    last_error_category TEXT,
+    last_error_message TEXT,
+    updated_at TEXT,
+    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
+);
+
+CREATE TABLE review_results_v3 (
+    job_id INTEGER PRIMARY KEY REFERENCES review_jobs_v3(id) ON DELETE CASCADE,
+    result_json BLOB NOT NULL CHECK(length(result_json) <= 65536),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE publications_v3 (
+    job_id INTEGER PRIMARY KEY REFERENCES review_jobs_v3(id) ON DELETE CASCADE,
+    marker TEXT NOT NULL UNIQUE CHECK(length(marker) <= 256),
+    gitlab_note_id INTEGER NOT NULL CHECK(gitlab_note_id > 0),
+    created_at TEXT NOT NULL
+);
+
+INSERT INTO review_jobs_v3
+SELECT id, source_event_id, gitlab_instance, project_id, merge_request_iid,
+       head_sha, state, created_at, lease_owner, lease_expires_at, attempt_count,
+       started_at, next_attempt_at, last_error_category, last_error_message, updated_at
+FROM review_jobs;
+
+INSERT INTO review_results_v3 SELECT job_id, result_json, created_at FROM review_results;
+INSERT INTO publications_v3 SELECT job_id, marker, gitlab_note_id, created_at FROM publications;
+
+DROP TABLE review_results;
+DROP TABLE publications;
+DROP TABLE review_jobs;
+ALTER TABLE review_jobs_v3 RENAME TO review_jobs;
+ALTER TABLE review_results_v3 RENAME TO review_results;
+ALTER TABLE publications_v3 RENAME TO publications;
+
+CREATE INDEX review_jobs_due_idx
+ON review_jobs (state, next_attempt_at, lease_expires_at);
+
+PRAGMA user_version = 3;
+`
 		}
 
 		if _, err := tx.ExecContext(ctx, migration); err != nil {
@@ -323,6 +391,47 @@ WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_
 
 	if err := tx.Commit(); err != nil {
 		return AcceptResult{}, fmt.Errorf("commit event transaction: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Store) CreateReconciledJob(ctx context.Context, review ReconciledReview) (result ReconciledResult, err error) {
+	if review.GitLabInstance == "" || review.ProjectID <= 0 || review.MergeRequestIID <= 0 || review.HeadSHA == "" {
+		return result, errors.New("invalid reconciled review")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, fmt.Errorf("begin reconciled job transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	insert, err := tx.ExecContext(ctx, `
+INSERT INTO review_jobs (
+    source_event_id, gitlab_instance, project_id, merge_request_iid, head_sha, state
+) VALUES (NULL, ?, ?, ?, ?, 'queued')
+ON CONFLICT(gitlab_instance, project_id, merge_request_iid, head_sha) DO NOTHING`,
+		review.GitLabInstance, review.ProjectID, review.MergeRequestIID, review.HeadSHA)
+	if err != nil {
+		return result, fmt.Errorf("insert reconciled review job: %w", err)
+	}
+	inserted, err := insert.RowsAffected()
+	if err != nil {
+		return result, fmt.Errorf("inspect reconciled review job insertion: %w", err)
+	}
+	result.NewlyQueued = inserted == 1
+	if result.NewlyQueued {
+		result.JobID, err = insert.LastInsertId()
+	} else {
+		err = tx.QueryRowContext(ctx, `
+SELECT id FROM review_jobs
+WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_sha = ?`,
+			review.GitLabInstance, review.ProjectID, review.MergeRequestIID, review.HeadSHA).Scan(&result.JobID)
+	}
+	if err != nil {
+		return ReconciledResult{}, fmt.Errorf("read reconciled review job ID: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ReconciledResult{}, fmt.Errorf("commit reconciled job transaction: %w", err)
 	}
 	return result, nil
 }

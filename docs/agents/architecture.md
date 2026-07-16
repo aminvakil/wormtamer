@@ -86,13 +86,13 @@ Validates findings and posts one summary note per review identity using a stable
 
 ### Reconciler
 
-A future reconciler will compare recently updated merge requests with local state and enqueue revisions missed because a webhook did not arrive. Reconciliation is not implemented in the current worker milestone.
+The GitLab integration supports GitLab 17 and newer. The reconciler scans each authorized project immediately after startup and five minutes after each completed cycle. It lists bounded pages of open merge requests, skips drafts and work-in-progress entries as observed, and idempotently enqueues missing review identities. Scans have no durable cursor or schedule; restart repeats the scan safely.
 
 ## Context and State
 
 The current model request contains bounded changed-file diffs, relevant metadata, the structured response schema, and application-owned limits. It declares no tools and cannot request additional context. When tools are introduced, authorization and limits remain deterministic regardless of model intent.
 
-SQLite stores webhook, job, publication, merge request progress, and runtime-memory records. GitLab remains the source of truth for merge requests and published discussions.
+SQLite stores webhook, job, publication, merge request progress, and runtime-memory records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 
 Runtime memory is installation-specific and stored separately from workflow state. Records preserve scope, evidence, confidence, approval status, and timestamps. They are retrieved on demand through memory tools and are not trusted merely because a model generated them.
 

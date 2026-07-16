@@ -9,28 +9,35 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 )
 
 const (
-	requestTimeout         = 30 * time.Second
-	metadataResponseLimit  = 256 << 10
-	diffResponseLimit      = 2 << 20
-	noteResponseLimit      = 2 << 20
-	maxDiffPages           = 5
-	diffsPerPage           = 20
-	maxChangedFiles        = 100
-	maxDiffContentBytes    = 512 << 10
-	maxNotePages           = 10
-	notesPerPage           = 100
-	maxNotes               = 1000
-	maxNoteBodyBytes       = 64 << 10
-	maxSupportedRetryAfter = 24 * time.Hour
+	requestTimeout              = 30 * time.Second
+	metadataResponseLimit       = 256 << 10
+	diffResponseLimit           = 2 << 20
+	noteResponseLimit           = 2 << 20
+	maxDiffPages                = 5
+	diffsPerPage                = 20
+	maxChangedFiles             = 100
+	maxDiffContentBytes         = 512 << 10
+	maxNotePages                = 10
+	notesPerPage                = 100
+	maxNotes                    = 1000
+	maxNoteBodyBytes            = 64 << 10
+	reconciliationResponseLimit = 2 << 20
+	mergeRequestsPerPage        = 100
+	maxSupportedRetryAfter      = 24 * time.Hour
+	missingRateLimitDelay       = 5 * time.Minute
 )
+
+var headSHAPattern = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
 
 type Identity struct {
 	GitLabInstance  string
@@ -57,17 +64,38 @@ type ChangedFile struct {
 	DeletedFile bool   `json:"deleted_file"`
 }
 
+type ReconciliationMergeRequest struct {
+	ProjectID       int64
+	MergeRequestIID int64
+	HeadSHA         string
+	Draft           bool
+	WorkInProgress  bool
+}
+
 type Client struct {
 	baseURL    *url.URL
 	token      string
 	authorized map[string]struct{}
 	httpClient *http.Client
 	now        func() time.Time
+	after      func(time.Duration) <-chan time.Time
+
+	gateMu    sync.Mutex
+	notBefore time.Time
 }
 
 type projectResponse struct {
 	ID                int64  `json:"id"`
 	PathWithNamespace string `json:"path_with_namespace"`
+}
+
+type reconciliationMergeRequestResponse struct {
+	IID            int64  `json:"iid"`
+	ProjectID      int64  `json:"project_id"`
+	State          string `json:"state"`
+	SHA            string `json:"sha"`
+	Draft          bool   `json:"draft"`
+	WorkInProgress bool   `json:"work_in_progress"`
 }
 
 type mergeRequestResponse struct {
@@ -135,7 +163,61 @@ func New(baseURL, token string, authorizedRepositories []string, providedClient 
 		authorized: authorized,
 		httpClient: httpClient,
 		now:        time.Now,
+		after:      time.After,
 	}, nil
+}
+
+func (c *Client) ResolveProject(ctx context.Context, projectPath string) (int64, error) {
+	if _, allowed := c.authorized[projectPath]; !allowed {
+		return 0, failure.Failed("repository_unauthorized")
+	}
+	var project projectResponse
+	endpoint := "/projects/" + url.PathEscape(projectPath)
+	if _, err := c.get(ctx, endpoint, nil, metadataResponseLimit, &project); err != nil {
+		return 0, err
+	}
+	if project.ID <= 0 || project.PathWithNamespace == "" {
+		return 0, failure.Failed("malformed_gitlab_response")
+	}
+	if project.PathWithNamespace != projectPath {
+		return 0, failure.Failed("repository_unauthorized")
+	}
+	return project.ID, nil
+}
+
+func (c *Client) ListOpenMergeRequests(ctx context.Context, projectID int64, page int) ([]ReconciliationMergeRequest, int, error) {
+	if projectID <= 0 || page <= 0 {
+		return nil, 0, failure.Failed("review_identity_mismatch")
+	}
+	query := url.Values{
+		"page":     {strconv.Itoa(page)},
+		"per_page": {strconv.Itoa(mergeRequestsPerPage)},
+		"state":    {"opened"},
+	}
+	var response []reconciliationMergeRequestResponse
+	header, err := c.get(ctx, fmt.Sprintf("/projects/%d/merge_requests", projectID), query, reconciliationResponseLimit, &response)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(response) > mergeRequestsPerPage {
+		return nil, 0, failure.Failed("merge_request_list_page_limit_exceeded")
+	}
+	mergeRequests := make([]ReconciliationMergeRequest, 0, len(response))
+	for _, mergeRequest := range response {
+		if mergeRequest.ProjectID != projectID || mergeRequest.IID <= 0 || mergeRequest.State != "opened" || !headSHAPattern.MatchString(mergeRequest.SHA) {
+			return nil, 0, failure.Failed("malformed_gitlab_response")
+		}
+		mergeRequests = append(mergeRequests, ReconciliationMergeRequest{
+			ProjectID: projectID, MergeRequestIID: mergeRequest.IID,
+			HeadSHA: strings.ToLower(mergeRequest.SHA), Draft: mergeRequest.Draft,
+			WorkInProgress: mergeRequest.WorkInProgress,
+		})
+	}
+	next, err := nextPage(header, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	return mergeRequests, next, nil
 }
 
 func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, error) {
@@ -369,9 +451,17 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, lim
 }
 
 func (c *Client) request(ctx context.Context, method, endpoint string, query url.Values, body []byte, limit int64, target any) (http.Header, error) {
+	if err := c.waitForGate(ctx); err != nil {
+		return nil, err
+	}
 	requestURL := *c.baseURL
-	requestURL.Path = strings.TrimSuffix(c.baseURL.Path, "/") + "/api/v4" + endpoint
-	requestURL.RawPath = ""
+	escapedPath := strings.TrimSuffix(c.baseURL.EscapedPath(), "/") + "/api/v4" + endpoint
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return nil, failure.Failed("gitlab_request_invalid")
+	}
+	requestURL.Path = decodedPath
+	requestURL.RawPath = escapedPath
 	requestURL.RawQuery = query.Encode()
 
 	var requestBody io.Reader
@@ -435,11 +525,42 @@ func (c *Client) statusError(response *http.Response) error {
 }
 
 func (c *Client) retryableStatus(response *http.Response, category string) error {
-	delay, valid := parseRetryAfter(response.Header.Get("Retry-After"), c.now())
+	now := c.now()
+	delay, valid := parseRetryAfter(response.Header.Get("Retry-After"), now)
 	if valid && delay > maxSupportedRetryAfter {
 		return failure.Failed("retry_after_exceeds_limit")
 	}
+	if valid {
+		c.extendGate(now.Add(delay))
+	} else if response.StatusCode == http.StatusTooManyRequests {
+		c.extendGate(now.Add(missingRateLimitDelay))
+	}
 	return failure.Retry(category, delay)
+}
+
+func (c *Client) waitForGate(ctx context.Context) error {
+	for {
+		c.gateMu.Lock()
+		notBefore := c.notBefore
+		c.gateMu.Unlock()
+		delay := notBefore.Sub(c.now())
+		if delay <= 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.after(delay):
+		}
+	}
+}
+
+func (c *Client) extendGate(notBefore time.Time) {
+	c.gateMu.Lock()
+	defer c.gateMu.Unlock()
+	if notBefore.After(c.notBefore) {
+		c.notBefore = notBefore
+	}
 }
 
 func nextPage(header http.Header, current int) (int, error) {

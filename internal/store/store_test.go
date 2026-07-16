@@ -97,6 +97,45 @@ func TestAcceptEventConcurrentReviewIdentityCreatesOneJob(t *testing.T) {
 	assertCount(t, storage.db, "review_jobs", 1)
 }
 
+func TestCreateReconciledJobIsIdempotentAndAcceptsLaterWebhook(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	review := ReconciledReview{
+		GitLabInstance:  "http://gitlab.internal",
+		ProjectID:       42,
+		MergeRequestIID: 7,
+		HeadSHA:         "0123456789abcdef0123456789abcdef01234567",
+	}
+
+	first, err := storage.CreateReconciledJob(ctx, review)
+	if err != nil || first.JobID == 0 || !first.NewlyQueued {
+		t.Fatalf("CreateReconciledJob(first) = %+v, %v", first, err)
+	}
+	duplicate, err := storage.CreateReconciledJob(ctx, review)
+	if err != nil || duplicate.JobID != first.JobID || duplicate.NewlyQueued {
+		t.Fatalf("CreateReconciledJob(duplicate) = %+v, %v", duplicate, err)
+	}
+
+	var sourceEventID sql.NullInt64
+	if err := storage.db.QueryRow(`SELECT source_event_id FROM review_jobs WHERE id = ?`, first.JobID).Scan(&sourceEventID); err != nil {
+		t.Fatal(err)
+	}
+	if sourceEventID.Valid {
+		t.Fatalf("reconciled source_event_id = %d, want NULL", sourceEventID.Int64)
+	}
+
+	accepted, err := storage.AcceptEvent(ctx, readyEvent("later-webhook"))
+	if err != nil {
+		t.Fatalf("AcceptEvent() error = %v", err)
+	}
+	if accepted.JobID != first.JobID || accepted.Outcome != OutcomeDuplicateReview {
+		t.Fatalf("AcceptEvent() = %+v", accepted)
+	}
+	assertCount(t, storage.db, "webhook_events", 1)
+	assertCount(t, storage.db, "review_jobs", 1)
+}
+
 func TestAcceptEventCommitFailureRollsBack(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
@@ -181,7 +220,7 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storage.db.Exec(`PRAGMA user_version = 3`); err != nil {
+	if _, err := storage.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	storage.Close()
@@ -407,6 +446,91 @@ PRAGMA user_version = 1;`)
 	}
 	assertCount(t, storage.db, "review_results", 0)
 	assertCount(t, storage.db, "publications", 0)
+}
+
+func TestOpenMigratesVersionTwoWithoutLosingWorkflowState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE webhook_events (
+    id INTEGER PRIMARY KEY,
+    delivery_id TEXT NOT NULL UNIQUE,
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL,
+    project_path TEXT NOT NULL,
+    merge_request_iid INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    payload_json BLOB NOT NULL,
+    received_at TEXT NOT NULL
+);
+CREATE TABLE review_jobs (
+    id INTEGER PRIMARY KEY,
+    source_event_id INTEGER NOT NULL REFERENCES webhook_events(id),
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL,
+    merge_request_iid INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    next_attempt_at TEXT,
+    last_error_category TEXT,
+    last_error_message TEXT,
+    updated_at TEXT,
+    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
+);
+CREATE INDEX review_jobs_due_idx ON review_jobs (state, next_attempt_at, lease_expires_at);
+CREATE TABLE review_results (
+    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
+    result_json BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE publications (
+    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
+    marker TEXT NOT NULL UNIQUE,
+    gitlab_note_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+INSERT INTO webhook_events VALUES (5, 'delivery', 'http://gitlab.internal', 42, 'group/project', 7, 'head', 'open', 'queued', '{}', 'created');
+INSERT INTO review_jobs VALUES (9, 5, 'http://gitlab.internal', 42, 7, 'head', 'completed', 'created', NULL, NULL, 2, 'started', 'next', NULL, NULL, 'updated');
+INSERT INTO review_results VALUES (9, '{"summary":"ok","findings":[]}', 'result-created');
+INSERT INTO publications VALUES (9, 'marker', 11, 'publication-created');
+PRAGMA user_version = 2;`)
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open() migration error = %v", err)
+	}
+	defer storage.Close()
+	var sourceEventID sql.NullInt64
+	var state string
+	if err := storage.db.QueryRow(`SELECT source_event_id, state FROM review_jobs WHERE id = 9`).Scan(&sourceEventID, &state); err != nil {
+		t.Fatal(err)
+	}
+	if !sourceEventID.Valid || sourceEventID.Int64 != 5 || state != JobCompleted {
+		t.Fatalf("migrated job source=%+v state=%q", sourceEventID, state)
+	}
+	assertCount(t, storage.db, "review_results", 1)
+	assertCount(t, storage.db, "publications", 1)
+	if _, err := storage.CreateReconciledJob(context.Background(), ReconciledReview{
+		GitLabInstance: "http://gitlab.internal", ProjectID: 42, MergeRequestIID: 8, HeadSHA: "new-head",
+	}); err != nil {
+		t.Fatalf("CreateReconciledJob() after migration error = %v", err)
+	}
 }
 
 func TestOpenFailsForUnavailablePath(t *testing.T) {

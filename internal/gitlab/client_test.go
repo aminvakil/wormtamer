@@ -139,6 +139,101 @@ func TestFindNoteSearchesNewestNotesFirst(t *testing.T) {
 	}
 }
 
+func TestResolveProjectAndListOpenMergeRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/projects/group/project":
+			if !strings.Contains(r.URL.EscapedPath(), "group%2Fproject") {
+				t.Errorf("escaped project path = %q", r.URL.EscapedPath())
+			}
+			writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+		case "/api/v4/projects/42/merge_requests":
+			if r.URL.Query().Get("state") != "opened" || r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("merge request query = %q", r.URL.RawQuery)
+			}
+			page := r.URL.Query().Get("page")
+			if page == "1" {
+				w.Header().Set("X-Next-Page", "2")
+				writeJSON(t, w, []reconciliationMergeRequestResponse{
+					{IID: 7, ProjectID: 42, State: "opened", SHA: strings.ToUpper(testHead)},
+					{IID: 8, ProjectID: 42, State: "opened", SHA: testHead, Draft: true},
+				})
+				return
+			}
+			writeJSON(t, w, []reconciliationMergeRequestResponse{
+				{IID: 9, ProjectID: 42, State: "opened", SHA: testHead, WorkInProgress: true},
+			})
+		default:
+			t.Fatal("unexpected request: " + r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+
+	projectID, err := client.ResolveProject(context.Background(), "group/project")
+	if err != nil || projectID != 42 {
+		t.Fatalf("ResolveProject() = %d, %v", projectID, err)
+	}
+	first, next, err := client.ListOpenMergeRequests(context.Background(), projectID, 1)
+	if err != nil || next != 2 || len(first) != 2 {
+		t.Fatalf("ListOpenMergeRequests(first) = %+v, %d, %v", first, next, err)
+	}
+	if first[0].HeadSHA != testHead || first[1].Draft != true {
+		t.Fatalf("first page = %+v", first)
+	}
+	second, next, err := client.ListOpenMergeRequests(context.Background(), projectID, next)
+	if err != nil || next != 0 || len(second) != 1 || !second[0].WorkInProgress {
+		t.Fatalf("ListOpenMergeRequests(second) = %+v, %d, %v", second, next, err)
+	}
+}
+
+func TestListOpenMergeRequestsRejectsMalformedEntry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []reconciliationMergeRequestResponse{{
+			IID: 7, ProjectID: 99, State: "opened", SHA: testHead,
+		}})
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+	_, _, err := client.ListOpenMergeRequests(context.Background(), 42, 1)
+	assertFailure(t, err, "malformed_gitlab_response", false, false)
+}
+
+func TestRetryAfterGateAppliesAcrossClientOperations(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+	start := time.Unix(1_700_000_000, 0)
+	var nowNanos atomic.Int64
+	nowNanos.Store(start.UnixNano())
+	client.now = func() time.Time { return time.Unix(0, nowNanos.Load()) }
+	var waited atomic.Int64
+	client.after = func(delay time.Duration) <-chan time.Time {
+		waited.Store(int64(delay))
+		nowNanos.Store(start.Add(delay).UnixNano())
+		ready := make(chan time.Time, 1)
+		ready <- start.Add(delay)
+		return ready
+	}
+
+	err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+	assertFailure(t, err, "gitlab_rate_limited", true, false)
+	projectID, err := client.ResolveProject(context.Background(), "group/project")
+	if err != nil || projectID != 42 {
+		t.Fatalf("ResolveProject() = %d, %v", projectID, err)
+	}
+	if time.Duration(waited.Load()) != missingRateLimitDelay {
+		t.Fatalf("shared gate delay = %v, want %v", time.Duration(waited.Load()), missingRateLimitDelay)
+	}
+}
+
 func TestAuthorizationAndMergeRequestState(t *testing.T) {
 	tests := []struct {
 		name        string

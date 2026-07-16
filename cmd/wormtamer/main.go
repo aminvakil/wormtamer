@@ -17,6 +17,7 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/config"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/reconcile"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 	"github.com/aminvakil/wormtamer/internal/webhook"
@@ -71,6 +72,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	reconciler := reconcile.New(storage, gitLabClient, cfg.GitLab.BaseURL, cfg.AuthorizedRepositories, logger)
 
 	handler := webhook.New(webhook.Config{
 		GitLabInstance:         cfg.GitLab.BaseURL,
@@ -98,16 +100,21 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	go func() {
 		serveErrors <- server.Serve(listener)
 	}()
-	workerCtx, stopWorker := context.WithCancel(context.Background())
-	defer stopWorker()
+	componentCtx, stopComponents := context.WithCancel(context.Background())
+	defer stopComponents()
 	workerErrors := make(chan error, 1)
 	go func() {
-		workerErrors <- reviewWorker.Run(workerCtx)
+		workerErrors <- reviewWorker.Run(componentCtx)
+	}()
+	reconcilerErrors := make(chan error, 1)
+	go func() {
+		reconcilerErrors <- reconciler.Run(componentCtx)
 	}()
 
 	var processError error
 	serveFinished := false
 	workerFinished := false
+	reconcilerFinished := false
 	select {
 	case err := <-serveErrors:
 		serveFinished = true
@@ -121,11 +128,18 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		} else {
 			processError = errors.New("review worker stopped unexpectedly")
 		}
+	case err := <-reconcilerErrors:
+		reconcilerFinished = true
+		if err != nil {
+			processError = fmt.Errorf("run reconciler: %w", err)
+		} else {
+			processError = errors.New("reconciler stopped unexpectedly")
+		}
 	case <-ctx.Done():
 	}
 
 	logger.Info("HTTP server shutting down")
-	stopWorker()
+	stopComponents()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -142,6 +156,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if !workerFinished {
 		if err := <-workerErrors; err != nil && processError == nil {
 			processError = fmt.Errorf("stop review worker: %w", err)
+		}
+	}
+	if !reconcilerFinished {
+		if err := <-reconcilerErrors; err != nil && processError == nil {
+			processError = fmt.Errorf("stop reconciler: %w", err)
 		}
 	}
 	logger.Info("HTTP server stopped")
