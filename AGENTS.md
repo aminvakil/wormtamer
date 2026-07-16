@@ -17,7 +17,18 @@ All access must go through constrained tools that enforce authorization and secu
 
 ## Current Phase
 
-The project is in its initial design phase. Do not introduce frameworks, services, databases, or deployment dependencies until the relevant decision is explicit and documented.
+The project is moving from initial design into implementation planning. Go and the Gemini Developer API are selected, but no Go module or executable exists yet. Do not introduce additional frameworks, services, databases, or deployment dependencies until the relevant decision is explicit and documented.
+
+## Selected Stack
+
+- Implement the application in Go, using the standard library HTTP server unless a concrete requirement proves it insufficient.
+- Run webhook ingress, the SQLite-backed review worker, and reconciliation in one process and one replica.
+- Use only the Gemini Developer API through its official Go SDK, `google.golang.org/genai`.
+- Keep the Gemini function-calling loop small and explicit. Dispatch every tool call through trusted application brokers; do not use a general agent framework or automatic function execution.
+- Use SQLite for durable application state and initial runtime-memory retrieval, including FTS5 where text search is needed.
+- Package the application as one OCI image with persistent SQLite storage.
+
+See [Architecture](docs/agents/architecture.md) and [Security](docs/agents/security.md) for boundaries and rationale.
 
 ## Architectural Invariants
 
@@ -56,7 +67,7 @@ Read the relevant documents before changing the corresponding subsystem.
 
 ## Commands and Verification
 
-No language, build system, or test framework has been selected yet. Once one is chosen, document the canonical commands here and use those commands rather than invoking underlying tools directly.
+Go is selected, but the module, build commands, and test commands have not been initialized. Document the canonical commands here when the first implementation task establishes them, then use those commands rather than invoking underlying tools directly.
 
 Until then, verify documentation changes by checking links, file names, and `git diff`.
 

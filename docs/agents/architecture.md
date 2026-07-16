@@ -26,6 +26,14 @@ All installations use the same application artifact but have independent configu
 
 This is different from running multiple replicas of one installation. A team installation initially runs as one replica because local SQLite and filesystem state are not a distributed coordination mechanism.
 
+## Implementation Stack
+
+The application is implemented in Go and packaged as one OCI image. One process hosts the HTTP ingress, SQLite-backed worker loop, and periodic reconciler. The standard library HTTP server is the default; a web framework requires a demonstrated need.
+
+SQLite is accessed with ordinary SQL and explicit transactions. The exact Go SQLite driver and migration mechanism remain implementation decisions that must be validated against the durability requirements.
+
+The only model backend is the Gemini Developer API, accessed through the official `google.golang.org/genai` SDK. The application owns a small manual function-calling loop and does not use a general agent framework or a provider-neutral compatibility layer. A narrow internal client interface is permitted as a test seam, not as a speculative multi-provider abstraction.
+
 ## Component Boundaries
 
 ```text
@@ -55,7 +63,7 @@ Claims queued jobs with a lease, runs reviews, renews active leases, retries rec
 
 ### Review agent
 
-Receives the merge request diff and metadata plus a set of constrained tools. The model decides whether more context is needed and which tools to call. It must produce structured findings with evidence rather than directly calling GitLab or accessing credentials.
+Receives the merge request diff and metadata plus a set of constrained tools. Gemini decides whether more context is needed and which tools to call. Trusted application code manually dispatches each requested function call. The model must produce structured findings with evidence rather than directly calling GitLab, executing functions automatically, or accessing credentials.
 
 ### Tool broker
 
@@ -64,6 +72,8 @@ Enforces repository allowlists, credential boundaries, network policy, resource 
 ### Repository workspace
 
 Contains a temporary checkout of the merge request repository. Other repositories are discovered and fetched lazily when requested. Repository caches are disposable and are not authoritative state.
+
+The initial implementation performs bounded read and search operations but does not execute repository-controlled code. Builds, tests, and other repository code execution require a separate sandbox decision and implementation.
 
 ### GitLab publication broker
 
@@ -98,7 +108,7 @@ Model-directed selection is intentionally non-deterministic. Authorization, time
 
 SQLite is the only application database. It stores durable webhook, job, publication, and merge request progress state. See [Reliability](reliability.md).
 
-Runtime review memory is persistent per installation but is conceptually separate from event state. Its on-disk representation remains undecided. It must be accessible only through memory tools and must preserve scope, evidence, confidence, approval status, and timestamps.
+Runtime review memory is persistent per installation but is conceptually separate from event state. It is stored in dedicated SQLite tables and initially retrieved with scope filters and FTS5 text search. It must be accessible only through memory tools and must preserve scope, evidence, confidence, approval status, and timestamps. Embeddings or a separate retrieval system require evidence that this approach is insufficient.
 
 Repository checkouts and public-source caches are disposable. GitLab remains the source of truth for merge requests, discussions, reactions, and published comments.
 
@@ -126,14 +136,16 @@ Until requirements prove otherwise, do not add:
 - Eager cloning or indexing of every accessible repository
 - A distributed worker fleet
 - Model training or fine-tuning
+- A general agent framework or model-provider abstraction
+- A separate queue service
+- Repository-controlled code execution in the initial implementation
 
 ## Undecided Details
 
 The following choices should be made only when implementation begins and requirements are concrete:
 
-- Programming language and web framework
-- Agent SDK or direct model API
-- Sandbox implementation
-- Runtime memory file format and retrieval strategy
+- Go SQLite driver and migration mechanism
+- Specific Gemini model and generation settings
+- Sandbox implementation if repository code execution is later approved
 - GitLab webhook installation mechanism for different GitLab editions
 - Public web search provider

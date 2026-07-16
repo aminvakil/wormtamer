@@ -52,6 +52,22 @@ GitLab and model credentials belong to the trusted application layer.
 - Separate read and write capabilities in tool design even if GitLab ultimately uses one credential.
 - Redact known secret values from errors and logs.
 
+## Gemini Boundary
+
+The Gemini Developer API key belongs only to the trusted application process. Load it from a deployment secret and never place it in prompts, tool results, logs, command arguments, repository workspaces, or sandbox environment variables.
+
+Use the official Go SDK from the trusted application layer, but keep function execution under application control:
+
+1. Send Gemini declarations for the tools available to the review.
+2. Treat every returned function name and argument as untrusted input.
+3. Validate and authorize the request through the relevant broker.
+4. Execute it with deterministic limits.
+5. Return only bounded, attributed results to Gemini.
+
+Do not enable SDK automatic function execution, Gemini built-in code execution, URL retrieval, or search grounding in the initial implementation. Those capabilities would bypass or complicate the application's authorization, network, attribution, and data-disclosure controls. Public research must use the constrained public-source tools.
+
+Gemini response schemas reduce malformed output but are not a trust boundary. Trusted code must still validate final findings before publication.
+
 ## Tool Enforcement
 
 Every model-invocable tool must have:
@@ -70,7 +86,7 @@ The model submits structured findings; trusted application code validates and pu
 
 ## Repository Sandboxing
 
-Assume checked-out repositories are hostile.
+Assume checked-out repositories are hostile. The initial implementation must provide bounded read and search operations without executing repository-controlled code. If execution is later required, approve and document a separate sandbox design before enabling it.
 
 - Prevent path traversal outside the workspace.
 - Do not execute repository hooks.
