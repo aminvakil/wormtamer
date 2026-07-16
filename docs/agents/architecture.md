@@ -19,7 +19,7 @@ A narrow Gemini client interface may be used as a test seam, not as a provider a
 
 ## Deployment Configuration
 
-The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Relative data paths resolve from the configuration file's directory. The initial configuration defines the listen address, SQLite path, GitLab base URL, webhook secret, and authorized repositories. Credentials that are not used by an implemented capability are not required in advance.
+The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The initial configuration defines the listen address, SQLite path, HTTP or HTTPS GitLab base URL, webhook secret, and authorized repositories; repository entries must be well-formed and unique. The validated GitLab URL is canonicalized before it participates in durable identity. Credentials that are not used by an implemented capability are not required in advance.
 
 Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and defines the internal repositories that may later be disclosed to and inspected by the model. Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
 

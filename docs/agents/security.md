@@ -79,4 +79,4 @@ Before publishing:
 - Exclude credentials, hidden prompts, private excerpts, and internal tool traces.
 - Include evidence and use non-sensitive stable idempotency markers.
 
-Log operational identifiers and outcomes rather than repository content. Never log credentials, webhook secrets, authorization headers, or unnecessary private source. Diagnostic content logging must be explicit and opt-in.
+Log operational identifiers and outcomes rather than repository content. Webhook logs use bounded delivery, project, merge request, revision, job, and outcome fields when available, plus a sanitized rejection or failure reason. Never log webhook bodies, request headers, credentials, webhook secrets, authorization headers, or unnecessary private source. Diagnostic content logging must be explicit and opt-in.

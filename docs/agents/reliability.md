@@ -6,7 +6,7 @@ The system provides at-least-once review execution with idempotent external effe
 
 ## Webhook Ingestion
 
-Authenticate and bound the request before parsing it, then authorize its exact project namespace against the installation configuration. Handle an authenticated, authorized merge request webhook in this order:
+`POST /webhooks/gitlab` authenticates the request before reading it, admits at most four concurrent webhook requests, limits each admitted body to 1 MiB before parsing, and then authorizes its exact project namespace against the installation configuration. Handle an authenticated, authorized merge request webhook in this order:
 
 1. Begin a SQLite transaction.
 2. Insert the event using a stable delivery identifier.
@@ -14,11 +14,11 @@ Authenticate and bound the request before parsing it, then authorize its exact p
 4. Commit.
 5. Return success.
 
-Never acknowledge an accepted merge request event before commit. Duplicate delivery must resolve to the same event or job and return success without creating another job. If GitLab supplies no suitable event identifier, derive one deterministically from stable delivery data.
+Never acknowledge an accepted merge request event before commit. Duplicate delivery must resolve to the same event or job and return success without creating another job. Use `X-Gitlab-Event-UUID` as the delivery identifier when available; otherwise derive a deterministic SHA-256 identifier from the GitLab instance and raw bounded payload.
 
 Initially, only an `open` action that is not marked draft or work-in-progress creates a review job. An MR opened as draft remains unreviewed even if it later becomes ready; that transition may be added when required. Authenticated and authorized draft openings and other merge request actions are persisted as ignored events without jobs.
 
-Reject a missing or invalid webhook secret with `401`, an unlisted project namespace with `403`, malformed input with `400`, and an oversized request with `413`. A persistence failure returns a server error rather than acknowledging the event. Rejections log bounded operational identifiers and reasons without logging secrets or payload bodies.
+Reject a missing or invalid webhook secret with `401`, an unlisted project namespace with `403`, malformed input with `400`, an oversized request with `413`, and authenticated overload with retryable `503` and `Retry-After` responses. A persistence failure returns a server error rather than acknowledging the event. Rejections log bounded operational identifiers and reasons without logging secrets or payload bodies. Graceful shutdown stops accepting new requests and gives active ingress transactions a bounded opportunity to finish.
 
 ## Review Identity
 
@@ -81,8 +81,10 @@ SQLite state must represent:
 - Publication markers and GitLab object IDs
 - Last-seen and successfully reviewed merge request revisions
 
-Event insertion and job creation occur in one transaction.
+Event insertion and job creation occur in one transaction. Webhook events retain the bounded raw JSON payload and delivery, project, merge request, revision, action, and outcome metadata needed for later inspection. Events and jobs are separate records with database-enforced delivery and review uniqueness.
 
-Keep the database and WAL on persistent storage with reliable file locking. Enable foreign keys, configure bounded lock waiting, and choose durability settings and backup procedures appropriate to the deployment platform. Run one replica per installation.
+Keep the database and WAL on persistent storage with reliable file locking. Enable foreign keys, configure bounded lock waiting, and choose durability settings and backup procedures appropriate to the deployment platform. The application owns and checks the SQLite schema version at startup. Run one replica per installation.
+
+There is no webhook-event or payload retention policy yet; ignored events and stored payloads accumulate until operational requirements establish one.
 
 Repository caches are disposable. Clone, download, and model operations require explicit time, size, and concurrency limits and must never be the only record that review work exists.

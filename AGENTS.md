@@ -43,4 +43,6 @@ Read only the documents relevant to the subsystem being changed.
 
 ## Commands
 
-Add canonical build and test commands here when the Go module is initialized.
+- Build: `make build`
+- Test: `make test`
+- Race test: `make test-race`
