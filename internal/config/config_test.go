@@ -109,7 +109,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "invalid URL scheme", replace: `"http://gitlab.internal"`, with: `"ftp://gitlab.internal"`, want: "HTTP or HTTPS"},
 		{name: "URL credentials", replace: `"http://gitlab.internal"`, with: `"http://user:pass@gitlab.internal"`, want: "must not contain credentials"},
 		{name: "empty URL query", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal?"`, want: "must not contain credentials"},
-		{name: "multi-colon URL authority", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal:80:80"`, want: "invalid authority"},
+		{name: "multi-colon URL authority", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal:80:80"`, want: "gitlab.base_url is invalid"},
 		{name: "empty URL port", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal:"`, want: "invalid authority"},
 		{name: "invalid IP literal", replace: `"http://gitlab.internal"`, with: `"http://[not-an-ip]"`, want: "gitlab.base_url is invalid"},
 		{name: "empty secret", replace: `"secret"`, with: `""`, want: "webhook_secret is required"},
