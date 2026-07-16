@@ -10,12 +10,20 @@ One installation runs as one process and replica because SQLite and local reposi
 
 - Go with the standard library HTTP server unless a concrete requirement proves it insufficient
 - One OCI image with persistent SQLite storage
-- SQLite as the only application database
+- SQLite through `github.com/mattn/go-sqlite3`, built with CGO and FTS5, as the only application database
 - The Gemini Developer API through `google.golang.org/genai` as the only model backend
 - A small, explicit function-calling loop; no general agent framework or automatic tool execution
 - Scoped SQLite FTS5 search for initial runtime-memory retrieval
 
-A narrow Gemini client interface may be used as a test seam, not as a provider abstraction. The SQLite driver, migration mechanism, Gemini model, and generation settings are deferred until their implementation tasks establish requirements.
+A narrow Gemini client interface may be used as a test seam, not as a provider abstraction. The migration mechanism, Gemini model, and generation settings are deferred until their implementation tasks establish requirements.
+
+## Deployment Configuration
+
+The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Relative data paths resolve from the configuration file's directory. The initial configuration defines the listen address, SQLite path, GitLab base URL, webhook secret, and authorized repositories. Credentials that are not used by an implemented capability are not required in advance.
+
+Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and defines the internal repositories that may later be disclosed to and inspected by the model. Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
+
+Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. Operational job visibility is through bounded logs rather than a status API.
 
 ## Components
 

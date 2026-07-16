@@ -8,9 +8,9 @@ Each team installation has independent credentials, configuration, allowlists, s
 
 ## Authorization
 
-Repository access requires both GitLab permission and an installation allowlist entry. The model cannot modify either condition.
+Repository access requires both GitLab permission and an installation allowlist entry. Entries are exact GitLab namespace paths. The same list filters webhook projects and bounds the repositories that may be disclosed to or inspected by the model. Inclusion authorizes access but does not make repository content trusted, and the model cannot modify either authorization condition.
 
-Use the least-privileged GitLab credential that supports configured repositories and comment operations. Grant shared repositories explicitly; never use administrator access for convenient discovery.
+Use the least-privileged GitLab credential known to support configured repositories and comment operations. Initially, the application assumes a configured personal access token has sufficient permissions and reports sanitized authorization failures rather than discovering or validating token scopes. Determining the minimum usable scopes is deferred until the required GitLab operations have been exercised. Administrator access is not an application requirement. Grant shared repositories explicitly; never use administrator access for convenient discovery.
 
 A bot may see content unavailable to a merge request participant. Publish private cross-repository information only when the installation's sharing policy permits it. Where audiences differ, enforce the intersection of bot access and requester visibility.
 
@@ -18,11 +18,15 @@ A bot may see content unavailable to a merge request participant. Publish privat
 
 Credentials belong only to trusted application code. Never place them in prompts, tool results, logs, command arguments, repository workspaces, shell history, or sandbox environments.
 
-GitLab calls go through a trusted broker outside repository workspaces. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
+Credentials are loaded as plaintext from the explicit deployment configuration file when an implemented capability needs them. The real configuration file must remain outside version control. Warn when its filesystem permissions allow group or other users to read it, but do not treat permissions as portable proof of secrecy. Fail startup when a credential required by an enabled capability is absent. Do not require a personal access token before the application makes GitLab API calls.
 
-Load the Gemini API key from a deployment secret. The application may send tool declarations to Gemini, but it must validate, authorize, limit, and dispatch every returned function request itself.
+Authenticate GitLab webhooks with the configured webhook secret before accepting their contents. GitLab calls go through a trusted broker outside repository workspaces. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
+
+Load the Gemini API key from the deployment configuration when model review is implemented. The application may send tool declarations to Gemini, but it must validate, authorize, limit, and dispatch every returned function request itself.
 
 Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Response schemas improve structure but do not replace local validation.
+
+Plain HTTP is permitted for local self-hosted deployments, including communication with GitLab. It provides no transport confidentiality or server authentication; the operator is responsible for keeping that traffic on an appropriate local network.
 
 ## Tool Requirements
 

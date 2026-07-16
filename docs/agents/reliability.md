@@ -6,15 +6,19 @@ The system provides at-least-once review execution with idempotent external effe
 
 ## Webhook Ingestion
 
-Handle a valid webhook in this order:
+Authenticate and bound the request before parsing it, then authorize its exact project namespace against the installation configuration. Handle an authenticated, authorized merge request webhook in this order:
 
 1. Begin a SQLite transaction.
 2. Insert the event using a stable delivery identifier.
-3. Create or confirm its review job.
+3. Create or confirm its review job when the event is eligible, or record why it was ignored.
 4. Commit.
 5. Return success.
 
-Never acknowledge before commit. Duplicate delivery must resolve to the same event or job. If GitLab supplies no suitable event identifier, derive one deterministically from stable delivery data.
+Never acknowledge an accepted merge request event before commit. Duplicate delivery must resolve to the same event or job and return success without creating another job. If GitLab supplies no suitable event identifier, derive one deterministically from stable delivery data.
+
+Initially, only an `open` action that is not marked draft or work-in-progress creates a review job. An MR opened as draft remains unreviewed even if it later becomes ready; that transition may be added when required. Authenticated and authorized draft openings and other merge request actions are persisted as ignored events without jobs.
+
+Reject a missing or invalid webhook secret with `401`, an unlisted project namespace with `403`, malformed input with `400`, and an oversized request with `413`. A persistence failure returns a server error rather than acknowledging the event. Rejections log bounded operational identifiers and reasons without logging secrets or payload bodies.
 
 ## Review Identity
 
@@ -24,7 +28,7 @@ Identify work by at least:
 GitLab instance + project ID + merge request IID + head SHA
 ```
 
-Deduplicate events for the same head SHA. Before publication, confirm that the reviewed SHA remains current; obsolete findings must not be presented as current.
+The numeric project ID from the webhook remains the durable identity even though configuration authorizes repositories by namespace path. Deduplicate events for the same head SHA. Before publication, confirm that the reviewed SHA remains current; obsolete findings must not be presented as current.
 
 ## Jobs and Retries
 
