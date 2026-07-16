@@ -12,14 +12,31 @@ One installation runs as one process and replica because SQLite and local reposi
 - One OCI image with persistent SQLite storage
 - SQLite through `github.com/mattn/go-sqlite3`, built with CGO and FTS5, as the only application database
 - The Gemini Developer API through `google.golang.org/genai` as the only model backend
-- A small, explicit function-calling loop; no general agent framework or automatic tool execution
+- One structured Gemini generation request today; a small explicit function-calling loop when model tools are introduced, with no general agent framework or automatic tool execution
 - Scoped SQLite FTS5 search for initial runtime-memory retrieval
 
-A narrow Gemini client interface may be used as a test seam, not as a provider abstraction. The migration mechanism, Gemini model, and generation settings are deferred until their implementation tasks establish requirements.
+A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value; generation settings remain application-owned rather than deployment-configurable.
 
 ## Deployment Configuration
 
-The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The initial configuration defines the listen address, SQLite path, HTTP or HTTPS GitLab base URL, webhook secret, and authorized repositories; repository entries must be well-formed and unique. The validated GitLab URL is canonicalized before it participates in durable identity. Credentials that are not used by an implemented capability are not required in advance.
+The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, Gemini API key and model, and authorized repositories; required values must be non-empty and repository entries must be well-formed and unique. The validated GitLab URL is canonicalized before it participates in durable identity. The review worker is always enabled, so its credentials are required at startup without making external validation calls.
+
+```json
+{
+  "listen_address": "127.0.0.1:8080",
+  "database_path": "data/wormtamer.db",
+  "gitlab": {
+    "base_url": "https://gitlab.example",
+    "webhook_secret": "replace-me",
+    "personal_access_token": "replace-me"
+  },
+  "gemini": {
+    "api_key": "replace-me",
+    "model": "replace-me"
+  },
+  "authorized_repositories": ["group/project"]
+}
+```
 
 Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and defines the internal repositories that may later be disclosed to and inspected by the model. Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
 
@@ -29,7 +46,7 @@ Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is a
 
 ```text
 GitLab -> webhook ingress -> SQLite jobs -> review worker -> review agent
-                                      |                    -> tool brokers
+                                      |                    -> future tool brokers
 Periodic reconciler ------------------+                    -> publication broker -> GitLab
 ```
 
@@ -43,11 +60,11 @@ Claims jobs with leases, retries recoverable failures, and completes work only a
 
 ### Review agent
 
-Receives merge request context and constrained tools. Gemini chooses whether to request more context and returns structured findings with evidence. Trusted application code validates and dispatches every tool request.
+The current worker sends bounded merge request metadata and changed-file diffs in one structured Gemini request. Gemini returns a summary and findings whose paths must match fetched changed files; application code validates the result before persistence. Model-invocable tools and additional context retrieval are deferred.
 
 ### Tool brokers
 
-Enforce repository allowlists, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy.
+Future model-invocable tool brokers will enforce repository allowlists, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy.
 
 Tools may provide bounded, attributed access to:
 
@@ -61,19 +78,19 @@ Tools may provide bounded, attributed access to:
 
 Holds a temporary checkout of the current repository. Other repositories are fetched lazily. Checkouts and caches are disposable and never authoritative state.
 
-The initial implementation permits bounded reading and searching but does not execute repository-controlled code.
+Repository workspaces are not implemented in the current summary-review milestone. When introduced, they may permit bounded reading and searching but must not execute repository-controlled code without an approved sandbox design.
 
 ### Publication broker
 
-Validates findings and posts or updates GitLab comments using stable identifiers. It owns GitLab write access and remains outside repository workspaces.
+Validates findings and posts one summary note per review identity using a stable hidden marker. It reconciles an existing marked note before posting, owns GitLab write access, and remains outside repository workspaces.
 
 ### Reconciler
 
-Compares recently updated merge requests with local state and enqueues revisions missed because a webhook did not arrive.
+A future reconciler will compare recently updated merge requests with local state and enqueue revisions missed because a webhook did not arrive. Reconciliation is not implemented in the current worker milestone.
 
 ## Context and State
 
-The initial model request contains the diff, relevant metadata, tool descriptions, and resource limits. Gemini may choose additional context, but authorization and limits remain deterministic.
+The current model request contains bounded changed-file diffs, relevant metadata, the structured response schema, and application-owned limits. It declares no tools and cannot request additional context. When tools are introduced, authorization and limits remain deterministic regardless of model intent.
 
 SQLite stores webhook, job, publication, merge request progress, and runtime-memory records. GitLab remains the source of truth for merge requests and published discussions.
 

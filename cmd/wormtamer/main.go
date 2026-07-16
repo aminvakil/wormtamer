@@ -16,8 +16,11 @@ import (
 	"time"
 
 	"github.com/aminvakil/wormtamer/internal/config"
+	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 	"github.com/aminvakil/wormtamer/internal/webhook"
+	"github.com/aminvakil/wormtamer/internal/worker"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -52,6 +55,23 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	defer storage.Close()
 
+	gitLabClient, err := gitlab.New(cfg.GitLab.BaseURL, cfg.GitLab.PersonalAccessToken, cfg.AuthorizedRepositories, nil)
+	if err != nil {
+		return err
+	}
+	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, []string{
+		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
+	})
+	if err != nil {
+		return err
+	}
+	reviewWorker, err := worker.New(storage, gitLabClient, geminiReviewer, logger, []string{
+		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
+	})
+	if err != nil {
+		return err
+	}
+
 	handler := webhook.New(webhook.Config{
 		GitLabInstance:         cfg.GitLab.BaseURL,
 		WebhookSecret:          cfg.GitLab.WebhookSecret,
@@ -78,28 +98,54 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	go func() {
 		serveErrors <- server.Serve(listener)
 	}()
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	defer stopWorker()
+	workerErrors := make(chan error, 1)
+	go func() {
+		workerErrors <- reviewWorker.Run(workerCtx)
+	}()
 
+	var processError error
+	serveFinished := false
+	workerFinished := false
 	select {
 	case err := <-serveErrors:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		serveFinished = true
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			processError = fmt.Errorf("serve HTTP traffic: %w", err)
 		}
-		return fmt.Errorf("serve HTTP traffic: %w", err)
+	case err := <-workerErrors:
+		workerFinished = true
+		if err != nil {
+			processError = fmt.Errorf("run review worker: %w", err)
+		} else {
+			processError = errors.New("review worker stopped unexpectedly")
+		}
 	case <-ctx.Done():
-		logger.Info("HTTP server shutting down")
 	}
 
+	logger.Info("HTTP server shutting down")
+	stopWorker()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		_ = server.Close()
-		return fmt.Errorf("graceful HTTP shutdown: %w", err)
+		if processError == nil {
+			processError = fmt.Errorf("graceful HTTP shutdown: %w", err)
+		}
 	}
-	if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve HTTP traffic during shutdown: %w", err)
+	if !serveFinished {
+		if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) && processError == nil {
+			processError = fmt.Errorf("serve HTTP traffic during shutdown: %w", err)
+		}
+	}
+	if !workerFinished {
+		if err := <-workerErrors; err != nil && processError == nil {
+			processError = fmt.Errorf("stop review worker: %w", err)
+		}
 	}
 	logger.Info("HTTP server stopped")
-	return nil
+	return processError
 }
 
 func parseConfigPath(args []string) (string, error) {

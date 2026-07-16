@@ -1,0 +1,412 @@
+package gitlab
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/aminvakil/wormtamer/internal/failure"
+)
+
+const testHead = "0123456789abcdef0123456789abcdef01234567"
+
+func TestLoadReviewAndPublication(t *testing.T) {
+	const token = "private-token"
+	marker := "<!-- wormtamer:review=test -->"
+	posted := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PRIVATE-TOKEN") != token {
+			t.Errorf("PRIVATE-TOKEN = %q", r.Header.Get("PRIVATE-TOKEN"))
+		}
+		switch r.URL.Path {
+		case "/gitlab/api/v4/user":
+			writeJSON(t, w, userResponse{ID: 77})
+		case "/gitlab/api/v4/projects/42":
+			writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+		case "/gitlab/api/v4/projects/42/merge_requests/7":
+			writeMergeRequest(t, w, "opened", testHead)
+		case "/gitlab/api/v4/projects/42/merge_requests/7/diffs":
+			if r.URL.Query().Get("page") != "1" || r.URL.Query().Get("per_page") != "20" {
+				t.Errorf("diff query = %q", r.URL.RawQuery)
+			}
+			writeJSON(t, w, []diffResponse{{OldPath: "old.go", NewPath: "new.go", Diff: "@@ -1 +1 @@\n-old\n+new"}})
+		case "/gitlab/api/v4/projects/42/merge_requests/7/notes":
+			if r.Method == http.MethodGet {
+				if r.URL.Query().Get("order_by") != "created_at" || r.URL.Query().Get("sort") != "desc" {
+					t.Errorf("note ordering query = %q", r.URL.RawQuery)
+				}
+				writeJSON(t, w, []noteResponse{testNote(12, "review\n"+marker, 77)})
+				return
+			}
+			var request struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			posted = request.Body
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(t, w, testNote(13, request.Body, 77))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL+"/gitlab", token, server.Client())
+	identity := testIdentity(server.URL + "/gitlab")
+	snapshot, err := client.LoadReview(context.Background(), identity)
+	if err != nil {
+		t.Fatalf("LoadReview() error = %v", err)
+	}
+	if snapshot.Title != "Review title" || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if err := client.CheckCurrent(context.Background(), identity); err != nil {
+		t.Fatalf("CheckCurrent() error = %v", err)
+	}
+	noteID, found, err := client.FindNote(context.Background(), identity, marker)
+	if err != nil || !found || noteID != 12 {
+		t.Fatalf("FindNote() = %d, %t, %v", noteID, found, err)
+	}
+	noteID, err = client.PostNote(context.Background(), identity, "summary\n"+marker)
+	if err != nil || noteID != 13 || posted != "summary\n"+marker {
+		t.Fatalf("PostNote() = %d, %v; body %q", noteID, err, posted)
+	}
+}
+
+func TestFindNoteIgnoresMarkerFromAnotherAuthor(t *testing.T) {
+	marker := "<!-- wormtamer:review=test -->"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/user":
+			writeJSON(t, w, userResponse{ID: 77})
+		case "/api/v4/projects/42/merge_requests/7/notes":
+			writeJSON(t, w, []noteResponse{
+				testNote(1, marker, 66),
+				testNote(2, "unrelated", 77),
+			})
+		default:
+			t.Fatal("unexpected request: " + r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+	noteID, found, err := client.FindNote(context.Background(), testIdentity(server.URL), marker)
+	if err != nil || found || noteID != 0 {
+		t.Fatalf("FindNote() = %d, %t, %v", noteID, found, err)
+	}
+}
+
+func TestFindNoteSearchesNewestNotesFirst(t *testing.T) {
+	marker := "<!-- wormtamer:review=newest -->"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/user":
+			writeJSON(t, w, userResponse{ID: 77})
+		case "/api/v4/projects/42/merge_requests/7/notes":
+			w.Header().Set("X-Total", "1001")
+			if r.URL.Query().Get("order_by") == "created_at" && r.URL.Query().Get("sort") == "desc" {
+				w.Header().Set("X-Next-Page", "2")
+				writeJSON(t, w, []noteResponse{testNote(1001, marker, 77)})
+				return
+			}
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			notes := make([]noteResponse, notesPerPage)
+			for index := range notes {
+				notes[index] = testNote(int64((page-1)*notesPerPage+index+1), "older note", 77)
+			}
+			w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+			writeJSON(t, w, notes)
+		default:
+			t.Fatal("unexpected request: " + r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+	noteID, found, err := client.FindNote(context.Background(), testIdentity(server.URL), marker)
+	if err != nil || !found || noteID != 1001 {
+		t.Fatalf("FindNote() = %d, %t, %v", noteID, found, err)
+	}
+}
+
+func TestAuthorizationAndMergeRequestState(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectPath string
+		state       string
+		head        string
+		category    string
+		obsolete    bool
+	}{
+		{name: "renamed project", projectPath: "group/renamed", state: "opened", head: testHead, category: "repository_unauthorized"},
+		{name: "closed", projectPath: "group/project", state: "closed", head: testHead, category: "merge_request_not_open", obsolete: true},
+		{name: "merged", projectPath: "group/project", state: "merged", head: testHead, category: "merge_request_not_open", obsolete: true},
+		{name: "locked", projectPath: "group/project", state: "locked", head: testHead, category: "merge_request_not_open", obsolete: true},
+		{name: "unknown state", projectPath: "group/project", state: "future", head: testHead, category: "unknown_merge_request_state"},
+		{name: "changed head", projectPath: "group/project", state: "opened", head: strings.Repeat("1", 40), category: "merge_request_head_changed", obsolete: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v4/projects/42":
+					writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: test.projectPath})
+				case "/api/v4/projects/42/merge_requests/7":
+					writeMergeRequest(t, w, test.state, test.head)
+				default:
+					t.Fatal("unexpected request: " + r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, "token", server.Client())
+			err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+			assertFailure(t, err, test.category, false, test.obsolete)
+		})
+	}
+}
+
+func TestRejectsRedirectWithoutForwardingToken(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		if r.Header.Get("PRIVATE-TOKEN") != "" {
+			t.Error("redirect target received token")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, "token", server.Client())
+	err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+	assertFailure(t, err, "gitlab_redirect_rejected", false, false)
+	if targetCalls.Load() != 0 {
+		t.Fatalf("redirect target calls = %d", targetCalls.Load())
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	tests := []struct {
+		name       string
+		header     string
+		category   string
+		retryable  bool
+		retryAfter time.Duration
+	}{
+		{name: "longer than local cap", header: "360", category: "gitlab_rate_limited", retryable: true, retryAfter: 6 * time.Minute},
+		{name: "malformed uses local", header: "later", category: "gitlab_rate_limited", retryable: true},
+		{name: "exceeds supported", header: "90000", category: "retry_after_exceeds_limit"},
+		{name: "numeric overflow", header: "999999999999999999999999", category: "retry_after_exceeds_limit"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", test.header)
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, "token", server.Client())
+			err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+			failureError := assertFailure(t, err, test.category, test.retryable, false)
+			if failureError.RetryAfter != test.retryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", failureError.RetryAfter, test.retryAfter)
+			}
+		})
+	}
+}
+
+func TestRequestTimeoutIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "360")
+		w.WriteHeader(http.StatusRequestTimeout)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+	err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+	failureError := assertFailure(t, err, "gitlab_request_timeout", true, false)
+	if failureError.RetryAfter != 6*time.Minute {
+		t.Fatalf("RetryAfter = %v", failureError.RetryAfter)
+	}
+}
+
+func TestResponseAndInputLimitsFailClosed(t *testing.T) {
+	t.Run("metadata response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, strings.Repeat("x", metadataResponseLimit+1))
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+		assertFailure(t, err, "gitlab_response_limit_exceeded", false, false)
+	})
+
+	t.Run("diff content", func(t *testing.T) {
+		server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, []diffResponse{{OldPath: "a", NewPath: "a", Diff: strings.Repeat("x", maxDiffContentBytes+1)}})
+		})
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+		assertFailure(t, err, "merge_request_diff_limit_exceeded", false, false)
+	})
+
+	t.Run("changed files", func(t *testing.T) {
+		server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
+			files := make([]diffResponse, maxChangedFiles+1)
+			for index := range files {
+				path := fmt.Sprintf("file-%d", index)
+				files[index] = diffResponse{OldPath: path, NewPath: path}
+			}
+			writeJSON(t, w, files)
+		})
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+		assertFailure(t, err, "merge_request_file_limit_exceeded", false, false)
+	})
+
+	t.Run("note body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("oversized note reached GitLab")
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, err := client.PostNote(context.Background(), testIdentity(server.URL), strings.Repeat("x", maxNoteBodyBytes+1))
+		assertFailure(t, err, "note_body_limit_exceeded", false, false)
+	})
+
+	client, err := New("http://gitlab.internal", "token", []string{"group/project"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.httpClient.Timeout != requestTimeout {
+		t.Fatalf("HTTP timeout = %v, want %v", client.httpClient.Timeout, requestTimeout)
+	}
+}
+
+func TestDiffAndNoteBoundsFailClosed(t *testing.T) {
+	t.Run("incomplete diff", func(t *testing.T) {
+		server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, []diffResponse{{OldPath: "a", NewPath: "a", Diff: "diff", Collapsed: true}})
+		})
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+		assertFailure(t, err, "incomplete_merge_request_diff", false, false)
+	})
+
+	t.Run("diff pages", func(t *testing.T) {
+		server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			files := make([]diffResponse, diffsPerPage)
+			for index := range files {
+				path := fmt.Sprintf("p%d-%d", page, index)
+				files[index] = diffResponse{OldPath: path, NewPath: path, Diff: "x"}
+			}
+			w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+			writeJSON(t, w, files)
+		})
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+		assertFailure(t, err, "merge_request_diff_page_limit_exceeded", false, false)
+	})
+
+	t.Run("note pages", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v4/user" {
+				writeJSON(t, w, userResponse{ID: 77})
+				return
+			}
+			notes := make([]noteResponse, notesPerPage)
+			for index := range notes {
+				notes[index] = testNote(int64(index+1), "other", 77)
+			}
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+			writeJSON(t, w, notes)
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, _, err := client.FindNote(context.Background(), testIdentity(server.URL), "marker")
+		assertFailure(t, err, "note_search_limit_exceeded", false, false)
+	})
+}
+
+func reviewServer(t *testing.T, diffs http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/projects/42":
+			writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+		case "/api/v4/projects/42/merge_requests/7":
+			writeMergeRequest(t, w, "opened", testHead)
+		case "/api/v4/projects/42/merge_requests/7/diffs":
+			diffs(w, r)
+		default:
+			t.Fatal("unexpected request: " + r.URL.Path)
+		}
+	}))
+}
+
+func newTestClient(t *testing.T, baseURL, token string, httpClient *http.Client) *Client {
+	t.Helper()
+	client, err := New(baseURL, token, []string{"group/project"}, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func testIdentity(baseURL string) Identity {
+	return Identity{GitLabInstance: baseURL, ProjectID: 42, MergeRequestIID: 7, HeadSHA: testHead}
+}
+
+func testNote(id int64, body string, authorID int64) noteResponse {
+	note := noteResponse{ID: id, Body: body}
+	note.Author.ID = authorID
+	return note
+}
+
+func writeMergeRequest(t *testing.T, w http.ResponseWriter, state, head string) {
+	t.Helper()
+	response := mergeRequestResponse{
+		ID: 8, IID: 7, ProjectID: 42, State: state, Title: "Review title",
+		Description: "Description", SourceBranch: "feature", TargetBranch: "main",
+	}
+	response.DiffRefs.HeadSHA = head
+	writeJSON(t, w, response)
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertFailure(t *testing.T, err error, category string, retryable, obsolete bool) *failure.Error {
+	t.Helper()
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) {
+		t.Fatalf("error = %v, want failure.Error", err)
+	}
+	if failureError.Category != category || failureError.Retryable != retryable || failureError.Obsolete != obsolete {
+		t.Fatalf("failure = %+v", failureError)
+	}
+	return failureError
+}

@@ -78,7 +78,12 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
   "database_path": ` + quote(databasePath) + `,
   "gitlab": {
     "base_url": "http://gitlab.internal",
-    "webhook_secret": "secret"
+    "webhook_secret": "secret",
+    "personal_access_token": "gitlab-token"
+  },
+  "gemini": {
+    "api_key": "gemini-key",
+    "model": "gemini-test"
   },
   "authorized_repositories": ["group/project"]
 }`

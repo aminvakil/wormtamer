@@ -1,0 +1,489 @@
+package gitlab
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/aminvakil/wormtamer/internal/failure"
+)
+
+const (
+	requestTimeout         = 30 * time.Second
+	metadataResponseLimit  = 256 << 10
+	diffResponseLimit      = 2 << 20
+	noteResponseLimit      = 2 << 20
+	maxDiffPages           = 5
+	diffsPerPage           = 20
+	maxChangedFiles        = 100
+	maxDiffContentBytes    = 512 << 10
+	maxNotePages           = 10
+	notesPerPage           = 100
+	maxNotes               = 1000
+	maxNoteBodyBytes       = 64 << 10
+	maxSupportedRetryAfter = 24 * time.Hour
+)
+
+type Identity struct {
+	GitLabInstance  string
+	ProjectID       int64
+	MergeRequestIID int64
+	HeadSHA         string
+}
+
+type Snapshot struct {
+	Identity     Identity
+	Title        string
+	Description  string
+	SourceBranch string
+	TargetBranch string
+	Files        []ChangedFile
+}
+
+type ChangedFile struct {
+	OldPath     string `json:"old_path"`
+	NewPath     string `json:"new_path"`
+	Diff        string `json:"diff"`
+	NewFile     bool   `json:"new_file"`
+	RenamedFile bool   `json:"renamed_file"`
+	DeletedFile bool   `json:"deleted_file"`
+}
+
+type Client struct {
+	baseURL    *url.URL
+	token      string
+	authorized map[string]struct{}
+	httpClient *http.Client
+	now        func() time.Time
+}
+
+type projectResponse struct {
+	ID                int64  `json:"id"`
+	PathWithNamespace string `json:"path_with_namespace"`
+}
+
+type mergeRequestResponse struct {
+	ID           int64  `json:"id"`
+	IID          int64  `json:"iid"`
+	ProjectID    int64  `json:"project_id"`
+	State        string `json:"state"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	SourceBranch string `json:"source_branch"`
+	TargetBranch string `json:"target_branch"`
+	DiffRefs     struct {
+		HeadSHA string `json:"head_sha"`
+	} `json:"diff_refs"`
+}
+
+type diffResponse struct {
+	OldPath     string `json:"old_path"`
+	NewPath     string `json:"new_path"`
+	Diff        string `json:"diff"`
+	NewFile     bool   `json:"new_file"`
+	RenamedFile bool   `json:"renamed_file"`
+	DeletedFile bool   `json:"deleted_file"`
+	Collapsed   bool   `json:"collapsed"`
+	TooLarge    bool   `json:"too_large"`
+}
+
+type noteResponse struct {
+	ID     int64  `json:"id"`
+	Body   string `json:"body"`
+	Author struct {
+		ID int64 `json:"id"`
+	} `json:"author"`
+}
+
+type userResponse struct {
+	ID int64 `json:"id"`
+}
+
+func New(baseURL, token string, authorizedRepositories []string, providedClient *http.Client) (*Client, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, errors.New("invalid GitLab base URL")
+	}
+	if token == "" {
+		return nil, errors.New("GitLab personal access token is required")
+	}
+
+	httpClient := &http.Client{}
+	if providedClient != nil {
+		*httpClient = *providedClient
+	}
+	httpClient.Timeout = requestTimeout
+	httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	authorized := make(map[string]struct{}, len(authorizedRepositories))
+	for _, repository := range authorizedRepositories {
+		authorized[repository] = struct{}{}
+	}
+	return &Client{
+		baseURL:    parsed,
+		token:      token,
+		authorized: authorized,
+		httpClient: httpClient,
+		now:        time.Now,
+	}, nil
+}
+
+func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, error) {
+	if err := c.validateIdentity(identity); err != nil {
+		return Snapshot{}, err
+	}
+	if err := c.checkProject(ctx, identity.ProjectID); err != nil {
+		return Snapshot{}, err
+	}
+	mergeRequest, err := c.getMergeRequest(ctx, identity)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateMergeRequest(identity, mergeRequest); err != nil {
+		return Snapshot{}, err
+	}
+	files, err := c.getDiffs(ctx, identity)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{
+		Identity:     identity,
+		Title:        mergeRequest.Title,
+		Description:  mergeRequest.Description,
+		SourceBranch: mergeRequest.SourceBranch,
+		TargetBranch: mergeRequest.TargetBranch,
+		Files:        files,
+	}, nil
+}
+
+func (c *Client) CheckCurrent(ctx context.Context, identity Identity) error {
+	if err := c.validateIdentity(identity); err != nil {
+		return err
+	}
+	if err := c.checkProject(ctx, identity.ProjectID); err != nil {
+		return err
+	}
+	mergeRequest, err := c.getMergeRequest(ctx, identity)
+	if err != nil {
+		return err
+	}
+	return validateMergeRequest(identity, mergeRequest)
+}
+
+func (c *Client) FindNote(ctx context.Context, identity Identity, marker string) (int64, bool, error) {
+	if err := c.validateIdentity(identity); err != nil {
+		return 0, false, err
+	}
+	if marker == "" || len(marker) > 256 {
+		return 0, false, failure.Failed("invalid_publication_marker")
+	}
+	userID, err := c.currentUserID(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	seen := 0
+	for page := 1; page <= maxNotePages; page++ {
+		query := url.Values{
+			"order_by": {"created_at"},
+			"page":     {strconv.Itoa(page)},
+			"per_page": {strconv.Itoa(notesPerPage)},
+			"sort":     {"desc"},
+		}
+		var notes []noteResponse
+		header, err := c.get(ctx, c.mergeRequestPath(identity)+"/notes", query, noteResponseLimit, &notes)
+		if err != nil {
+			return 0, false, err
+		}
+		seen += len(notes)
+		if seen > maxNotes {
+			return 0, false, failure.Failed("note_search_limit_exceeded")
+		}
+		for _, note := range notes {
+			if note.ID <= 0 || note.Author.ID <= 0 {
+				return 0, false, failure.Failed("malformed_gitlab_response")
+			}
+			if note.Author.ID == userID && strings.Contains(note.Body, marker) {
+				return note.ID, true, nil
+			}
+		}
+		next, err := nextPage(header, page)
+		if err != nil {
+			return 0, false, err
+		}
+		if next == 0 {
+			return 0, false, nil
+		}
+		if page == maxNotePages {
+			return 0, false, failure.Failed("note_search_limit_exceeded")
+		}
+	}
+	return 0, false, failure.Failed("note_search_limit_exceeded")
+}
+
+func (c *Client) PostNote(ctx context.Context, identity Identity, body string) (int64, error) {
+	if err := c.validateIdentity(identity); err != nil {
+		return 0, err
+	}
+	if len(body) == 0 || len(body) > maxNoteBodyBytes {
+		return 0, failure.Failed("note_body_limit_exceeded")
+	}
+	userID, err := c.currentUserID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	payload, err := json.Marshal(struct {
+		Body string `json:"body"`
+	}{Body: body})
+	if err != nil {
+		return 0, failure.Failed("publication_encoding_failed")
+	}
+	var note noteResponse
+	if _, err := c.request(ctx, http.MethodPost, c.mergeRequestPath(identity)+"/notes", nil, payload, metadataResponseLimit, &note); err != nil {
+		return 0, err
+	}
+	if note.ID <= 0 || note.Author.ID != userID {
+		return 0, failure.Failed("malformed_gitlab_response")
+	}
+	return note.ID, nil
+}
+
+func (c *Client) currentUserID(ctx context.Context) (int64, error) {
+	var user userResponse
+	if _, err := c.get(ctx, "/user", nil, metadataResponseLimit, &user); err != nil {
+		return 0, err
+	}
+	if user.ID <= 0 {
+		return 0, failure.Failed("malformed_gitlab_response")
+	}
+	return user.ID, nil
+}
+
+func (c *Client) validateIdentity(identity Identity) error {
+	if identity.GitLabInstance != c.baseURL.String() || identity.ProjectID <= 0 || identity.MergeRequestIID <= 0 || identity.HeadSHA == "" {
+		return failure.Failed("review_identity_mismatch")
+	}
+	return nil
+}
+
+func (c *Client) checkProject(ctx context.Context, projectID int64) error {
+	var project projectResponse
+	if _, err := c.get(ctx, fmt.Sprintf("/projects/%d", projectID), nil, metadataResponseLimit, &project); err != nil {
+		return err
+	}
+	if project.ID != projectID || project.PathWithNamespace == "" {
+		return failure.Failed("malformed_gitlab_response")
+	}
+	if _, allowed := c.authorized[project.PathWithNamespace]; !allowed {
+		return failure.Failed("repository_unauthorized")
+	}
+	return nil
+}
+
+func (c *Client) getMergeRequest(ctx context.Context, identity Identity) (mergeRequestResponse, error) {
+	var mergeRequest mergeRequestResponse
+	if _, err := c.get(ctx, c.mergeRequestPath(identity), nil, metadataResponseLimit, &mergeRequest); err != nil {
+		return mergeRequestResponse{}, err
+	}
+	return mergeRequest, nil
+}
+
+func validateMergeRequest(identity Identity, mergeRequest mergeRequestResponse) error {
+	if mergeRequest.ID <= 0 || mergeRequest.ProjectID != identity.ProjectID || mergeRequest.IID != identity.MergeRequestIID || mergeRequest.DiffRefs.HeadSHA == "" {
+		return failure.Failed("malformed_gitlab_response")
+	}
+	switch mergeRequest.State {
+	case "opened":
+	case "closed", "merged", "locked":
+		return failure.Obsolete("merge_request_not_open")
+	default:
+		return failure.Failed("unknown_merge_request_state")
+	}
+	if !strings.EqualFold(mergeRequest.DiffRefs.HeadSHA, identity.HeadSHA) {
+		return failure.Obsolete("merge_request_head_changed")
+	}
+	return nil
+}
+
+func (c *Client) getDiffs(ctx context.Context, identity Identity) ([]ChangedFile, error) {
+	files := make([]ChangedFile, 0)
+	totalContent := 0
+	for page := 1; page <= maxDiffPages; page++ {
+		query := url.Values{
+			"page":     {strconv.Itoa(page)},
+			"per_page": {strconv.Itoa(diffsPerPage)},
+		}
+		var response []diffResponse
+		header, err := c.get(ctx, c.mergeRequestPath(identity)+"/diffs", query, diffResponseLimit, &response)
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range response {
+			if file.Collapsed || file.TooLarge {
+				return nil, failure.Failed("incomplete_merge_request_diff")
+			}
+			if file.NewPath == "" || file.OldPath == "" || len(file.NewPath) > 1024 || len(file.OldPath) > 1024 {
+				return nil, failure.Failed("malformed_gitlab_response")
+			}
+			totalContent += len(file.Diff)
+			if totalContent > maxDiffContentBytes {
+				return nil, failure.Failed("merge_request_diff_limit_exceeded")
+			}
+			files = append(files, ChangedFile{
+				OldPath: file.OldPath, NewPath: file.NewPath, Diff: file.Diff,
+				NewFile: file.NewFile, RenamedFile: file.RenamedFile, DeletedFile: file.DeletedFile,
+			})
+			if len(files) > maxChangedFiles {
+				return nil, failure.Failed("merge_request_file_limit_exceeded")
+			}
+		}
+		next, err := nextPage(header, page)
+		if err != nil {
+			return nil, err
+		}
+		if next == 0 {
+			return files, nil
+		}
+		if page == maxDiffPages {
+			return nil, failure.Failed("merge_request_diff_page_limit_exceeded")
+		}
+	}
+	return nil, failure.Failed("merge_request_diff_page_limit_exceeded")
+}
+
+func (c *Client) mergeRequestPath(identity Identity) string {
+	return fmt.Sprintf("/projects/%d/merge_requests/%d", identity.ProjectID, identity.MergeRequestIID)
+}
+
+func (c *Client) get(ctx context.Context, endpoint string, query url.Values, limit int64, target any) (http.Header, error) {
+	return c.request(ctx, http.MethodGet, endpoint, query, nil, limit, target)
+}
+
+func (c *Client) request(ctx context.Context, method, endpoint string, query url.Values, body []byte, limit int64, target any) (http.Header, error) {
+	requestURL := *c.baseURL
+	requestURL.Path = strings.TrimSuffix(c.baseURL.Path, "/") + "/api/v4" + endpoint
+	requestURL.RawPath = ""
+	requestURL.RawQuery = query.Encode()
+
+	var requestBody io.Reader
+	if body != nil {
+		requestBody = bytes.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, requestURL.String(), requestBody)
+	if err != nil {
+		return nil, failure.Failed("gitlab_request_invalid")
+	}
+	request.Header.Set("PRIVATE-TOKEN", c.token)
+	request.Header.Set("Accept", "application/json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, failure.Retry("gitlab_network_failure", 0)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		return nil, failure.Failed("gitlab_redirect_rejected")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, c.statusError(response)
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, failure.Retry("gitlab_response_read_failed", 0)
+	}
+	if int64(len(contents)) > limit {
+		return nil, failure.Failed("gitlab_response_limit_exceeded")
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		return nil, failure.Failed("malformed_gitlab_response")
+	}
+	return response.Header, nil
+}
+
+func (c *Client) statusError(response *http.Response) error {
+	switch response.StatusCode {
+	case http.StatusUnauthorized:
+		return failure.Failed("gitlab_invalid_credentials")
+	case http.StatusForbidden, http.StatusNotFound:
+		return failure.Failed("gitlab_authorization_failed")
+	case http.StatusRequestTimeout:
+		return c.retryableStatus(response, "gitlab_request_timeout")
+	case http.StatusTooManyRequests:
+		return c.retryableStatus(response, "gitlab_rate_limited")
+	default:
+		if response.StatusCode >= 500 {
+			return c.retryableStatus(response, "gitlab_server_failure")
+		}
+		return failure.Failed("gitlab_request_rejected")
+	}
+}
+
+func (c *Client) retryableStatus(response *http.Response, category string) error {
+	delay, valid := parseRetryAfter(response.Header.Get("Retry-After"), c.now())
+	if valid && delay > maxSupportedRetryAfter {
+		return failure.Failed("retry_after_exceeds_limit")
+	}
+	return failure.Retry(category, delay)
+}
+
+func nextPage(header http.Header, current int) (int, error) {
+	value := header.Get("X-Next-Page")
+	if value == "" {
+		return 0, nil
+	}
+	next, err := strconv.Atoi(value)
+	if err != nil || next != current+1 {
+		return 0, failure.Failed("malformed_gitlab_pagination")
+	}
+	return next, nil
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	if value == "" {
+		return 0, false
+	}
+	if isDecimal(value) {
+		seconds, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || seconds > uint64(maxSupportedRetryAfter/time.Second) {
+			return maxSupportedRetryAfter + time.Second, true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	delay := when.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}

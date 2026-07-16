@@ -20,13 +20,20 @@ type Config struct {
 	ListenAddress          string   `json:"listen_address"`
 	DatabasePath           string   `json:"database_path"`
 	GitLab                 GitLab   `json:"gitlab"`
+	Gemini                 Gemini   `json:"gemini"`
 	AuthorizedRepositories []string `json:"authorized_repositories"`
 	ConfigFileBroadlyRead  bool     `json:"-"`
 }
 
 type GitLab struct {
-	BaseURL       string `json:"base_url"`
-	WebhookSecret string `json:"webhook_secret"`
+	BaseURL             string `json:"base_url"`
+	WebhookSecret       string `json:"webhook_secret"`
+	PersonalAccessToken string `json:"personal_access_token"`
+}
+
+type Gemini struct {
+	APIKey string `json:"api_key"`
+	Model  string `json:"model"`
 }
 
 func Load(path string) (Config, error) {
@@ -100,6 +107,15 @@ func validate(cfg *Config) error {
 	cfg.GitLab.BaseURL = canonicalBaseURL
 	if cfg.GitLab.WebhookSecret == "" {
 		return errors.New("gitlab.webhook_secret is required")
+	}
+	if cfg.GitLab.PersonalAccessToken == "" {
+		return errors.New("gitlab.personal_access_token is required")
+	}
+	if cfg.Gemini.APIKey == "" {
+		return errors.New("gemini.api_key is required")
+	}
+	if strings.TrimSpace(cfg.Gemini.Model) == "" {
+		return errors.New("gemini.model is required")
 	}
 	if len(cfg.AuthorizedRepositories) == 0 {
 		return errors.New("authorized_repositories is required")

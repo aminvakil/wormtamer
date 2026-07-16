@@ -18,13 +18,13 @@ A bot may see content unavailable to a merge request participant. Publish privat
 
 Credentials belong only to trusted application code. Never place them in prompts, tool results, logs, command arguments, repository workspaces, shell history, or sandbox environments.
 
-Credentials are loaded as plaintext from the explicit deployment configuration file when an implemented capability needs them. The real configuration file must remain outside version control. Warn when its filesystem permissions allow group or other users to read it, but do not treat permissions as portable proof of secrecy. Fail startup when a credential required by an enabled capability is absent. Do not require a personal access token before the application makes GitLab API calls.
+Credentials are loaded as plaintext from the explicit deployment configuration file. The real configuration file must remain outside version control. Warn when its filesystem permissions allow group or other users to read it, but do not treat permissions as portable proof of secrecy. The always-enabled review worker requires the GitLab personal access token and Gemini API key at startup; startup validates only their presence and makes no external credential or scope checks.
 
-Authenticate GitLab webhooks with the configured webhook secret before accepting their contents. GitLab calls go through a trusted broker outside repository workspaces. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
+Authenticate GitLab webhooks with the configured webhook secret before accepting their contents. GitLab calls go through a trusted broker outside repository workspaces. The broker builds API paths under the configured GitLab base URL, rejects every redirect to prevent PAT forwarding, and bounds request time and response size. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
 
-Load the Gemini API key from the deployment configuration when model review is implemented. The application may send tool declarations to Gemini, but it must validate, authorize, limit, and dispatch every returned function request itself.
+Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The current structured generation request declares no tools. If tools are later added, the application must validate, authorize, limit, and dispatch every returned function request itself.
 
-Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Response schemas improve structure but do not replace local validation.
+Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Before constructing a model prompt, reject review metadata or diffs containing any configured secret; do not send, log, or identify the matching value. Response schemas improve structure but do not replace local validation.
 
 Plain HTTP is permitted for local self-hosted deployments, including communication with GitLab. It provides no transport confidentiality or server authentication; the operator is responsible for keeping that traffic on an appropriate local network.
 
@@ -70,6 +70,8 @@ Human approval is the default. Any later automatic promotion requires repeated i
 Runtime memory is separate from contributor documentation under `docs/agents/`.
 
 ## Publication and Logging
+
+The current summary renderer escapes model-controlled Markdown and HTML constructs, neutralizes mentions, and rejects output containing known configured secrets. Publication reconciliation accepts a hidden marker only when the note author matches the PAT's authenticated GitLab user; untrusted contributors cannot suppress a review by copying the marker. These controls supplement, rather than replace, structured result validation.
 
 Before publishing:
 

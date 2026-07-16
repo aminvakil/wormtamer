@@ -12,7 +12,12 @@ const validConfiguration = `{
   "database_path": "data/wormtamer.db",
   "gitlab": {
     "base_url": "http://gitlab.internal",
-    "webhook_secret": "secret"
+    "webhook_secret": "secret",
+    "personal_access_token": "gitlab-token"
+  },
+  "gemini": {
+    "api_key": "gemini-key",
+    "model": "gemini-test"
   },
   "authorized_repositories": ["group/project", "parent/team/project"]
 }`
@@ -112,7 +117,11 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "multi-colon URL authority", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal:80:80"`, want: "gitlab.base_url is invalid"},
 		{name: "empty URL port", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal:"`, want: "invalid authority"},
 		{name: "invalid IP literal", replace: `"http://gitlab.internal"`, with: `"http://[not-an-ip]"`, want: "gitlab.base_url is invalid"},
-		{name: "empty secret", replace: `"secret"`, with: `""`, want: "webhook_secret is required"},
+		{name: "empty webhook secret", replace: `"secret"`, with: `""`, want: "webhook_secret is required"},
+		{name: "empty personal access token", replace: `"gitlab-token"`, with: `""`, want: "personal_access_token is required"},
+		{name: "empty Gemini API key", replace: `"gemini-key"`, with: `""`, want: "gemini.api_key is required"},
+		{name: "empty Gemini model", replace: `"gemini-test"`, with: `""`, want: "gemini.model is required"},
+		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
 		{name: "malformed repository", replace: `"group/project"`, with: `"group//project"`, want: "invalid authorized repository"},
 		{name: "duplicate repository", replace: `"parent/team/project"`, with: `"group/project"`, want: "duplicate authorized repository"},
 	}

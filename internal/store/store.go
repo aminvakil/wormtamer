@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const (
 	OutcomeQueued          = "queued"
@@ -19,6 +20,17 @@ const (
 	OutcomeIgnoredDraft    = "ignored_draft"
 	OutcomeIgnoredAction   = "ignored_action"
 )
+
+const (
+	JobQueued     = "queued"
+	JobRunning    = "running"
+	JobPublishing = "publishing"
+	JobCompleted  = "completed"
+	JobFailed     = "failed"
+	JobObsolete   = "obsolete"
+)
+
+const timestampLayout = "2006-01-02T15:04:05.000000000Z"
 
 type Store struct {
 	db *sql.DB
@@ -42,6 +54,19 @@ type AcceptResult struct {
 	JobID             int64
 	Outcome           string
 	DuplicateDelivery bool
+}
+
+type Job struct {
+	ID                  int64
+	GitLabInstance      string
+	ProjectID           int64
+	MergeRequestIID     int64
+	HeadSHA             string
+	State               string
+	LeaseOwner          string
+	LeaseExpiresAt      time.Time
+	AttemptCount        int
+	ValidatedResultJSON []byte
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -126,17 +151,17 @@ func (s *Store) applySchema(ctx context.Context) error {
 	if version > schemaVersion {
 		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
 	}
-	if version == schemaVersion {
-		return nil
-	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin schema transaction: %w", err)
-	}
-	defer tx.Rollback()
+	for version < schemaVersion {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin schema transaction: %w", err)
+		}
 
-	if _, err := tx.ExecContext(ctx, `
+		var migration string
+		switch version {
+		case 0:
+			migration = `
 CREATE TABLE webhook_events (
     id INTEGER PRIMARY KEY,
     delivery_id TEXT NOT NULL UNIQUE,
@@ -164,11 +189,50 @@ CREATE TABLE review_jobs (
 );
 
 PRAGMA user_version = 1;
-`); err != nil {
-		return fmt.Errorf("apply schema version 1: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit schema version 1: %w", err)
+`
+		case 1:
+			migration = `
+ALTER TABLE review_jobs ADD COLUMN lease_owner TEXT;
+ALTER TABLE review_jobs ADD COLUMN lease_expires_at TEXT;
+ALTER TABLE review_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review_jobs ADD COLUMN started_at TEXT;
+ALTER TABLE review_jobs ADD COLUMN next_attempt_at TEXT;
+ALTER TABLE review_jobs ADD COLUMN last_error_category TEXT;
+ALTER TABLE review_jobs ADD COLUMN last_error_message TEXT;
+ALTER TABLE review_jobs ADD COLUMN updated_at TEXT;
+
+UPDATE review_jobs
+SET next_attempt_at = created_at, updated_at = created_at;
+
+CREATE INDEX review_jobs_due_idx
+ON review_jobs (state, next_attempt_at, lease_expires_at);
+
+CREATE TABLE review_results (
+    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
+    result_json BLOB NOT NULL CHECK(length(result_json) <= 65536),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE publications (
+    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
+    marker TEXT NOT NULL UNIQUE CHECK(length(marker) <= 256),
+    gitlab_note_id INTEGER NOT NULL CHECK(gitlab_note_id > 0),
+    created_at TEXT NOT NULL
+);
+
+PRAGMA user_version = 2;
+`
+		}
+
+		if _, err := tx.ExecContext(ctx, migration); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("apply schema version %d: %w", version+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("commit schema version %d: %w", version+1, err)
+		}
+		version++
 	}
 	return nil
 }
@@ -261,4 +325,221 @@ WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_
 		return AcceptResult{}, fmt.Errorf("commit event transaction: %w", err)
 	}
 	return result, nil
+}
+
+func (s *Store) ClaimJob(ctx context.Context, owner string, now time.Time, leaseDuration time.Duration, maxAttempts int) (*Job, error) {
+	if owner == "" || leaseDuration <= 0 || maxAttempts <= 0 {
+		return nil, errors.New("invalid job claim")
+	}
+	nowText := formatTime(now)
+	leaseText := formatTime(now.Add(leaseDuration))
+
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
+    last_error_category = 'attempts_exhausted',
+    last_error_message = 'job attempts exhausted', updated_at = ?
+WHERE state IN (?, ?) AND attempt_count >= ?
+  AND julianday(lease_expires_at) <= julianday(?)`,
+		JobFailed, nowText, JobRunning, JobPublishing, maxAttempts, nowText); err != nil {
+		return nil, fmt.Errorf("fail exhausted job: %w", err)
+	}
+
+	row := s.db.QueryRowContext(ctx, `
+UPDATE review_jobs
+SET state = CASE
+        WHEN state = ? AND EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id) THEN ?
+        WHEN state = ? THEN ?
+        ELSE state
+    END,
+    lease_owner = ?, lease_expires_at = ?, attempt_count = attempt_count + 1,
+    started_at = ?, updated_at = ?
+WHERE id = (
+    SELECT id FROM review_jobs
+    WHERE attempt_count < ? AND (
+        (state = ? AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?)) OR
+        (state IN (?, ?) AND julianday(lease_expires_at) <= julianday(?))
+    )
+    ORDER BY COALESCE(next_attempt_at, created_at), id
+    LIMIT 1
+)
+RETURNING id, gitlab_instance, project_id, merge_request_iid, head_sha,
+          state, lease_owner, lease_expires_at, attempt_count`,
+		JobQueued, JobPublishing, JobQueued, JobRunning, owner, leaseText, nowText, nowText,
+		maxAttempts, JobQueued, nowText, JobRunning, JobPublishing, nowText)
+
+	job := &Job{}
+	var leaseExpires string
+	if err := row.Scan(&job.ID, &job.GitLabInstance, &job.ProjectID, &job.MergeRequestIID,
+		&job.HeadSHA, &job.State, &job.LeaseOwner, &leaseExpires, &job.AttemptCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claim review job: %w", err)
+	}
+	job.LeaseExpiresAt, _ = time.Parse(timestampLayout, leaseExpires)
+	if err := s.db.QueryRowContext(ctx, `SELECT result_json FROM review_results WHERE job_id = ?`, job.ID).Scan(&job.ValidatedResultJSON); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("read claimed review result: %w", err)
+	}
+	return job, nil
+}
+
+func (s *Store) RenewLease(ctx context.Context, jobID int64, owner string, now time.Time, leaseDuration time.Duration) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_jobs
+SET lease_expires_at = ?, updated_at = ?
+WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
+  AND julianday(lease_expires_at) > julianday(?)`,
+		formatTime(now.Add(leaseDuration)), formatTime(now), jobID, owner,
+		JobRunning, JobPublishing, formatTime(now))
+	if err != nil {
+		return false, fmt.Errorf("renew job lease: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("inspect lease renewal: %w", err)
+	}
+	return updated == 1, nil
+}
+
+func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, now time.Time) error {
+	if len(resultJSON) == 0 || len(resultJSON) > 65536 {
+		return errors.New("invalid validated review result size")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin review result transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO review_results (job_id, result_json, created_at)
+VALUES (?, ?, ?)
+ON CONFLICT(job_id) DO NOTHING`, jobID, resultJSON, formatTime(now)); err != nil {
+		return fmt.Errorf("store validated review result: %w", err)
+	}
+	update, err := tx.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = ?, updated_at = ?
+WHERE id = ? AND state = ? AND lease_owner = ?
+  AND julianday(lease_expires_at) > julianday(?)`,
+		JobPublishing, formatTime(now), jobID, JobRunning, owner, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("checkpoint review result: %w", err)
+	}
+	updated, err := update.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect review result checkpoint: %w", err)
+	}
+	if updated != 1 {
+		return ErrLeaseLost
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit review result transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RetryJob(ctx context.Context, jobID int64, owner string, now, nextAttempt time.Time, maxAttempts int, category, message string) (string, error) {
+	if !validFailure(category, message) || maxAttempts <= 0 || nextAttempt.Before(now) {
+		return "", errors.New("invalid retry record")
+	}
+	row := s.db.QueryRowContext(ctx, `
+UPDATE review_jobs
+SET state = CASE WHEN attempt_count >= ? THEN ? ELSE ? END,
+    next_attempt_at = CASE WHEN attempt_count >= ? THEN next_attempt_at ELSE ? END,
+    lease_owner = NULL, lease_expires_at = NULL,
+    last_error_category = ?, last_error_message = ?, updated_at = ?
+WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
+  AND julianday(lease_expires_at) > julianday(?)
+RETURNING state`,
+		maxAttempts, JobFailed, JobQueued, maxAttempts, formatTime(nextAttempt),
+		category, message, formatTime(now), jobID, owner, JobRunning, JobPublishing, formatTime(now))
+	var state string
+	if err := row.Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrLeaseLost
+		}
+		return "", fmt.Errorf("schedule job retry: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Store) FinishJob(ctx context.Context, jobID int64, owner, state, category, message string, now time.Time) error {
+	if state != JobFailed && state != JobObsolete {
+		return errors.New("invalid terminal job state")
+	}
+	if !validFailure(category, message) {
+		return errors.New("invalid terminal job error")
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
+    last_error_category = ?, last_error_message = ?, updated_at = ?
+WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
+  AND julianday(lease_expires_at) > julianday(?)`,
+		state, category, message, formatTime(now), jobID, owner,
+		JobRunning, JobPublishing, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("finish review job: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect finished review job: %w", err)
+	}
+	if updated != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *Store) CompletePublication(ctx context.Context, jobID int64, owner, marker string, noteID int64, now time.Time) error {
+	if marker == "" || len(marker) > 256 || noteID <= 0 {
+		return errors.New("invalid publication record")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin publication transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO publications (job_id, marker, gitlab_note_id, created_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(job_id) DO UPDATE SET
+    marker = excluded.marker, gitlab_note_id = excluded.gitlab_note_id`,
+		jobID, marker, noteID, formatTime(now)); err != nil {
+		return fmt.Errorf("store publication: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
+    last_error_category = NULL, last_error_message = NULL, updated_at = ?
+WHERE id = ? AND state = ? AND lease_owner = ?
+  AND julianday(lease_expires_at) > julianday(?)`,
+		JobCompleted, formatTime(now), jobID, JobPublishing, owner, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("complete published review job: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect completed review job: %w", err)
+	}
+	if updated != 1 {
+		return ErrLeaseLost
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit publication transaction: %w", err)
+	}
+	return nil
+}
+
+var ErrLeaseLost = errors.New("job lease lost")
+
+func formatTime(value time.Time) string {
+	return value.UTC().Format(timestampLayout)
+}
+
+func validFailure(category, message string) bool {
+	return category != "" && len(category) <= 128 && len(message) <= 512
 }

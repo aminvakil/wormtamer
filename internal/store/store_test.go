@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -179,7 +181,7 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storage.db.Exec(`PRAGMA user_version = 2`); err != nil {
+	if _, err := storage.db.Exec(`PRAGMA user_version = 3`); err != nil {
 		t.Fatal(err)
 	}
 	storage.Close()
@@ -188,6 +190,223 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("Open() error = %v", err)
 	}
+}
+
+func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	accepted, err := storage.AcceptEvent(ctx, readyEvent("event-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Add(time.Hour)
+	job, err := storage.ClaimJob(ctx, "owner-1", now, 2*time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	if job.ID != accepted.JobID || job.State != JobRunning || job.AttemptCount != 1 {
+		t.Fatalf("claimed job = %+v", job)
+	}
+	if other, err := storage.ClaimJob(ctx, "owner-2", now, 2*time.Minute, 5); err != nil || other != nil {
+		t.Fatalf("concurrent ClaimJob() = %+v, %v", other, err)
+	}
+	if renewed, err := storage.RenewLease(ctx, job.ID, "wrong-owner", now.Add(time.Second), 2*time.Minute); err != nil || renewed {
+		t.Fatalf("wrong-owner RenewLease() = %t, %v", renewed, err)
+	}
+	if renewed, err := storage.RenewLease(ctx, job.ID, "owner-1", now.Add(time.Second), 2*time.Minute); err != nil || !renewed {
+		t.Fatalf("RenewLease() = %t, %v", renewed, err)
+	}
+
+	recoveredAt := now.Add(2*time.Minute + 2*time.Second)
+	recovered, err := storage.ClaimJob(ctx, "owner-2", recoveredAt, 2*time.Minute, 5)
+	if err != nil || recovered == nil {
+		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
+	}
+	if recovered.AttemptCount != 2 || recovered.State != JobRunning {
+		t.Fatalf("recovered job = %+v", recovered)
+	}
+	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, recoveredAt); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("wrong-owner SaveReviewResult() error = %v", err)
+	}
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, recoveredAt); err != nil {
+		t.Fatalf("SaveReviewResult() error = %v", err)
+	}
+
+	publishing, err := storage.ClaimJob(ctx, "owner-3", recoveredAt.Add(2*time.Minute+time.Second), 2*time.Minute, 5)
+	if err != nil || publishing == nil {
+		t.Fatalf("publishing ClaimJob() = %+v, %v", publishing, err)
+	}
+	if publishing.State != JobPublishing || string(publishing.ValidatedResultJSON) != string(resultJSON) {
+		t.Fatalf("publishing job = %+v", publishing)
+	}
+	if err := storage.CompletePublication(ctx, publishing.ID, "owner-3", "<!-- marker -->", 99, recoveredAt.Add(2*time.Minute+time.Second)); err != nil {
+		t.Fatalf("CompletePublication() error = %v", err)
+	}
+	var state string
+	if err := storage.db.QueryRow(`SELECT state FROM review_jobs WHERE id = ?`, publishing.ID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != JobCompleted {
+		t.Fatalf("job state = %q", state)
+	}
+	assertCount(t, storage.db, "review_results", 1)
+	assertCount(t, storage.db, "publications", 1)
+}
+
+func TestReviewCheckpointSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	storage, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.AcceptEvent(ctx, readyEvent("event-1")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(time.Hour)
+	job, err := storage.ClaimJob(ctx, "owner-1", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
+	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recovered, err := reopened.ClaimJob(ctx, "owner-2", now.Add(time.Minute+time.Second), time.Minute, 5)
+	if err != nil || recovered == nil {
+		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
+	}
+	if recovered.State != JobPublishing || string(recovered.ValidatedResultJSON) != string(resultJSON) {
+		t.Fatalf("recovered job = %+v", recovered)
+	}
+}
+
+func TestClaimJobIsAtomic(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	if _, err := storage.AcceptEvent(context.Background(), readyEvent("event-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	const contenders = 10
+	now := time.Now().UTC()
+	jobs := make(chan *Job, contenders)
+	errors := make(chan error, contenders)
+	var wait sync.WaitGroup
+	for index := 0; index < contenders; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			job, err := storage.ClaimJob(context.Background(), fmt.Sprintf("owner-%d", index), now, time.Minute, 5)
+			jobs <- job
+			errors <- err
+		}(index)
+	}
+	wait.Wait()
+	close(jobs)
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("ClaimJob() error = %v", err)
+		}
+	}
+	claimed := 0
+	for job := range jobs {
+		if job != nil {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("claimed jobs = %d, want 1", claimed)
+	}
+}
+
+func TestRetryJobIsDueAndExhaustsAttempts(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	if _, err := storage.AcceptEvent(ctx, readyEvent("event-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Add(time.Hour)
+	for attempt := 1; attempt <= 5; attempt++ {
+		job, err := storage.ClaimJob(ctx, "owner", now, time.Minute, 5)
+		if err != nil || job == nil {
+			t.Fatalf("attempt %d ClaimJob() = %+v, %v", attempt, job, err)
+		}
+		if job.AttemptCount != attempt {
+			t.Fatalf("attempt count = %d, want %d", job.AttemptCount, attempt)
+		}
+		next := now.Add(time.Minute)
+		state, err := storage.RetryJob(ctx, job.ID, "owner", now, next, 5, "temporary", "temporary failure")
+		if err != nil {
+			t.Fatalf("RetryJob() error = %v", err)
+		}
+		if attempt < 5 && state != JobQueued {
+			t.Fatalf("attempt %d state = %q", attempt, state)
+		}
+		if attempt == 5 && state != JobFailed {
+			t.Fatalf("exhausted state = %q", state)
+		}
+		if early, err := storage.ClaimJob(ctx, "other", now.Add(30*time.Second), time.Minute, 5); err != nil || early != nil {
+			t.Fatalf("early ClaimJob() = %+v, %v", early, err)
+		}
+		now = next
+	}
+}
+
+func TestOpenMigratesVersionOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE webhook_events (id INTEGER PRIMARY KEY);
+CREATE TABLE review_jobs (
+    id INTEGER PRIMARY KEY,
+    source_event_id INTEGER NOT NULL REFERENCES webhook_events(id),
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL,
+    merge_request_iid INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT NOT NULL,
+    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
+);
+PRAGMA user_version = 1;`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open() migration error = %v", err)
+	}
+	defer storage.Close()
+	var version int
+	if err := storage.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+	assertCount(t, storage.db, "review_results", 0)
+	assertCount(t, storage.db, "publications", 0)
 }
 
 func TestOpenFailsForUnavailablePath(t *testing.T) {

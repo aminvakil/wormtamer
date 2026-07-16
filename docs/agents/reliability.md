@@ -46,23 +46,23 @@ A worker atomically claims a job with a lease owner, expiry, attempt count, and 
 
 Restart the review rather than persisting an arbitrary model conversation. Persist checkpoints around external effects.
 
-Use bounded backoff and record the last error and next attempt time. Distinguish retryable failures, permanent configuration or authorization failures, and obsolete work. Failed jobs remain inspectable and may be retried after correction.
+Use at most five claims per job. Network failures, HTTP request timeouts including status `408`, rate limits, and server failures are retryable; credential, authorization, and other rejected requests are permanent. Locally calculated exponential retry delays start at five seconds and cap at five minutes. A valid GitLab `Retry-After` is instead a minimum delay and may defer work for up to 24 hours; a longer requested delay fails under the stable `retry_after_exceeds_limit` category rather than retrying early. Record the bounded error category and message and next attempt time. Distinguish retryable failures, permanent configuration or authorization failures, and obsolete work. A recognized merge request state other than `opened`, including `closed` or `merged`, and a changed head SHA are obsolete; renamed or unauthorized projects and malformed states fail. Failed jobs remain inspectable and may be retried after correction.
+
+The single worker polls once per second, leases one job for two minutes, renews every 30 seconds, and processes one job at a time. On shutdown it allows active work ten seconds to reach a checkpoint. At that deadline it cancels the job and returns without waiting for an uncooperative operation; unfinished work remains recoverable through lease expiry.
 
 ## Idempotent Publication
 
-GitLab publication and its local record cannot be committed atomically. Give each artifact a stable hidden marker derived from review and finding identity, for example:
+GitLab publication and its local record cannot be committed atomically. The current worker gives its one summary note a stable hidden marker derived from review identity, for example:
 
 ```html
-<!-- ai-reviewer:review=<review-id>:finding=<finding-id> -->
+<!-- wormtamer:review=<review-identity-hash> -->
 ```
 
-Before posting, search existing discussions for the marker. After posting, store the marker and GitLab object ID. On retry, reconcile GitLab and SQLite before creating an artifact.
-
-Derive finding identity from stable evidence such as revision, path, line range, category, and normalized content—not a new random value per attempt. Complete a job only after all intended publication effects are reconciled.
+Before posting, search the newest notes first, examining at most 1,000 notes across ten pages for the exact marker on a note authored by the PAT's authenticated GitLab user, and fail closed if absence cannot be established. After posting, store the marker and GitLab note ID. On retry, reconcile GitLab and SQLite before creating another note. Limit the rendered note to 64 KiB and complete a job only after the marked note exists and its publication record is durable. Future separate finding discussions require their own stable finding identities.
 
 ## Reconciliation
 
-Periodically:
+Reconciliation is deferred in the current implementation. When implemented, it will periodically:
 
 1. List recently updated open merge requests in configured projects.
 2. Read each current head SHA.
@@ -74,7 +74,7 @@ Webhooks provide low latency; reconciliation recovers deliveries lost before rea
 
 ## Durable State
 
-SQLite state must represent:
+SQLite stores the locally validated structured review result before publication and reuses that checkpoint on retry; it does not persist prompts, diffs, raw model responses, or conversations. SQLite state must represent:
 
 - Durable webhook events and processing status
 - Review identity, job state, leases, attempts, scheduling, and errors
@@ -87,4 +87,4 @@ Keep the database and WAL on persistent storage with reliable file locking. Enab
 
 There is no webhook-event or payload retention policy yet; ignored events and stored payloads accumulate until operational requirements establish one.
 
-Repository caches are disposable. Clone, download, and model operations require explicit time, size, and concurrency limits and must never be the only record that review work exists.
+Repository caches are disposable. The current GitLab broker limits requests to 30 seconds, metadata responses to 256 KiB, each diff or note page to 2 MiB, changed diffs to five pages, 100 files, and 512 KiB of aggregate diff content. Gemini generation is limited to two minutes, 8,192 output tokens, 20 findings, and 64 KiB of validated result JSON. Inputs that exceed a bound fail rather than being silently truncated. Clone, download, and model operations require explicit time, size, and concurrency limits and must never be the only record that review work exists.
