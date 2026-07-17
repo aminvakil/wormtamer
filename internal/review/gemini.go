@@ -1,6 +1,7 @@
 package review
 
 import (
+	"log"
 	"context"
 	"encoding/json"
 	"errors"
@@ -186,6 +187,7 @@ func classifyGeminiError(err error) error {
 			if apiError.Code >= 500 {
 				return failure.Retry("gemini_server_failure", 0)
 			}
+			log.Printf("Gemini API rejected request. Code: %d, Details: %v", apiError.Code, err)
 			return failure.Failed("gemini_request_rejected")
 		}
 	}
