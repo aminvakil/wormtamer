@@ -145,13 +145,6 @@ func (s *Store) verifySQLite(ctx context.Context) error {
 		return fmt.Errorf("unexpected SQLite journal mode: %s", journalMode)
 	}
 
-	var fts5 int
-	if err := s.db.QueryRowContext(ctx, `SELECT sqlite_compileoption_used('ENABLE_FTS5')`).Scan(&fts5); err != nil {
-		return fmt.Errorf("verify SQLite FTS5 support: %w", err)
-	}
-	if fts5 != 1 {
-		return errors.New("SQLite FTS5 support is required; build with -tags sqlite_fts5")
-	}
 	return nil
 }
 

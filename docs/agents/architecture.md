@@ -10,10 +10,9 @@ One installation runs as one process and replica because SQLite and local reposi
 
 - Go with the standard library HTTP server unless a concrete requirement proves it insufficient
 - One OCI image with persistent SQLite storage
-- SQLite through `github.com/mattn/go-sqlite3`, built with CGO and FTS5, as the only application database
+- SQLite through `github.com/mattn/go-sqlite3`, built with CGO, as the only application database
 - The Gemini Developer API through `google.golang.org/genai` as the only model backend
 - One structured Gemini generation request today; a small explicit function-calling loop when model tools are introduced, with no general agent framework or automatic tool execution
-- Scoped SQLite FTS5 search for initial runtime-memory retrieval
 
 A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value; generation settings remain application-owned rather than deployment-configurable.
 
@@ -92,9 +91,9 @@ The GitLab integration supports GitLab 17 and newer. The reconciler scans each a
 
 The current model request contains bounded changed-file diffs, relevant metadata, the structured response schema, and application-owned limits. It declares no tools and cannot request additional context. When tools are introduced, authorization and limits remain deterministic regardless of model intent.
 
-SQLite stores webhook, job, publication, merge request progress, and runtime-memory records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
+SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 
-Runtime memory is installation-specific and stored separately from workflow state. Records preserve scope, evidence, confidence, approval status, and timestamps. They are retrieved on demand through memory tools and are not trusted merely because a model generated them.
+Runtime memory is not implemented. If introduced, it remains installation-specific and separate from workflow state. Records must preserve scope, evidence, confidence, approval status, and timestamps, and are not trusted merely because a model generated them.
 
 Runtime review memory is separate from contributor guidance in `AGENTS.md` and `docs/agents/`.
 

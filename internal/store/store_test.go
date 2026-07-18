@@ -184,7 +184,7 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 
-	var foreignKeys, busyTimeout, fts5 int
+	var foreignKeys, busyTimeout int
 	var journalMode string
 	if err := storage.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 		t.Fatal(err)
@@ -195,14 +195,8 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 	if err := storage.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.db.QueryRow(`SELECT sqlite_compileoption_used('ENABLE_FTS5')`).Scan(&fts5); err != nil {
-		t.Fatal(err)
-	}
-	if foreignKeys != 1 || busyTimeout != 5000 || journalMode != "wal" || fts5 != 1 {
-		t.Fatalf("SQLite settings: foreign_keys=%d busy_timeout=%d journal_mode=%q fts5=%d", foreignKeys, busyTimeout, journalMode, fts5)
-	}
-	if _, err := storage.db.Exec(`CREATE VIRTUAL TABLE fts5_check USING fts5(content)`); err != nil {
-		t.Fatalf("create FTS5 table: %v", err)
+	if foreignKeys != 1 || busyTimeout != 5000 || journalMode != "wal" {
+		t.Fatalf("SQLite settings: foreign_keys=%d busy_timeout=%d journal_mode=%q", foreignKeys, busyTimeout, journalMode)
 	}
 
 	_, err := storage.db.Exec(`
