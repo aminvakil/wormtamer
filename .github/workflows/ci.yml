@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 concurrency: ci-${{ github.ref }}
 
 jobs:
@@ -55,7 +57,7 @@ jobs:
         run: docker stop ${DOCKERCONTAINER} && docker rm -fv ${DOCKERCONTAINER}
 
   deploy:
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [hadolint, build]
     name: Push to ghcr.io
     runs-on: ubuntu-latest
@@ -64,6 +66,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
     steps:
       - name: Check out the codebase.
         uses: actions/checkout@main
@@ -71,6 +75,10 @@ jobs:
       - name: Set IMAGE_NAME env as github_repository lower-case
         run: |
           echo IMAGE_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Get tag version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to the Container registry
         uses: docker/login-action@master
@@ -91,5 +99,14 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.get_version.outputs.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

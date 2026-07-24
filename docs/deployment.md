@@ -10,7 +10,7 @@ Build the image from the repository root for the local container host architectu
 docker build -t wormtamer:local .
 ```
 
-The build context includes only the Go module files and application source selected by `.dockerignore`. Successful `main` builds publish the `linux/amd64` image as `ghcr.io/aminvakil/wormtamer:latest`.
+The build context includes only the Go module files and application source selected by `.dockerignore`. A tag such as `v1.2.3` publishes the `linux/amd64` image as `ghcr.io/aminvakil/wormtamer:1.2.3` and `ghcr.io/aminvakil/wormtamer:latest`.
 
 ## Configure
 
@@ -49,13 +49,13 @@ docker run --detach \
   --name wormtamer \
   --restart unless-stopped \
   --stop-timeout 20 \
-  --publish 127.0.0.1:8080:8080 \
+  --publish 8080:8080 \
   --mount type=bind,src=/absolute/path/config.json,dst=/etc/wormtamer/config.json,readonly \
   --mount type=volume,src=wormtamer-data,dst=/var/lib/wormtamer \
   wormtamer:local
 ```
 
-Replace the configuration source with its absolute host path. Binding the published port to loopback is appropriate when an operator-managed reverse proxy terminates TLS on the same host. Change the host bind address only when the surrounding network is trusted and direct access is intentional. Wormtamer itself serves HTTP.
+Replace the configuration source with its absolute host path. Publishing `8080:8080` accepts webhook traffic on the host's network interfaces. Wormtamer itself serves HTTP, so expose it only on a trusted network or place it behind an operator-managed TLS reverse proxy. A reverse proxy running on the same host may instead publish Wormtamer on loopback.
 
 The executable is the image entrypoint, so `SIGTERM` reaches it directly. Keep the stop timeout at 20 seconds or longer; the process uses a bounded ten-second graceful-shutdown period.
 
