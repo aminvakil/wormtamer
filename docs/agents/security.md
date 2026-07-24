@@ -42,7 +42,7 @@ The model receives no unrestricted networked shell and cannot publish directly. 
 
 ## Repository Access
 
-Assume every checkout is hostile. The initial implementation provides bounded reading and searching without executing repository-controlled code.
+Assume every checkout is hostile. Repository workspaces are not implemented. When introduced, initial repository tools are limited to bounded reading and searching and must not execute repository-controlled code.
 
 Repository tools must prevent path traversal and avoid running hooks. Workspaces must not contain credentials, SQLite state, runtime memory, or host sockets, and must be cleaned between unrelated reviews.
 

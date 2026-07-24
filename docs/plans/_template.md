@@ -8,15 +8,15 @@ Describe the primary outcome and why it is needed.
 
 ## Scope
 
-State what is included and any important non-goals.
+State the smallest complete outcome, what is included, and important non-goals.
 
 ## Approach
 
-Describe the smallest coherent design. Include affected components when known.
+Describe the smallest coherent design. Include affected components when known and defer unsupported flexibility or generalization.
 
 ## Risks and Open Questions
 
-Include only material reliability, security, compatibility, or unresolved concerns. Remove this section when none exist.
+Risks are not automatic scope. Include only material concerns that may block a safe coherent outcome, and remove this section when none exist.
 
 ## Verification
 
