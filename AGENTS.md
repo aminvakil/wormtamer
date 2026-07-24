@@ -25,6 +25,13 @@ Build a minimal, self-hosted GitLab merge request reviewer. Each deployment serv
 
 Read only the documents relevant to the subsystem being changed.
 
+## KISS
+
+- Deliver the smallest complete behavior that advances the current approved outcome.
+- Add complexity only when required by observable acceptance criteria, current focused documentation, or verified behavior.
+- Treat risks and open questions as constraints, not automatic implementation scope. Resolve what blocks a safe coherent outcome and defer the rest.
+- Prefer direct, fixed, single-purpose designs over speculative scale, flexibility, optimization, or generalization.
+
 ## Working Rules
 
 - Prefer the smallest change that satisfies the documented requirements.
