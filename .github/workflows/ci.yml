@@ -11,6 +11,21 @@ concurrency: ci-${{ github.ref }}
 
 jobs:
 
+  test:
+    name: Test Go
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the codebase.
+        uses: actions/checkout@main
+
+      - name: Set up Go.
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests.
+        run: make test
+
   hadolint:
     name: Test dockerfile syntax
     runs-on: ubuntu-latest
@@ -58,7 +73,7 @@ jobs:
 
   deploy:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [hadolint, build]
+    needs: [test, hadolint, build]
     name: Push to ghcr.io
     runs-on: ubuntu-latest
     env:
