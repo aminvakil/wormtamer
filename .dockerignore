@@ -1,0 +1,10 @@
+.git
+.gitignore
+.dockerignore
+Dockerfile
+AGENTS.md
+LICENSE
+config.example.json
+bin
+docs
+**/*_test.go

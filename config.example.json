@@ -1,0 +1,14 @@
+{
+  "listen_address": "0.0.0.0:8080",
+  "database_path": "/var/lib/wormtamer/wormtamer.db",
+  "gitlab": {
+    "base_url": "https://gitlab.example",
+    "webhook_secret": "replace-me",
+    "personal_access_token": "replace-me"
+  },
+  "gemini": {
+    "api_key": "replace-me",
+    "model": "replace-me"
+  },
+  "authorized_repositories": ["group/project"]
+}

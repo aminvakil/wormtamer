@@ -1,6 +1,6 @@
 # Package a GitLab 17 deployment
 
-Status: proposed
+Status: in-progress
 
 ## Goal
 
@@ -8,20 +8,23 @@ Produce a minimal OCI image and operator documentation for the validated Wormtam
 
 ## Scope
 
-- Build `cmd/wormtamer` with CGO in a multi-stage image using a restricted build context and narrowly scoped copies.
-- Include only required runtime libraries and CA certificates, and run as a dedicated non-root user.
-- Keep configuration, credentials, SQLite state, local artifacts, and build caches outside every image stage.
+- Build `cmd/wormtamer` with CGO in a multi-stage image using a restricted build context and one source copy.
+- Include only required runtime libraries and CA certificates, and run as the runtime image's `nobody` user.
+- Keep configuration, credentials, SQLite state, and local artifacts outside every image stage.
 - Document read-only external configuration, persistent SQLite and WAL storage, one-replica operation, health checking, startup, graceful shutdown, and operator-owned TLS termination.
+- Build and runtime-test the image on pull requests and pushes to `main`, and publish the image to GitHub Container Registry after successful `main` builds.
 
-Do not add orchestrator-specific manifests, registry automation, another database or queue, or repository-controlled code execution.
+Do not add orchestrator-specific manifests, another database or queue, or repository-controlled code execution.
 
 ## Approach
 
 Use a restrictive `.dockerignore` and copy only the source and module files required to build Wormtamer. Use compatible maintained builder and runtime bases rather than a static binary or custom SQLite toolchain.
 
-Run Wormtamer directly as the image entrypoint under a dedicated numeric UID and GID. Use `/etc/wormtamer/config.json` as the read-only configuration path and `/var/lib/wormtamer` as the writable persistent data directory. The documented configuration uses the absolute database path `/var/lib/wormtamer/wormtamer.db` so the database, WAL, and shared-memory files remain on the same mount, and listens on `0.0.0.0` so published container ports are reachable.
+Use GitHub Actions to lint the Dockerfile, build and health-test the image, and publish an attested `latest` image to GitHub Container Registry after successful `main` builds.
 
-Keep the root filesystem read-only apart from the persistent data mount. Preserve direct `SIGTERM` delivery and document a container stop grace period longer than Wormtamer's ten-second shutdown deadline. Health probes query `GET /healthcheck` from outside the image rather than adding an HTTP client solely for an image-local probe.
+Run Wormtamer directly as the image entrypoint under the runtime image's existing `nobody` user. Use `/etc/wormtamer/config.json` as the read-only configuration path and `/var/lib/wormtamer` as the writable persistent data directory. The documented configuration uses the absolute database path `/var/lib/wormtamer/wormtamer.db` so the database, WAL, and shared-memory files remain on the same mount, and listens on `0.0.0.0` so published container ports are reachable.
+
+Preserve direct `SIGTERM` delivery and document a container stop grace period longer than Wormtamer's ten-second shutdown deadline. Health probes query `GET /healthcheck` from outside the image rather than adding an HTTP client solely for an image-local probe.
 
 ## Risks and Open Questions
 
@@ -34,8 +37,9 @@ Keep the root filesystem read-only apart from the persistent data mount. Preserv
 
 - The build context excludes `.git`, ignored local artifacts, configuration, credentials, databases, and build outputs; image stages copy only required tracked inputs.
 - A clean image build produces a working binary whose dynamic dependencies and CA trust are present in the runtime image, without configuration, credentials, SQLite state, or build cache in the final image.
-- The container runs as its dedicated non-root UID with a read-only root filesystem, starts from the read-only mounted configuration, and writes the database, WAL, and shared-memory files only under the persistent data mount.
+- The container runs as the runtime image's `nobody` user, starts from the read-only mounted configuration, and writes the database, WAL, and shared-memory files under the persistent data mount.
 - With the documented listen address and port publication, an external probe receives success from `GET /healthcheck`.
 - An exec-form entrypoint receives `SIGTERM`, and a container stop grace period of at least 20 seconds allows Wormtamer to complete its bounded graceful shutdown.
 - Restarting with the same persistent data directory preserves durable state and publication idempotency.
 - Operator documentation is sufficient to reproduce a one-process, one-replica deployment behind an optional TLS reverse proxy and explains configuration permissions, volume ownership and locking, health checking, startup, shutdown, backup responsibility, and restore responsibility.
+- GitHub Actions lint and runtime-test the image for pull requests and pushes to `main`; successful `main` builds publish an attested `latest` image to GitHub Container Registry.
