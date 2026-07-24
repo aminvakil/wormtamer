@@ -20,7 +20,7 @@ Do not add orchestrator-specific manifests, another database or queue, or reposi
 
 Use a restrictive `.dockerignore` and copy only the source and module files required to build Wormtamer. Use compatible maintained builder and runtime bases rather than a static binary or custom SQLite toolchain.
 
-Use GitHub Actions to lint the Dockerfile, build and health-test the image, and publish an attested `latest` image to GitHub Container Registry after successful `main` builds.
+Use GitHub Actions to lint the Dockerfile, build and health-test the image, and publish a `latest` image to GitHub Container Registry after successful `main` builds.
 
 Run Wormtamer directly as the image entrypoint under the runtime image's existing `nobody` user. Use `/etc/wormtamer/config.json` as the read-only configuration path and `/var/lib/wormtamer` as the writable persistent data directory. The documented configuration uses the absolute database path `/var/lib/wormtamer/wormtamer.db` so the database, WAL, and shared-memory files remain on the same mount, and listens on `0.0.0.0` so published container ports are reachable.
 
@@ -42,4 +42,4 @@ Preserve direct `SIGTERM` delivery and document a container stop grace period lo
 - An exec-form entrypoint receives `SIGTERM`, and a container stop grace period of at least 20 seconds allows Wormtamer to complete its bounded graceful shutdown.
 - Restarting with the same persistent data directory preserves durable state and publication idempotency.
 - Operator documentation is sufficient to reproduce a one-process, one-replica deployment behind an optional TLS reverse proxy and explains configuration permissions, volume ownership and locking, health checking, startup, shutdown, backup responsibility, and restore responsibility.
-- GitHub Actions lint and runtime-test the image for pull requests and pushes to `main`; successful `main` builds publish an attested `latest` image to GitHub Container Registry.
+- GitHub Actions lint and runtime-test the image for pull requests and pushes to `main`; successful `main` builds publish a `latest` image to GitHub Container Registry.

@@ -1,10 +1,13 @@
 .git
+.github
 .gitignore
 .dockerignore
 Dockerfile
 AGENTS.md
 LICENSE
-config.example.json
+config*.json
+*.db
+*.db-*
 bin
 docs
 **/*_test.go
