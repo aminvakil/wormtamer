@@ -2,7 +2,7 @@
 
 Status: proposed
 
-Depends on: [Publish addressable review findings](03-publish-addressable-findings.md)
+Depends on: [Publish addressable review findings](publish-addressable-findings.md)
 
 ## Goal
 

@@ -4,8 +4,8 @@ Status: proposed
 
 Depends on:
 
-- [Capture explicit review feedback](04-capture-explicit-review-feedback.md)
-- [Retrieve approved review memory](06-retrieve-review-memory.md)
+- [Capture explicit review feedback](capture-explicit-review-feedback.md)
+- [Retrieve approved review memory](retrieve-review-memory.md)
 
 ## Goal
 

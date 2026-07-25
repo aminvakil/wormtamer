@@ -4,17 +4,17 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 ## Proposed Roadmap
 
-Implement plans in numeric order unless a plan's status or dependencies are explicitly changed:
+Implement plans in the order listed here unless a plan's status or dependencies are explicitly changed. This list is the authoritative order; filenames remain stable as completed plans are removed.
 
-1. [Inspect the current repository with bounded tools](01-inspect-current-repository.md)
-2. [Inspect authorized related repositories](02-inspect-authorized-repositories.md)
-3. [Publish addressable review findings](03-publish-addressable-findings.md)
-4. [Capture explicit review feedback](04-capture-explicit-review-feedback.md)
-5. [Curate runtime review memory](05-curate-runtime-review-memory.md)
-6. [Retrieve approved review memory](06-retrieve-review-memory.md)
-7. [Evaluate feedback-driven reviews](07-evaluate-feedback-driven-reviews.md)
-8. [Research constrained public sources](08-research-public-sources.md)
-9. [Update the project README for completed capabilities](09-update-project-readme.md)
+1. [Inspect the current repository with bounded tools](inspect-current-repository.md)
+2. [Inspect authorized related repositories](inspect-authorized-repositories.md)
+3. [Publish addressable review findings](publish-addressable-findings.md)
+4. [Capture explicit review feedback](capture-explicit-review-feedback.md)
+5. [Curate runtime review memory](curate-runtime-review-memory.md)
+6. [Retrieve approved review memory](retrieve-review-memory.md)
+7. [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md)
+8. [Research constrained public sources](research-public-sources.md)
+9. [Update the project README for completed capabilities](update-project-readme.md)
 
 All roadmap plans are proposed. Resolve each plan's open policy and interaction questions before approving implementation.
 
@@ -24,7 +24,7 @@ Every roadmap item follows the repository-wide [KISS rules](../../AGENTS.md#kiss
 
 ## Format
 
-- Name roadmap plans with a two-digit implementation-order prefix and short kebab-case outcome, such as `01-inspect-current-repository.md`.
+- Name each plan with a stable short kebab-case outcome; record implementation order only in the roadmap.
 - Describe one coherent outcome per file.
 - Use [`_template.md`](_template.md) as optional guidance.
 - Include only sections that help resolve or verify the work.

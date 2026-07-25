@@ -4,8 +4,8 @@ Status: proposed
 
 Depends on:
 
-- [Inspect the current repository with bounded tools](01-inspect-current-repository.md)
-- [Curate runtime review memory](05-curate-runtime-review-memory.md)
+- [Inspect the current repository with bounded tools](inspect-current-repository.md)
+- [Curate runtime review memory](curate-runtime-review-memory.md)
 
 ## Goal
 

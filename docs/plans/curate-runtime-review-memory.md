@@ -2,7 +2,7 @@
 
 Status: proposed
 
-Depends on: [Capture explicit review feedback](04-capture-explicit-review-feedback.md)
+Depends on: [Capture explicit review feedback](capture-explicit-review-feedback.md)
 
 ## Goal
 

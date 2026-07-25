@@ -2,7 +2,7 @@
 
 Status: proposed
 
-Depends on: plans 01 through 08 in the [proposed roadmap](README.md)
+Depends on: all preceding plans in the [proposed roadmap](README.md)
 
 ## Goal
 
@@ -19,7 +19,7 @@ Do not document planned behavior as implemented, copy detailed design rules into
 
 ## Approach
 
-Complete this plan only after plans 01 through 08 have been implemented and their durable decisions have moved into the focused documents under `docs/agents/`. Audit every root README claim against the resulting code and configuration, remove obsolete diff-only descriptions, and present the smallest end-to-end explanation needed by a new operator or evaluator.
+Complete this plan only after all preceding roadmap plans have been implemented and their durable decisions have moved into the focused documents under `docs/agents/`. Audit every root README claim against the resulting code and configuration, remove obsolete diff-only descriptions, and present the smallest end-to-end explanation needed by a new operator or evaluator.
 
 Use links instead of duplicating detailed security and reliability contracts. If a roadmap capability was changed or deferred, document the actual final behavior rather than the original plan.
 
