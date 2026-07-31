@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,86 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 	}
 	if workspaces.workspace == nil || workspaces.workspace.calls != 1 || !workspaces.workspace.closed {
 		t.Fatalf("review workspace = %+v", workspaces.workspace)
+	}
+}
+
+func TestReviewRepositoryLoadsRelatedRepositoryLazilyAndAttributesResult(t *testing.T) {
+	broker := &fakeGitLab{}
+	workspaces := &fakeWorkspaces{}
+	snapshot := gitlab.Snapshot{
+		Identity: gitlab.Identity{HeadSHA: workerHead}, ProjectPath: "group/project",
+		RelatedRepositories: []string{"group/related"},
+	}
+	tools := newReviewRepository(snapshot, broker, workspaces)
+	defer tools.Close()
+
+	arguments := map[string]any{"repository": "group/related", "path": "contract.go"}
+	result, err := tools.Call(context.Background(), repository.ToolReadFile, arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tools.Call(context.Background(), repository.ToolReadFile, arguments); err != nil {
+		t.Fatal(err)
+	}
+	if broker.archiveCalls != 1 || workspaces.createCalls != 1 || workspaces.revision != strings.Repeat("b", 40) || string(workspaces.archive) != "related-archive" {
+		t.Fatalf("broker=%+v workspaces=%+v", broker, workspaces)
+	}
+	if result["repository"] != "group/related" || workspaces.workspace.arguments["repository"] != nil || workspaces.workspace.arguments["path"] != "contract.go" {
+		t.Fatalf("result=%+v workspace arguments=%+v", result, workspaces.workspace.arguments)
+	}
+}
+
+func TestReviewRepositoryBoundsAttributedOutput(t *testing.T) {
+	workspace := &fakeWorkspace{result: map[string]any{"value": strings.Repeat("x", repository.MaxToolResponseBytes-20)}}
+	tools := &reviewRepository{
+		currentRepository: "group/project", relatedRepositories: map[string]struct{}{},
+		open: map[string]repository.Workspace{"group/project": workspace},
+	}
+	_, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": "group/project"})
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "repository_tool_output_limit_exceeded" {
+		t.Fatalf("attributed output error = %v", err)
+	}
+}
+
+func TestReviewRepositoryRejectsUnlistedRepositoryWithoutGitLabAccess(t *testing.T) {
+	broker := &fakeGitLab{}
+	tools := newReviewRepository(gitlab.Snapshot{
+		Identity: gitlab.Identity{HeadSHA: workerHead}, ProjectPath: "group/project",
+	}, broker, &fakeWorkspaces{})
+	_, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": "visible/unconfigured"})
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "repository_unavailable" || failureError.Retryable {
+		t.Fatalf("unlisted repository error = %v", err)
+	}
+	if broker.archiveCalls != 0 {
+		t.Fatalf("unlisted repository caused %d GitLab calls", broker.archiveCalls)
+	}
+}
+
+func TestReviewRepositoryEnforcesSharedResourceLimit(t *testing.T) {
+	related := make([]string, repository.ReviewResourceLimit+1)
+	for index := range related {
+		related[index] = "group/related-" + strconv.Itoa(index)
+	}
+	broker := &fakeGitLab{}
+	workspaces := &fakeWorkspaces{}
+	tools := newReviewRepository(gitlab.Snapshot{
+		Identity: gitlab.Identity{HeadSHA: workerHead}, ProjectPath: "group/project", RelatedRepositories: related,
+	}, broker, workspaces)
+	defer tools.Close()
+	for _, repositoryPath := range related[:repository.ReviewResourceLimit] {
+		if _, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": repositoryPath}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": related[len(related)-1]})
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "repository_limit_exceeded" || !failureError.Retryable {
+		t.Fatalf("limit error = %v", err)
+	}
+	if broker.archiveCalls != repository.ReviewResourceLimit || workspaces.createCalls != repository.ReviewResourceLimit {
+		t.Fatalf("archive calls=%d workspace calls=%d", broker.archiveCalls, workspaces.createCalls)
 	}
 }
 
@@ -379,7 +460,8 @@ func (g *fakeGitLab) LoadReview(_ context.Context, identity gitlab.Identity) (gi
 		return gitlab.Snapshot{}, g.loadError
 	}
 	return gitlab.Snapshot{
-		Identity: identity, Title: "MR", Description: "description", SourceBranch: "feature", TargetBranch: "main",
+		Identity: identity, ProjectPath: "group/project", RelatedRepositories: []string{"group/related"},
+		Title: "MR", Description: "description", SourceBranch: "feature", TargetBranch: "main",
 		Files: []gitlab.ChangedFile{{OldPath: "main.go", NewPath: "main.go", Diff: "+private-diff"}},
 	}, nil
 }
@@ -387,6 +469,11 @@ func (g *fakeGitLab) LoadReview(_ context.Context, identity gitlab.Identity) (gi
 func (g *fakeGitLab) LoadRepositoryArchive(_ context.Context, _ gitlab.Identity) ([]byte, error) {
 	g.archiveCalls++
 	return []byte("archive"), nil
+}
+
+func (g *fakeGitLab) LoadRelatedRepositoryArchive(_ context.Context, _, _ string) (string, []byte, error) {
+	g.archiveCalls++
+	return strings.Repeat("b", 40), []byte("related-archive"), nil
 }
 
 func (g *fakeGitLab) CheckCurrent(_ context.Context, _ gitlab.Identity) error {
@@ -432,12 +519,18 @@ func (m *fakeWorkspaces) Create(_ context.Context, revision string, archive []by
 }
 
 type fakeWorkspace struct {
-	closed bool
-	calls  int
+	closed    bool
+	calls     int
+	arguments map[string]any
+	result    map[string]any
 }
 
-func (w *fakeWorkspace) Call(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+func (w *fakeWorkspace) Call(_ context.Context, _ string, arguments map[string]any) (map[string]any, error) {
 	w.calls++
+	w.arguments = arguments
+	if w.result != nil {
+		return w.result, nil
+	}
 	return map[string]any{"files": []string{}}, nil
 }
 
@@ -459,7 +552,7 @@ func (r *fakeReviewer) Review(ctx context.Context, _ gitlab.Snapshot, tools repo
 		return review.Result{}, nil, r.err
 	}
 	if r.useTools {
-		if _, err := tools.Call(ctx, repository.ToolListFiles, map[string]any{}); err != nil {
+		if _, err := tools.Call(ctx, repository.ToolListFiles, map[string]any{"repository": "group/project"}); err != nil {
 			return review.Result{}, nil, err
 		}
 	}

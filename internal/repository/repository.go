@@ -21,17 +21,22 @@ import (
 )
 
 const (
-	maxArchiveEntries    = 20_000
-	maxArchiveBytes      = 128 << 20
-	maxWorkspaceFiles    = 10_000
-	maxFileBytes         = 2 << 20
-	maxPathBytes         = 1024
-	maxListedFiles       = 1_000
-	maxReadLines         = 200
-	maxSearchBytes       = 16 << 20
-	maxSearchMatches     = 100
-	maxQueryBytes        = 256
-	maxToolResponseBytes = 64 << 10
+	// ReviewResourceLimit bounds both repository tool calls and distinct repositories per review.
+	ReviewResourceLimit  = 8
+	MaxToolResponseBytes = 64 << 10
+)
+
+const (
+	maxArchiveEntries = 20_000
+	maxArchiveBytes   = 128 << 20
+	maxWorkspaceFiles = 10_000
+	maxFileBytes      = 2 << 20
+	maxPathBytes      = 1024
+	maxListedFiles    = 1_000
+	maxReadLines      = 200
+	maxSearchBytes    = 16 << 20
+	maxSearchMatches  = 100
+	maxQueryBytes     = 256
 )
 
 const (
@@ -247,7 +252,7 @@ func (w *localWorkspace) Call(ctx context.Context, name string, arguments map[st
 	if err != nil {
 		return nil, failure.Failed("repository_tool_output_invalid")
 	}
-	if len(encoded) > maxToolResponseBytes {
+	if len(encoded) > MaxToolResponseBytes {
 		return nil, failure.Failed("repository_tool_output_limit_exceeded")
 	}
 	return result, nil

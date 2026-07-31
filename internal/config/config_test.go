@@ -19,7 +19,10 @@ const validConfiguration = `{
     "api_key": "gemini-key",
     "model": "gemini-test"
   },
-  "authorized_repositories": ["group/project", "parent/team/project"]
+  "authorized_repositories": ["group/project", "parent/team/project"],
+  "repository_sharing": {
+    "group/project": ["parent/team/project"]
+  }
 }`
 
 func TestLoad(t *testing.T) {
@@ -39,6 +42,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.ConfigFileBroadlyRead {
 		t.Fatal("ConfigFileBroadlyRead = true for a 0600 file")
+	}
+	if related := cfg.RepositorySharing["group/project"]; len(related) != 1 || related[0] != "parent/team/project" {
+		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
 	}
 }
 
@@ -124,6 +130,11 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
 		{name: "malformed repository", replace: `"group/project"`, with: `"group//project"`, want: "invalid authorized repository"},
 		{name: "duplicate repository", replace: `"parent/team/project"`, with: `"group/project"`, want: "duplicate authorized repository"},
+		{name: "unauthorized sharing target", replace: `"group/project": ["parent/team/project"]`, with: `"other/project": ["parent/team/project"]`, want: "sharing target"},
+		{name: "unauthorized shared repository", replace: `["parent/team/project"]`, with: `["other/project"]`, want: "shared repository"},
+		{name: "self sharing", replace: `["parent/team/project"]`, with: `["group/project"]`, want: "includes itself"},
+		{name: "duplicate shared repository", replace: `["parent/team/project"]`, with: `["parent/team/project", "parent/team/project"]`, want: "duplicate shared repository"},
+		{name: "empty sharing rule", replace: `["parent/team/project"]`, with: `[]`, want: "has no related repositories"},
 	}
 
 	for _, test := range tests {

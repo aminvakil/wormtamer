@@ -20,7 +20,9 @@ Copy `config.example.json` to a location outside the repository and image, then 
 cp config.example.json /secure/path/config.json
 ```
 
-Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on every authorized project. Configure each GitLab project to send merge request webhooks to:
+Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on every authorized project. `repository_sharing` is directional: each key is a repository under review and its values are related repositories the reviewer may inspect. Configure a rule only when every audience able to view the reviewed repository's merge requests may receive information derived from each related repository; the configuration is the operator's explicit assertion of that sharing policy.
+
+Configure each GitLab project to send merge request webhooks to:
 
 ```text
 https://wormtamer.example/webhooks/gitlab

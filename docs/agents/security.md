@@ -8,11 +8,11 @@ Each team installation has independent credentials, configuration, allowlists, s
 
 ## Authorization
 
-Repository access requires both GitLab permission and an installation allowlist entry. Entries are exact GitLab namespace paths. The same list filters webhook projects and bounds the repositories that may be disclosed to or inspected by the model. Inclusion authorizes access but does not make repository content trusted, and the model cannot modify either authorization condition.
+Repository access requires both GitLab permission and an installation allowlist entry. Entries are exact GitLab namespace paths. The same list filters webhook projects and bounds the repositories that may be disclosed to or inspected by the model. Cross-repository access additionally requires an explicit directional `repository_sharing` rule from the repository under review to the related repository. Inclusion authorizes application access but does not make repository content trusted, and the model cannot modify any authorization condition.
 
 Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on each configured project. This is the minimum combination verified on GitLab 17.5.5 for project lookup, merge request and diff reads, current-user lookup, note search, and note creation. The application assumes the configured token has sufficient permissions and reports sanitized authorization failures rather than discovering or validating scopes. Administrator access is not an application requirement. Grant shared repositories explicitly; never use administrator access for convenient discovery.
 
-A bot may see content unavailable to a merge request participant. Publish private cross-repository information only when the installation's sharing policy permits it. Where audiences differ, enforce the intersection of bot access and requester visibility.
+A bot may see content unavailable to a merge request participant. A directional sharing rule is the operator's assertion that every audience able to view merge requests in the target repository may receive information derived from the related repository; do not configure a rule based only on bot visibility or one requester's membership. The application enforces the configured direction and fails closed when no exact rule exists.
 
 ## Credentials
 
@@ -22,7 +22,7 @@ Credentials are loaded as plaintext from the explicit deployment configuration f
 
 Authenticate GitLab webhooks with the configured webhook secret before accepting their contents. GitLab calls go through a trusted broker outside repository workspaces. The broker builds API paths under the configured GitLab base URL, rejects every redirect to prevent PAT forwarding, and bounds request time and response size. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
 
-Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The explicit function-calling loop declares only current-repository read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
+Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The explicit function-calling loop declares only repository read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
 
 Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Before constructing a model prompt, reject review metadata or diffs containing any configured secret; do not send, log, or identify the matching value. Response schemas improve structure but do not replace local validation.
 
@@ -42,9 +42,9 @@ The model receives no unrestricted networked shell and cannot publish directly. 
 
 ## Repository Access
 
-Assume every repository snapshot is hostile. On the first repository tool call, the GitLab broker authorizes the numeric project against its configured namespace and downloads an archive for the exact reviewed SHA with the PAT in an HTTP header. The archive is bounded before extraction and never sent wholesale to Gemini.
+Assume every repository snapshot is hostile. On the first current-repository tool call, the GitLab broker authorizes the numeric project against its configured namespace and downloads an archive for the exact reviewed SHA with the PAT in an HTTP header. For a related repository, trusted code first verifies its exact configured path and directional sharing rule, resolves its default-branch HEAD to an immutable commit SHA, and downloads the archive at that SHA. The archive is bounded before extraction and never sent wholesale to Gemini.
 
-The repository broker accepts one archive root, rejects traversal and duplicate paths, extracts only bounded regular UTF-8 text files, and never follows symlinks or initializes submodules. Model tools can recursively list text-file paths, read bounded line ranges, and perform bounded case-sensitive literal searches. Every result identifies the reviewed revision and is checked for configured secrets before it returns to Gemini. Unknown tools, unknown arguments, alternate revisions, invalid paths, and exhausted limits disclose no repository content.
+The repository broker accepts one archive root per inspected repository, rejects traversal and duplicate paths, extracts only bounded regular UTF-8 text files, and never follows symlinks or initializes submodules. Model tools can recursively list text-file paths, read bounded line ranges, and perform bounded case-sensitive literal searches. Every result identifies its exact repository and revision and is checked for configured secrets before it returns to Gemini. Unknown tools, unknown arguments, alternate revisions, unlisted or sharing-ineligible repositories, invalid paths, and exhausted limits disclose no repository content.
 
 Workspaces contain no credentials, SQLite state, runtime memory, or host sockets. They use restrictive permissions, are removed after each review, and their installation-local root is cleaned on startup and shutdown. Repository-controlled code, Git hooks, builds, tests, and scripts are never executed.
 

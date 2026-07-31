@@ -62,7 +62,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	defer workspaceManager.Close()
 
-	gitLabClient, err := gitlab.New(cfg.GitLab.BaseURL, cfg.GitLab.PersonalAccessToken, cfg.AuthorizedRepositories, nil)
+	gitLabClient, err := gitlab.New(cfg.GitLab.BaseURL, cfg.GitLab.PersonalAccessToken, cfg.AuthorizedRepositories, cfg.RepositorySharing, nil)
 	if err != nil {
 		return err
 	}

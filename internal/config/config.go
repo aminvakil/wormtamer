@@ -17,12 +17,13 @@ import (
 var repositoryPathPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$`)
 
 type Config struct {
-	ListenAddress          string   `json:"listen_address"`
-	DatabasePath           string   `json:"database_path"`
-	GitLab                 GitLab   `json:"gitlab"`
-	Gemini                 Gemini   `json:"gemini"`
-	AuthorizedRepositories []string `json:"authorized_repositories"`
-	ConfigFileBroadlyRead  bool     `json:"-"`
+	ListenAddress          string              `json:"listen_address"`
+	DatabasePath           string              `json:"database_path"`
+	GitLab                 GitLab              `json:"gitlab"`
+	Gemini                 Gemini              `json:"gemini"`
+	AuthorizedRepositories []string            `json:"authorized_repositories"`
+	RepositorySharing      map[string][]string `json:"repository_sharing"`
+	ConfigFileBroadlyRead  bool                `json:"-"`
 }
 
 type GitLab struct {
@@ -121,15 +122,36 @@ func validate(cfg *Config) error {
 		return errors.New("authorized_repositories is required")
 	}
 
-	seen := make(map[string]struct{}, len(cfg.AuthorizedRepositories))
+	authorized := make(map[string]struct{}, len(cfg.AuthorizedRepositories))
 	for _, repository := range cfg.AuthorizedRepositories {
 		if !validRepositoryPath(repository) {
 			return fmt.Errorf("invalid authorized repository path %q", repository)
 		}
-		if _, exists := seen[repository]; exists {
+		if _, exists := authorized[repository]; exists {
 			return fmt.Errorf("duplicate authorized repository %q", repository)
 		}
-		seen[repository] = struct{}{}
+		authorized[repository] = struct{}{}
+	}
+	for target, relatedRepositories := range cfg.RepositorySharing {
+		if _, allowed := authorized[target]; !allowed {
+			return fmt.Errorf("repository sharing target %q is not authorized", target)
+		}
+		if len(relatedRepositories) == 0 {
+			return fmt.Errorf("repository sharing target %q has no related repositories", target)
+		}
+		seen := make(map[string]struct{}, len(relatedRepositories))
+		for _, related := range relatedRepositories {
+			if _, allowed := authorized[related]; !allowed {
+				return fmt.Errorf("shared repository %q is not authorized", related)
+			}
+			if related == target {
+				return fmt.Errorf("repository sharing target %q includes itself", target)
+			}
+			if _, exists := seen[related]; exists {
+				return fmt.Errorf("duplicate shared repository %q for target %q", related, target)
+			}
+			seen[related] = struct{}{}
+		}
 	}
 	return nil
 }

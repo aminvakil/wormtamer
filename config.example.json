@@ -10,5 +10,8 @@
     "api_key": "replace-me",
     "model": "replace-me"
   },
-  "authorized_repositories": ["group/project"]
+  "authorized_repositories": ["group/project", "group/shared-contracts"],
+  "repository_sharing": {
+    "group/project": ["group/shared-contracts"]
+  }
 }

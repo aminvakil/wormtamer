@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,12 +49,14 @@ type Identity struct {
 }
 
 type Snapshot struct {
-	Identity     Identity
-	Title        string
-	Description  string
-	SourceBranch string
-	TargetBranch string
-	Files        []ChangedFile
+	Identity            Identity
+	ProjectPath         string
+	RelatedRepositories []string
+	Title               string
+	Description         string
+	SourceBranch        string
+	TargetBranch        string
+	Files               []ChangedFile
 }
 
 type ChangedFile struct {
@@ -77,6 +80,7 @@ type Client struct {
 	baseURL    *url.URL
 	token      string
 	authorized map[string]struct{}
+	sharing    map[string]map[string]struct{}
 	httpClient *http.Client
 	now        func() time.Time
 	after      func(time.Duration) <-chan time.Time
@@ -88,6 +92,14 @@ type Client struct {
 type projectResponse struct {
 	ID                int64  `json:"id"`
 	PathWithNamespace string `json:"path_with_namespace"`
+	DefaultBranch     string `json:"default_branch"`
+}
+
+type branchResponse struct {
+	Name   string `json:"name"`
+	Commit struct {
+		ID string `json:"id"`
+	} `json:"commit"`
 }
 
 type reconciliationMergeRequestResponse struct {
@@ -136,7 +148,7 @@ type userResponse struct {
 	ID int64 `json:"id"`
 }
 
-func New(baseURL, token string, authorizedRepositories []string, providedClient *http.Client) (*Client, error) {
+func New(baseURL, token string, authorizedRepositories []string, repositorySharing map[string][]string, providedClient *http.Client) (*Client, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("invalid GitLab base URL")
@@ -158,10 +170,18 @@ func New(baseURL, token string, authorizedRepositories []string, providedClient 
 	for _, repository := range authorizedRepositories {
 		authorized[repository] = struct{}{}
 	}
+	sharing := make(map[string]map[string]struct{}, len(repositorySharing))
+	for target, relatedRepositories := range repositorySharing {
+		sharing[target] = make(map[string]struct{}, len(relatedRepositories))
+		for _, related := range relatedRepositories {
+			sharing[target][related] = struct{}{}
+		}
+	}
 	return &Client{
 		baseURL:    parsed,
 		token:      token,
 		authorized: authorized,
+		sharing:    sharing,
 		httpClient: httpClient,
 		now:        time.Now,
 		after:      time.After,
@@ -169,21 +189,29 @@ func New(baseURL, token string, authorizedRepositories []string, providedClient 
 }
 
 func (c *Client) ResolveProject(ctx context.Context, projectPath string) (int64, error) {
+	project, err := c.resolveProject(ctx, projectPath)
+	if err != nil {
+		return 0, err
+	}
+	return project.ID, nil
+}
+
+func (c *Client) resolveProject(ctx context.Context, projectPath string) (projectResponse, error) {
 	if _, allowed := c.authorized[projectPath]; !allowed {
-		return 0, failure.Failed("repository_unauthorized")
+		return projectResponse{}, failure.Failed("repository_unauthorized")
 	}
 	var project projectResponse
 	endpoint := "/projects/" + url.PathEscape(projectPath)
 	if _, err := c.get(ctx, endpoint, nil, metadataResponseLimit, &project); err != nil {
-		return 0, err
+		return projectResponse{}, err
 	}
 	if project.ID <= 0 || project.PathWithNamespace == "" {
-		return 0, failure.Failed("malformed_gitlab_response")
+		return projectResponse{}, failure.Failed("malformed_gitlab_response")
 	}
 	if project.PathWithNamespace != projectPath {
-		return 0, failure.Failed("repository_unauthorized")
+		return projectResponse{}, failure.Failed("repository_unauthorized")
 	}
-	return project.ID, nil
+	return project, nil
 }
 
 func (c *Client) ListOpenMergeRequests(ctx context.Context, projectID int64, page int) ([]ReconciliationMergeRequest, int, error) {
@@ -225,7 +253,8 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 	if err := c.validateIdentity(identity); err != nil {
 		return Snapshot{}, err
 	}
-	if err := c.checkProject(ctx, identity.ProjectID); err != nil {
+	projectPath, err := c.checkProject(ctx, identity.ProjectID)
+	if err != nil {
 		return Snapshot{}, err
 	}
 	mergeRequest, err := c.getMergeRequest(ctx, identity)
@@ -239,13 +268,20 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
+	relatedRepositories := make([]string, 0, len(c.sharing[projectPath]))
+	for repository := range c.sharing[projectPath] {
+		relatedRepositories = append(relatedRepositories, repository)
+	}
+	sort.Strings(relatedRepositories)
 	return Snapshot{
-		Identity:     identity,
-		Title:        mergeRequest.Title,
-		Description:  mergeRequest.Description,
-		SourceBranch: mergeRequest.SourceBranch,
-		TargetBranch: mergeRequest.TargetBranch,
-		Files:        files,
+		Identity:            identity,
+		ProjectPath:         projectPath,
+		RelatedRepositories: relatedRepositories,
+		Title:               mergeRequest.Title,
+		Description:         mergeRequest.Description,
+		SourceBranch:        mergeRequest.SourceBranch,
+		TargetBranch:        mergeRequest.TargetBranch,
+		Files:               files,
 	}, nil
 }
 
@@ -253,18 +289,50 @@ func (c *Client) LoadRepositoryArchive(ctx context.Context, identity Identity) (
 	if err := c.validateIdentity(identity); err != nil {
 		return nil, err
 	}
-	if err := c.checkProject(ctx, identity.ProjectID); err != nil {
+	if _, err := c.checkProject(ctx, identity.ProjectID); err != nil {
 		return nil, err
 	}
 	query := url.Values{"sha": {strings.ToLower(identity.HeadSHA)}}
 	return c.download(ctx, fmt.Sprintf("/projects/%d/repository/archive.tar.gz", identity.ProjectID), query, archiveResponseLimit)
 }
 
+func (c *Client) LoadRelatedRepositoryArchive(ctx context.Context, reviewedRepository, relatedRepository string) (string, []byte, error) {
+	shared, targetAllowed := c.sharing[reviewedRepository]
+	if !targetAllowed {
+		return "", nil, failure.Failed("repository_unavailable")
+	}
+	if _, allowed := shared[relatedRepository]; !allowed {
+		return "", nil, failure.Failed("repository_unavailable")
+	}
+	project, err := c.resolveProject(ctx, relatedRepository)
+	if err != nil {
+		return "", nil, err
+	}
+	if project.DefaultBranch == "" || len(project.DefaultBranch) > 1024 || strings.ContainsRune(project.DefaultBranch, '\x00') {
+		return "", nil, failure.Failed("malformed_gitlab_response")
+	}
+	var branch branchResponse
+	endpoint := fmt.Sprintf("/projects/%d/repository/branches/%s", project.ID, url.PathEscape(project.DefaultBranch))
+	if _, err := c.get(ctx, endpoint, nil, metadataResponseLimit, &branch); err != nil {
+		return "", nil, err
+	}
+	if branch.Name != project.DefaultBranch || !headSHAPattern.MatchString(branch.Commit.ID) {
+		return "", nil, failure.Failed("malformed_gitlab_response")
+	}
+	revision := strings.ToLower(branch.Commit.ID)
+	query := url.Values{"sha": {revision}}
+	archive, err := c.download(ctx, fmt.Sprintf("/projects/%d/repository/archive.tar.gz", project.ID), query, archiveResponseLimit)
+	if err != nil {
+		return "", nil, err
+	}
+	return revision, archive, nil
+}
+
 func (c *Client) CheckCurrent(ctx context.Context, identity Identity) error {
 	if err := c.validateIdentity(identity); err != nil {
 		return err
 	}
-	if err := c.checkProject(ctx, identity.ProjectID); err != nil {
+	if _, err := c.checkProject(ctx, identity.ProjectID); err != nil {
 		return err
 	}
 	mergeRequest, err := c.getMergeRequest(ctx, identity)
@@ -369,18 +437,18 @@ func (c *Client) validateIdentity(identity Identity) error {
 	return nil
 }
 
-func (c *Client) checkProject(ctx context.Context, projectID int64) error {
+func (c *Client) checkProject(ctx context.Context, projectID int64) (string, error) {
 	var project projectResponse
 	if _, err := c.get(ctx, fmt.Sprintf("/projects/%d", projectID), nil, metadataResponseLimit, &project); err != nil {
-		return err
+		return "", err
 	}
 	if project.ID != projectID || project.PathWithNamespace == "" {
-		return failure.Failed("malformed_gitlab_response")
+		return "", failure.Failed("malformed_gitlab_response")
 	}
 	if _, allowed := c.authorized[project.PathWithNamespace]; !allowed {
-		return failure.Failed("repository_unauthorized")
+		return "", failure.Failed("repository_unauthorized")
 	}
-	return nil
+	return project.PathWithNamespace, nil
 }
 
 func (c *Client) getMergeRequest(ctx context.Context, identity Identity) (mergeRequestResponse, error) {

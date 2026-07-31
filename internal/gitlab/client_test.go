@@ -67,13 +67,18 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestClient(t, server.URL+"/gitlab", token, server.Client())
+	client, err := New(server.URL+"/gitlab", token, []string{"group/project", "group/related"}, map[string][]string{
+		"group/project": {"group/related"},
+	}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
 	identity := testIdentity(server.URL + "/gitlab")
 	snapshot, err := client.LoadReview(context.Background(), identity)
 	if err != nil {
 		t.Fatalf("LoadReview() error = %v", err)
 	}
-	if snapshot.Title != "Review title" || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
+	if snapshot.ProjectPath != "group/project" || len(snapshot.RelatedRepositories) != 1 || snapshot.RelatedRepositories[0] != "group/related" || snapshot.Title != "Review title" || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	archive, err := client.LoadRepositoryArchive(context.Background(), identity)
@@ -90,6 +95,100 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	noteID, err = client.PostNote(context.Background(), identity, "summary\n"+marker)
 	if err != nil || noteID != 13 || posted != "summary\n"+marker {
 		t.Fatalf("PostNote() = %d, %v; body %q", noteID, err, posted)
+	}
+}
+
+func TestLoadRelatedRepositoryArchivePinsDefaultBranchHead(t *testing.T) {
+	const relatedHead = "abcdef0123456789abcdef0123456789abcdef01"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Path {
+		case "/api/v4/projects/group/related":
+			if !strings.Contains(r.URL.EscapedPath(), "group%2Frelated") {
+				t.Errorf("escaped project path = %q", r.URL.EscapedPath())
+			}
+			writeJSON(t, w, projectResponse{ID: 84, PathWithNamespace: "group/related", DefaultBranch: "release/main"})
+		case "/api/v4/projects/84/repository/branches/release/main":
+			if !strings.Contains(r.URL.EscapedPath(), "release%2Fmain") {
+				t.Errorf("escaped branch path = %q", r.URL.EscapedPath())
+			}
+			branch := branchResponse{Name: "release/main"}
+			branch.Commit.ID = strings.ToUpper(relatedHead)
+			writeJSON(t, w, branch)
+		case "/api/v4/projects/84/repository/archive.tar.gz":
+			if r.URL.Query().Get("sha") != relatedHead {
+				t.Errorf("archive revision = %q", r.URL.Query().Get("sha"))
+			}
+			_, _ = io.WriteString(w, "related-archive")
+		default:
+			t.Fatal("unexpected request: " + r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "token", []string{"group/project", "group/related"}, map[string][]string{
+		"group/project": {"group/related"},
+	}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revision, archive, err := client.LoadRelatedRepositoryArchive(context.Background(), "group/project", "group/related")
+	if err != nil || revision != relatedHead || string(archive) != "related-archive" {
+		t.Fatalf("LoadRelatedRepositoryArchive() = %q, %q, %v", revision, archive, err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestLoadRelatedRepositoryArchiveRejectsUnsharedWithoutRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unshared repository reached GitLab")
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "token", []string{"group/project", "group/related"}, nil, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = client.LoadRelatedRepositoryArchive(context.Background(), "group/project", "group/related")
+	assertFailure(t, err, "repository_unavailable", false, false)
+}
+
+func TestLoadRelatedRepositoryArchiveFailsClosedForRenamedOrInaccessibleRepository(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		path     string
+		category string
+	}{
+		{name: "renamed", path: "group/renamed", category: "repository_unauthorized"},
+		{name: "inaccessible", status: http.StatusNotFound, category: "gitlab_authorization_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if test.status != 0 {
+					w.WriteHeader(test.status)
+					return
+				}
+				writeJSON(t, w, projectResponse{ID: 84, PathWithNamespace: test.path, DefaultBranch: "main"})
+			}))
+			defer server.Close()
+			client, err := New(server.URL, "token", []string{"group/project", "group/related"}, map[string][]string{
+				"group/project": {"group/related"},
+			}, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = client.LoadRelatedRepositoryArchive(context.Background(), "group/project", "group/related")
+			assertFailure(t, err, test.category, false, false)
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1", requests)
+			}
+		})
 	}
 }
 
@@ -402,7 +501,7 @@ func TestResponseAndInputLimitsFailClosed(t *testing.T) {
 		assertFailure(t, err, "note_body_limit_exceeded", false, false)
 	})
 
-	client, err := New("http://gitlab.internal", "token", []string{"group/project"}, nil)
+	client, err := New("http://gitlab.internal", "token", []string{"group/project"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +577,7 @@ func reviewServer(t *testing.T, diffs http.HandlerFunc) *httptest.Server {
 
 func newTestClient(t *testing.T, baseURL, token string, httpClient *http.Client) *Client {
 	t.Helper()
-	client, err := New(baseURL, token, []string{"group/project"}, httpClient)
+	client, err := New(baseURL, token, []string{"group/project"}, nil, httpClient)
 	if err != nil {
 		t.Fatal(err)
 	}
