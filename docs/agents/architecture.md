@@ -72,16 +72,18 @@ Claims jobs with leases, retries recoverable failures, and completes work only a
 
 ### Review agent
 
-The worker starts with bounded merge request metadata and changed-file diffs, then runs a small explicit Gemini function-calling loop. Gemini may request bounded context from the current repository or directionally shared related repositories through declared read-only tools. Application code dispatches each request and still requires a final summary and findings whose paths match fetched changed files before persistence.
+The worker starts with bounded merge request metadata and changed-file diffs, then runs a small explicit Gemini function-calling loop. Gemini may request bounded context from the current repository or directionally shared related repositories and active advisory memory for the exact current repository through declared read-only tools. Application code dispatches each request and still requires a final summary and findings whose paths match fetched changed files before persistence.
 
 ### Tool brokers
 
-Model-invocable tool brokers enforce repository allowlists, directional sharing rules, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy. The repository broker provides bounded file listing, text-file range reads, and case-sensitive literal search in the current repository and sharing-eligible related repositories. Every request names an exact repository exposed in the review input, and every result identifies its repository and immutable revision. Other brokers remain deferred.
+Model-invocable tool brokers enforce repository allowlists, directional sharing rules, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy. The repository broker provides bounded file listing, text-file range reads, and case-sensitive literal search in the current repository and sharing-eligible related repositories. Every request names an exact repository exposed in the review input, and every result identifies its repository and immutable revision.
+
+The memory broker provides bounded lexical search over active comment-derived lessons for the exact GitLab instance and numeric project under review. The model supplies only a query, not scope. Directional repository sharing does not broaden memory access. Results identify their repository scope, memory and finding identities, source reference and role, outcome, confidence, and memory update time, and label lessons as untrusted advisory guidance. Other brokers remain deferred.
 
 Tools may provide bounded, attributed access to:
 
 - The current repository and authorized, directionally shared internal repositories (implemented)
-- Runtime review memory
+- Runtime review memory (implemented)
 - Public documentation and repositories
 - Structured finding submission
 
@@ -107,11 +109,13 @@ The GitLab integration supports GitLab 17 and newer. The reconciler scans each a
 
 ## Context and State
 
-The model conversation begins with bounded changed-file diffs, relevant metadata, the exact current and sharing-eligible repository paths, the structured response schema, declared repository tools, and application-owned limits. Only validated, attributed tool results are added on later turns; conversations are not persisted. Authorization and limits remain deterministic regardless of model intent.
+The model conversation begins with bounded changed-file diffs, relevant metadata, the exact current and sharing-eligible repository paths, the structured response schema, declared repository and memory tools, and application-owned limits. Only validated, attributed tool results are added on later turns; conversations are not persisted. Authorization and limits remain deterministic regardless of model intent.
 
 SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 
 Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, finding and GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
+
+For a successful review, SQLite records each unique memory identity and version returned to Gemini and its retrieval time in the same checkpoint as the validated result. This establishes which memory was exposed, not which memory affected model reasoning. The audit shares the review result's lifetime and stores no query, lesson copy, prompt, tool response, or failed-attempt history.
 
 Gemini may activate a repository-scoped lesson automatically after assessing the attributed comment and persisted finding context. Active means eligible for future bounded retrieval, not trusted policy: current code and explicit project policy override it. Comment edits replace current derived state. Periodic source checks deactivate memory after comment deletion or an update whose webhook was missed; GitLab emits Note Hooks for creation and updates but not deletion.
 

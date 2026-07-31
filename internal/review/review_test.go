@@ -14,24 +14,28 @@ import (
 	"google.golang.org/genai"
 )
 
-func TestGeminiGenerationDeclaresOnlyRepositoryFunctions(t *testing.T) {
+func TestGeminiGenerationDeclaresOnlyBrokeredFunctions(t *testing.T) {
 	config := generationConfig()
-	if len(config.Tools) != 1 || len(config.Tools[0].FunctionDeclarations) != 3 || config.Tools[0].CodeExecution != nil || config.Tools[0].GoogleSearch != nil || config.Tools[0].URLContext != nil {
+	if len(config.Tools) != 1 || len(config.Tools[0].FunctionDeclarations) != 4 || config.Tools[0].CodeExecution != nil || config.Tools[0].GoogleSearch != nil || config.Tools[0].URLContext != nil {
 		t.Fatalf("tools = %+v", config.Tools)
 	}
-	names := make([]string, 0, 3)
+	names := make([]string, 0, 4)
 	for _, declaration := range config.Tools[0].FunctionDeclarations {
 		names = append(names, declaration.Name)
-	}
-	if strings.Join(names, ",") != strings.Join([]string{repository.ToolListFiles, repository.ToolReadFile, repository.ToolSearch}, ",") {
-		t.Fatalf("function declarations = %v", names)
-	}
-	for _, declaration := range config.Tools[0].FunctionDeclarations {
 		schema := declaration.ParametersJsonSchema.(map[string]any)
 		required := schema["required"].([]string)
-		if !slices.Contains(required, "repository") {
+		if declaration.Name == ToolSearchMemory {
+			_, allowsRepository := schema["properties"].(map[string]any)["repository"]
+			if slices.Contains(required, "repository") || allowsRepository {
+				t.Fatalf("memory tool permits model-selected scope: %+v", schema)
+			}
+		} else if !slices.Contains(required, "repository") {
 			t.Fatalf("%s does not require repository: %+v", declaration.Name, schema)
 		}
+	}
+	want := []string{repository.ToolListFiles, repository.ToolReadFile, repository.ToolSearch, ToolSearchMemory}
+	if !slices.Equal(names, want) {
+		t.Fatalf("function declarations = %v", names)
 	}
 }
 
@@ -113,6 +117,27 @@ func TestGeminiReviewerDispatchesBoundedRepositoryToolCall(t *testing.T) {
 	}
 }
 
+func TestGeminiReviewerDispatchesMemoryAndRepositoryTools(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "memory-call", Name: ToolSearchMemory, Args: map[string]any{"query": "generated files"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "repository-call", Name: repository.ToolReadFile, Args: map[string]any{"repository": "group/project", "path": "generator.go"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromText(`{"summary":"current repository evidence wins","findings":[]}`, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{result: map[string]any{"authority": "untrusted_advisory", "memories": []any{}}}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	result, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	if err != nil || result.Summary != "current repository evidence wins" || broker.calls != 2 {
+		t.Fatalf("Review() result=%+v calls=%d error=%v", result, broker.calls, err)
+	}
+	if !strings.Contains(systemInstruction, "Current code") || !strings.Contains(systemInstruction, "override conflicting memory") {
+		t.Fatalf("system instruction does not subordinate memory: %q", systemInstruction)
+	}
+}
+
 func TestGeminiReviewerRejectsSensitiveRepositoryToolOutput(t *testing.T) {
 	generator := &fakeGenerator{turns: []*genai.Content{
 		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
@@ -123,7 +148,7 @@ func TestGeminiReviewerRejectsSensitiveRepositoryToolOutput(t *testing.T) {
 	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", []string{`a"b`})
 	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
 	var failureError *failure.Error
-	if !errors.As(err, &failureError) || failureError.Category != "sensitive_repository_content" || failureError.Retryable {
+	if !errors.As(err, &failureError) || failureError.Category != "sensitive_tool_content" || failureError.Retryable {
 		t.Fatalf("Review() error = %v", err)
 	}
 	if generator.calls != 1 {
@@ -221,6 +246,24 @@ func TestGeminiReviewerEnforcesToolCallLimit(t *testing.T) {
 	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
 	var failureError *failure.Error
 	if !errors.As(err, &failureError) || failureError.Category != "repository_tool_call_limit_exceeded" || !failureError.Retryable {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if broker.calls != 0 {
+		t.Fatalf("over-limit tools dispatched %d times", broker.calls)
+	}
+}
+
+func TestGeminiReviewerEnforcesIndependentMemoryToolCallLimit(t *testing.T) {
+	parts := make([]*genai.Part, maxMemoryToolCalls+1)
+	for index := range parts {
+		parts[index] = &genai.Part{FunctionCall: &genai.FunctionCall{Name: ToolSearchMemory}}
+	}
+	generator := &fakeGenerator{turns: []*genai.Content{genai.NewContentFromParts(parts, genai.RoleModel)}}
+	broker := &fakeToolBroker{result: map[string]any{"memories": []any{}}}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "memory_tool_call_limit_exceeded" || !failureError.Retryable {
 		t.Fatalf("Review() error = %v", err)
 	}
 	if broker.calls != 0 {

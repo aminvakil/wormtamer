@@ -5,7 +5,7 @@ Status: proposed
 Depends on:
 
 - [Runtime memory](../agents/architecture.md#context-and-state)
-- [Retrieve active review memory](retrieve-review-memory.md)
+- [Review memory retrieval](../agents/architecture.md#tool-brokers)
 
 ## Goal
 

@@ -210,7 +210,7 @@ func prepareFinding(t *testing.T, storage *Store, now time.Time) string {
 	}
 	findingID := "WT-F-" + strings.Repeat("A", 26)
 	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "review-owner", result, []string{findingID}, now.Add(time.Second)); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "review-owner", result, []string{findingID}, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	return findingID

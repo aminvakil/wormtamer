@@ -22,7 +22,7 @@ Credentials are loaded as plaintext from the explicit deployment configuration f
 
 Authenticate GitLab webhooks with the configured webhook secret before accepting their contents. GitLab calls go through a trusted broker outside repository workspaces. The broker builds API paths under the configured GitLab base URL, rejects every redirect to prevent PAT forwarding, and bounds request time and response size. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
 
-Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The explicit function-calling loop declares only repository read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
+Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The explicit function-calling loop declares only repository and runtime-memory read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
 
 Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Before constructing a model prompt, reject review metadata, diffs, or transient feedback comments containing any configured secret; do not send, log, store, or identify the matching value. Response schemas improve structure but do not replace local validation.
 
@@ -70,6 +70,8 @@ Natural merge request comments, actor identity fields, findings, and model inter
 Gemini may automatically activate a bounded repository-scoped lesson after associating a comment with a supplied finding. Automatic activation is an application decision, not proof that the lesson is policy: memory remains advisory model output, and current code and explicit team policy always override it. The model cannot select another repository, invent a finding identity, broaden scope, or preserve arbitrary comment text. Trusted code validates the finding, outcome, confidence, lesson bounds, secret exclusion, and fixed repository scope.
 
 Store the GitLab project, merge request, note, actor, and finding identifiers, source URL, role snapshot, structured current decision, lesson, confidence, active state, and timestamps. Do not retain source comment bodies or revisions. Edits replace derived state, and deletion deactivates it through source reconciliation.
+
+During review, the memory broker derives scope from the trusted review identity and accepts no model-selected repository or installation. It queries only active current lessons for that exact GitLab instance and numeric project before deterministic ranking. Directional repository sharing does not expose another repository's memory. Results identify provenance and explicitly label lessons as untrusted advisory guidance; current code, changed diffs, and explicit policy remain authoritative. Invalid requests disclose no memory, and broker or SQLite failures stop rather than degrade the review.
 
 Runtime memory is separate from contributor documentation under `docs/agents/`.
 

@@ -31,7 +31,8 @@ const (
 type JobStore interface {
 	ClaimJob(context.Context, string, time.Time, time.Duration, int) (*store.Job, error)
 	RenewLease(context.Context, int64, string, time.Time, time.Duration) (bool, error)
-	SaveReviewResult(context.Context, int64, string, []byte, []string, time.Time) error
+	SaveReviewResult(context.Context, int64, string, []byte, []string, []store.ReviewMemoryRetrieval, time.Time) error
+	ListActiveReviewMemories(context.Context, string, int64) ([]store.ReviewMemory, error)
 	RetryJob(context.Context, int64, string, time.Time, time.Time, int, string, string) (string, error)
 	FinishJob(context.Context, int64, string, string, string, string, time.Time) error
 	CompletePublication(context.Context, int64, string, string, int64, time.Time) error
@@ -283,7 +284,7 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if err != nil {
 			return err
 		}
-		tools := newReviewRepository(snapshot, w.gitlab, w.workspaces)
+		tools := newReviewTools(snapshot, w.gitlab, w.workspaces, w.store, w.now)
 		validated, encoded, reviewErr := w.reviewer.Review(ctx, snapshot, tools)
 		closeErr := tools.Close()
 		if reviewErr != nil {
@@ -296,7 +297,7 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if err := applyFindingIDs(&validated, job.FindingIDs); err != nil {
 			return err
 		}
-		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, w.now().UTC()); err != nil {
+		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, tools.Retrievals(), w.now().UTC()); err != nil {
 			if errors.Is(err, store.ErrLeaseLost) {
 				return err
 			}

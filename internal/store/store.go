@@ -13,7 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const (
 	OutcomeQueued          = "queued"
@@ -81,6 +81,23 @@ type Job struct {
 	AttemptCount        int
 	ValidatedResultJSON []byte
 	FindingIDs          []string
+}
+
+type ReviewMemory struct {
+	MemoryID   string
+	FindingID  string
+	Outcome    string
+	Confidence string
+	Lesson     string
+	SourceRole string
+	SourceURL  string
+	UpdatedAt  time.Time
+}
+
+type ReviewMemoryRetrieval struct {
+	MemoryID        string
+	MemoryUpdatedAt time.Time
+	RetrievedAt     time.Time
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -371,6 +388,21 @@ CREATE TABLE review_memories (
 
 PRAGMA user_version = 5;
 `
+		case 5:
+			migration = `
+CREATE TABLE review_memory_retrievals (
+    job_id INTEGER NOT NULL REFERENCES review_results(job_id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL
+        CHECK(length(memory_id) = 31)
+        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
+        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
+    memory_updated_at TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, memory_id, memory_updated_at)
+);
+
+PRAGMA user_version = 6;
+`
 		}
 
 		if _, err := tx.ExecContext(ctx, migration); err != nil {
@@ -617,7 +649,7 @@ WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
 	return updated == 1, nil
 }
 
-func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, findingIDs []string, now time.Time) error {
+func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, findingIDs []string, retrievals []ReviewMemoryRetrieval, now time.Time) error {
 	if len(resultJSON) == 0 || len(resultJSON) > 65536 || len(findingIDs) > 20 {
 		return errors.New("invalid validated review result")
 	}
@@ -630,6 +662,17 @@ func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string,
 			return errors.New("duplicate finding identifier")
 		}
 		seenIDs[id] = struct{}{}
+	}
+	seenRetrievals := make(map[string]struct{}, len(retrievals))
+	for _, retrieval := range retrievals {
+		key := retrieval.MemoryID + "\x00" + formatTime(retrieval.MemoryUpdatedAt)
+		if !validMemoryID(retrieval.MemoryID) || retrieval.MemoryUpdatedAt.IsZero() || retrieval.RetrievedAt.IsZero() {
+			return errors.New("invalid review memory retrieval")
+		}
+		if _, exists := seenRetrievals[key]; exists {
+			return errors.New("duplicate review memory retrieval")
+		}
+		seenRetrievals[key] = struct{}{}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -648,6 +691,13 @@ ON CONFLICT(job_id) DO NOTHING`, jobID, resultJSON, formatTime(now)); err != nil
 INSERT INTO review_findings (finding_id, job_id, finding_index)
 VALUES (?, ?, ?)`, id, jobID, index); err != nil {
 			return fmt.Errorf("store finding identifier: %w", err)
+		}
+	}
+	for _, retrieval := range retrievals {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO review_memory_retrievals (job_id, memory_id, memory_updated_at, retrieved_at)
+VALUES (?, ?, ?, ?)`, jobID, retrieval.MemoryID, formatTime(retrieval.MemoryUpdatedAt), formatTime(retrieval.RetrievedAt)); err != nil {
+			return fmt.Errorf("store review memory retrieval: %w", err)
 		}
 	}
 	update, err := tx.ExecContext(ctx, `

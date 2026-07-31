@@ -261,10 +261,10 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, nil, recoveredAt); !errors.Is(err, ErrLeaseLost) {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, nil, nil, recoveredAt); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("wrong-owner SaveReviewResult() error = %v", err)
 	}
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, nil, recoveredAt); err != nil {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, nil, nil, recoveredAt); err != nil {
 		t.Fatalf("SaveReviewResult() error = %v", err)
 	}
 
@@ -306,7 +306,7 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[{"severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
 	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
-	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, nil, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.Close(); err != nil {
@@ -340,7 +340,7 @@ func TestSaveReviewResultRejectsMalformedFindingIdentifiers(t *testing.T) {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "owner", resultJSON, []string{"model-id"}, now); err == nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, "owner", resultJSON, []string{"model-id"}, nil, now); err == nil {
 		t.Fatal("SaveReviewResult() accepted a malformed finding identifier")
 	}
 	assertCount(t, storage.db, "review_results", 0)
