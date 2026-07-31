@@ -14,12 +14,38 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 const workerHead = "0123456789abcdef0123456789abcdef01234567"
+
+func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+
+	broker := &fakeGitLab{}
+	workspaces := &fakeWorkspaces{}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}, useTools: true}
+	worker, err := New(storage, broker, workspaces, reviewer, slog.Default(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	if broker.archiveCalls != 1 || workspaces.createCalls != 1 || workspaces.revision != workerHead || string(workspaces.archive) != "archive" {
+		t.Fatalf("archive calls=%d workspace=%+v", broker.archiveCalls, workspaces)
+	}
+	if workspaces.workspace == nil || workspaces.workspace.calls != 1 || !workspaces.workspace.closed {
+		t.Fatalf("review workspace = %+v", workspaces.workspace)
+	}
+}
 
 func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	storage, db := workerStore(t)
@@ -45,7 +71,7 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	assertJobState(t, db, store.JobCompleted)
 	assertCount(t, db, "review_results", 1)
 	assertCount(t, db, "publications", 1)
-	if broker.loadCalls != 1 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
+	if broker.loadCalls != 1 || broker.archiveCalls != 0 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
 		t.Fatalf("calls: broker=%+v reviewer=%+v", broker, reviewer)
 	}
 	if !strings.Contains(broker.postedBody, "<!-- wormtamer:review=") || !strings.Contains(broker.postedBody, "Check error") {
@@ -277,7 +303,7 @@ func newTestWorker(t *testing.T, storage JobStore, broker *fakeGitLab, reviewer 
 	if logs == nil {
 		logs = &bytes.Buffer{}
 	}
-	result, err := New(storage, broker, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
+	result, err := New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,6 +364,7 @@ type fakeGitLab struct {
 	checkError       error
 	checkErrors      []error
 	loadCalls        int
+	archiveCalls     int
 	checkCalls       int
 	findCalls        int
 	postCalls        int
@@ -355,6 +382,11 @@ func (g *fakeGitLab) LoadReview(_ context.Context, identity gitlab.Identity) (gi
 		Identity: identity, Title: "MR", Description: "description", SourceBranch: "feature", TargetBranch: "main",
 		Files: []gitlab.ChangedFile{{OldPath: "main.go", NewPath: "main.go", Diff: "+private-diff"}},
 	}, nil
+}
+
+func (g *fakeGitLab) LoadRepositoryArchive(_ context.Context, _ gitlab.Identity) ([]byte, error) {
+	g.archiveCalls++
+	return []byte("archive"), nil
 }
 
 func (g *fakeGitLab) CheckCurrent(_ context.Context, _ gitlab.Identity) error {
@@ -384,16 +416,52 @@ func (g *fakeGitLab) PostNote(_ context.Context, _ gitlab.Identity, body string)
 	return g.noteID, nil
 }
 
-type fakeReviewer struct {
-	result review.Result
-	err    error
+type fakeWorkspaces struct {
+	createCalls int
+	revision    string
+	archive     []byte
+	workspace   *fakeWorkspace
+}
+
+func (m *fakeWorkspaces) Create(_ context.Context, revision string, archive []byte) (repository.Workspace, error) {
+	m.createCalls++
+	m.revision = revision
+	m.archive = append([]byte(nil), archive...)
+	m.workspace = &fakeWorkspace{}
+	return m.workspace, nil
+}
+
+type fakeWorkspace struct {
+	closed bool
 	calls  int
 }
 
-func (r *fakeReviewer) Review(_ context.Context, _ gitlab.Snapshot) (review.Result, []byte, error) {
+func (w *fakeWorkspace) Call(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+	w.calls++
+	return map[string]any{"files": []string{}}, nil
+}
+
+func (w *fakeWorkspace) Close() error {
+	w.closed = true
+	return nil
+}
+
+type fakeReviewer struct {
+	result   review.Result
+	err      error
+	calls    int
+	useTools bool
+}
+
+func (r *fakeReviewer) Review(ctx context.Context, _ gitlab.Snapshot, tools repository.ToolBroker) (review.Result, []byte, error) {
 	r.calls++
 	if r.err != nil {
 		return review.Result{}, nil, r.err
+	}
+	if r.useTools {
+		if _, err := tools.Call(ctx, repository.ToolListFiles, map[string]any{}); err != nil {
+			return review.Result{}, nil, err
+		}
 	}
 	encoded, err := json.Marshal(r.result)
 	return r.result, encoded, err
@@ -403,7 +471,7 @@ type blockingReviewer struct {
 	started chan struct{}
 }
 
-func (r *blockingReviewer) Review(ctx context.Context, _ gitlab.Snapshot) (review.Result, []byte, error) {
+func (r *blockingReviewer) Review(ctx context.Context, _ gitlab.Snapshot, _ repository.ToolBroker) (review.Result, []byte, error) {
 	close(r.started)
 	<-ctx.Done()
 	return review.Result{}, nil, ctx.Err()
@@ -415,7 +483,7 @@ type stubbornReviewer struct {
 	finished chan struct{}
 }
 
-func (r *stubbornReviewer) Review(_ context.Context, _ gitlab.Snapshot) (review.Result, []byte, error) {
+func (r *stubbornReviewer) Review(_ context.Context, _ gitlab.Snapshot, _ repository.ToolBroker) (review.Result, []byte, error) {
 	close(r.started)
 	<-r.release
 	close(r.finished)

@@ -4,7 +4,7 @@ Status: proposed
 
 Depends on:
 
-- [Inspect the current repository with bounded tools](inspect-current-repository.md)
+- [Explicit review tool loop](../agents/architecture.md#review-agent)
 - [Curate runtime review memory](curate-runtime-review-memory.md)
 
 ## Goal

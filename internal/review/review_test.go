@@ -9,8 +9,23 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/repository"
 	"google.golang.org/genai"
 )
+
+func TestGeminiGenerationDeclaresOnlyRepositoryFunctions(t *testing.T) {
+	config := generationConfig()
+	if len(config.Tools) != 1 || len(config.Tools[0].FunctionDeclarations) != 3 || config.Tools[0].CodeExecution != nil || config.Tools[0].GoogleSearch != nil || config.Tools[0].URLContext != nil {
+		t.Fatalf("tools = %+v", config.Tools)
+	}
+	names := make([]string, 0, 3)
+	for _, declaration := range config.Tools[0].FunctionDeclarations {
+		names = append(names, declaration.Name)
+	}
+	if strings.Join(names, ",") != strings.Join([]string{repository.ToolListFiles, repository.ToolReadFile, repository.ToolSearch}, ",") {
+		t.Fatalf("function declarations = %v", names)
+	}
+}
 
 func TestGeminiReviewerValidatesStructuredResult(t *testing.T) {
 	generator := &fakeGenerator{output: []byte(`{
@@ -24,7 +39,7 @@ func TestGeminiReviewerValidatesStructuredResult(t *testing.T) {
   }]
 }`)}
 	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", []string{"application-secret"})
-	result, encoded, err := reviewer.Review(context.Background(), testSnapshot())
+	result, encoded, err := reviewer.Review(context.Background(), testSnapshot(), nil)
 	if err != nil {
 		t.Fatalf("Review() error = %v", err)
 	}
@@ -50,7 +65,7 @@ func TestGeminiReviewerRejectsSensitiveInputBeforeGeneration(t *testing.T) {
 			reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", []string{"configured-secret"})
 			snapshot := testSnapshot()
 			test.mutate(&snapshot)
-			_, _, err := reviewer.Review(context.Background(), snapshot)
+			_, _, err := reviewer.Review(context.Background(), snapshot, nil)
 			var failureError *failure.Error
 			if !errors.As(err, &failureError) || failureError.Category != "sensitive_review_input" || failureError.Retryable {
 				t.Fatalf("Review() error = %v", err)
@@ -59,6 +74,164 @@ func TestGeminiReviewerRejectsSensitiveInputBeforeGeneration(t *testing.T) {
 				t.Fatalf("generator received sensitive input: calls=%d prompt=%q", generator.calls, generator.prompt)
 			}
 		})
+	}
+}
+
+func TestGeminiReviewerDispatchesBoundedRepositoryToolCall(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "call-1", Name: repository.ToolReadFile, Args: map[string]any{"path": "internal/helper.go"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromText(findingJSON("high", "internal/example.go"), genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{result: map[string]any{
+		"revision": strings.Repeat("a", 40), "path": "internal/helper.go", "lines": []string{"package helper"},
+	}}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	result, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	if err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Path != "internal/example.go" || broker.calls != 1 || generator.calls != 2 {
+		t.Fatalf("result=%+v broker calls=%d generator calls=%d", result, broker.calls, generator.calls)
+	}
+	request := generator.requests[1]
+	if len(request) != 3 {
+		t.Fatalf("second request contents = %d", len(request))
+	}
+	response := request[2].Parts[0].FunctionResponse
+	if response == nil || response.ID != "call-1" || response.Name != repository.ToolReadFile || response.Response["path"] != "internal/helper.go" {
+		t.Fatalf("function response = %+v", response)
+	}
+}
+
+func TestGeminiReviewerRejectsSensitiveRepositoryToolOutput(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			Name: repository.ToolSearch, Args: map[string]any{"query": "token"},
+		}}}, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{result: map[string]any{"matches": []string{`contains a"b`}}}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", []string{`a"b`})
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "sensitive_repository_content" || failureError.Retryable {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if generator.calls != 1 {
+		t.Fatalf("sensitive output sent back to Gemini; calls=%d", generator.calls)
+	}
+}
+
+func TestGeminiReviewerPropagatesRetryableRepositoryToolFailure(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			Name: repository.ToolReadFile, Args: map[string]any{"path": "internal/helper.go"},
+		}}}, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{err: failure.Retry("repository_workspace_read_failed", 0)}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "repository_workspace_read_failed" || !failureError.Retryable {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if generator.calls != 1 {
+		t.Fatalf("review continued after tool failure; calls=%d", generator.calls)
+	}
+}
+
+func TestGeminiReviewerReturnsOnlyCorrectableToolFailuresToModel(t *testing.T) {
+	for _, category := range []string{
+		"repository_tool_arguments_invalid",
+		"repository_path_invalid",
+		"repository_path_not_found",
+	} {
+		t.Run(category, func(t *testing.T) {
+			generator := &fakeGenerator{turns: []*genai.Content{
+				genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-1", Name: repository.ToolReadFile, Args: map[string]any{"path": "requested.go"},
+				}}}, genai.RoleModel),
+				genai.NewContentFromText(`{"summary":"corrected request","findings":[]}`, genai.RoleModel),
+			}}
+			broker := &fakeToolBroker{err: failure.Failed(category)}
+			reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+			result, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+			if err != nil || result.Summary != "corrected request" {
+				t.Fatalf("Review() result=%+v error=%v", result, err)
+			}
+			response := generator.requests[1][2].Parts[0].FunctionResponse
+			if response == nil || response.Response["error"] != category {
+				t.Fatalf("function response = %+v", response)
+			}
+		})
+	}
+}
+
+func TestGeminiReviewerPropagatesRepositoryBoundaryFailures(t *testing.T) {
+	for _, category := range []string{
+		"repository_unauthorized",
+		"gitlab_authorization_failed",
+		"repository_archive_response_limit_exceeded",
+		"repository_archive_invalid",
+		"repository_archive_invalid_path",
+		"repository_archive_duplicate_path",
+		"repository_archive_limit_exceeded",
+		"repository_tool_output_limit_exceeded",
+		"repository_search_limit_exceeded",
+	} {
+		t.Run(category, func(t *testing.T) {
+			generator := &fakeGenerator{turns: []*genai.Content{
+				genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+					Name: repository.ToolSearch, Args: map[string]any{"query": "Check"},
+				}}}, genai.RoleModel),
+				genai.NewContentFromText(`{"summary":"degraded review","findings":[]}`, genai.RoleModel),
+			}}
+			broker := &fakeToolBroker{err: failure.Failed(category)}
+			reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+			_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+			var failureError *failure.Error
+			if !errors.As(err, &failureError) || failureError.Category != category {
+				t.Fatalf("Review() error = %v", err)
+			}
+			if generator.calls != 1 {
+				t.Fatalf("review continued after boundary failure; calls=%d", generator.calls)
+			}
+		})
+	}
+}
+
+func TestGeminiReviewerEnforcesToolCallLimit(t *testing.T) {
+	parts := make([]*genai.Part, maxToolCalls+1)
+	for index := range parts {
+		parts[index] = &genai.Part{FunctionCall: &genai.FunctionCall{Name: repository.ToolListFiles}}
+	}
+	generator := &fakeGenerator{turns: []*genai.Content{genai.NewContentFromParts(parts, genai.RoleModel)}}
+	broker := &fakeToolBroker{result: map[string]any{"files": []string{}}}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "repository_tool_call_limit_exceeded" || !failureError.Retryable {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if broker.calls != 0 {
+		t.Fatalf("over-limit tools dispatched %d times", broker.calls)
+	}
+}
+
+func TestGeminiReviewerRejectsUndeclaredTool(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "shell"}}}, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{}
+	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "model_requested_undeclared_tool" || !failureError.Retryable {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if broker.calls != 0 {
+		t.Fatalf("undeclared tool dispatched %d times", broker.calls)
 	}
 }
 
@@ -226,17 +399,41 @@ func testSnapshot() gitlab.Snapshot {
 	}
 }
 
-type fakeGenerator struct {
-	output []byte
+type fakeToolBroker struct {
+	result map[string]any
 	err    error
-	model  string
-	prompt string
 	calls  int
 }
 
-func (g *fakeGenerator) Generate(_ context.Context, model, prompt string) ([]byte, error) {
+func (b *fakeToolBroker) Call(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+	b.calls++
+	return b.result, b.err
+}
+
+type fakeGenerator struct {
+	output   []byte
+	turns    []*genai.Content
+	err      error
+	model    string
+	prompt   string
+	calls    int
+	requests [][]*genai.Content
+}
+
+func (g *fakeGenerator) Generate(_ context.Context, model string, contents []*genai.Content) (*genai.Content, error) {
 	g.calls++
 	g.model = model
-	g.prompt = prompt
-	return g.output, g.err
+	g.requests = append(g.requests, append([]*genai.Content(nil), contents...))
+	if len(contents) > 0 && len(contents[0].Parts) > 0 {
+		g.prompt = contents[0].Parts[0].Text
+	}
+	if g.err != nil {
+		return nil, g.err
+	}
+	if len(g.turns) > 0 {
+		turn := g.turns[0]
+		g.turns = g.turns[1:]
+		return turn, nil
+	}
+	return genai.NewContentFromText(string(g.output), genai.RoleModel), nil
 }

@@ -2,7 +2,7 @@
 
 Status: proposed
 
-Depends on: [Inspect the current repository with bounded tools](inspect-current-repository.md)
+Depends on: [Current-repository tool broker](../agents/architecture.md#tool-brokers)
 
 ## Goal
 

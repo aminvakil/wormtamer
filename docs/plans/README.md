@@ -6,15 +6,14 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 Implement plans in the order listed here unless a plan's status or dependencies are explicitly changed. This list is the authoritative order; filenames remain stable as completed plans are removed.
 
-1. [Inspect the current repository with bounded tools](inspect-current-repository.md)
-2. [Inspect authorized related repositories](inspect-authorized-repositories.md)
-3. [Publish addressable review findings](publish-addressable-findings.md)
-4. [Capture explicit review feedback](capture-explicit-review-feedback.md)
-5. [Curate runtime review memory](curate-runtime-review-memory.md)
-6. [Retrieve approved review memory](retrieve-review-memory.md)
-7. [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md)
-8. [Research constrained public sources](research-public-sources.md)
-9. [Update the project README for completed capabilities](update-project-readme.md)
+1. [Inspect authorized related repositories](inspect-authorized-repositories.md)
+2. [Publish addressable review findings](publish-addressable-findings.md)
+3. [Capture explicit review feedback](capture-explicit-review-feedback.md)
+4. [Curate runtime review memory](curate-runtime-review-memory.md)
+5. [Retrieve approved review memory](retrieve-review-memory.md)
+6. [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md)
+7. [Research constrained public sources](research-public-sources.md)
+8. [Update the project README for completed capabilities](update-project-readme.md)
 
 All roadmap plans are proposed. Resolve each plan's open policy and interaction questions before approving implementation.
 

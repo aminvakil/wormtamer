@@ -18,6 +18,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/config"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/reconcile"
+	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 	"github.com/aminvakil/wormtamer/internal/webhook"
@@ -55,6 +56,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	defer storage.Close()
+	workspaceManager, err := repository.NewManager(cfg.DatabasePath + ".workspaces")
+	if err != nil {
+		return err
+	}
+	defer workspaceManager.Close()
 
 	gitLabClient, err := gitlab.New(cfg.GitLab.BaseURL, cfg.GitLab.PersonalAccessToken, cfg.AuthorizedRepositories, nil)
 	if err != nil {
@@ -66,7 +72,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	reviewWorker, err := worker.New(storage, gitLabClient, geminiReviewer, logger, []string{
+	reviewWorker, err := worker.New(storage, gitLabClient, workspaceManager, geminiReviewer, logger, []string{
 		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
 	})
 	if err != nil {

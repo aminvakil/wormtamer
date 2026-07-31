@@ -14,7 +14,7 @@ The build context includes only the Go module files and application source selec
 
 ## Configure
 
-Copy `config.example.json` to a location outside the repository and image, then replace every placeholder with the installation's GitLab URL, credentials, Gemini model, and authorized repositories. The example already uses the container listen address and persistent database path:
+Copy `config.example.json` to a location outside the repository and image, then replace every placeholder with the installation's GitLab URL, credentials, Gemini model, and authorized repositories. Wormtamer does not support Gemini models earlier than version 3; see the project [compatibility baseline](agents/architecture.md#compatibility-baseline). The example already uses the container listen address and persistent database path:
 
 ```sh
 cp config.example.json /secure/path/config.json

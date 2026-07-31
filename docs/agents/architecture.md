@@ -12,9 +12,17 @@ One installation runs as one process and replica because SQLite and local reposi
 - One OCI image with persistent SQLite storage
 - SQLite through `github.com/mattn/go-sqlite3`, built with CGO, as the only application database
 - The Gemini Developer API through `google.golang.org/genai` as the only model backend
-- One structured Gemini generation request today; a small explicit function-calling loop when model tools are introduced, with no general agent framework or automatic tool execution
+- A small explicit Gemini function-calling loop with no general agent framework or automatic tool execution
 
 A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value; generation settings remain application-owned rather than deployment-configurable.
+
+## Compatibility Baseline
+
+Compatibility with Gemini versions earlier than 3 is explicitly out of scope. Do not add fallbacks, tests, or review findings for those versions. Otherwise, investigate model-version compatibility only for a concrete observed failure or an explicit task.
+
+No release or production deployment compatibility baseline exists yet. Until one is explicitly established, changes do not need to preserve configuration formats, application interfaces, or SQLite state created by earlier development builds; recreating development configuration or state is acceptable when it keeps the current design simpler and correct. This does not relax correctness, durability, or recovery requirements for a running version.
+
+Establish an upgrade and compatibility policy before the first production deployment.
 
 ## Deployment Configuration
 
@@ -59,15 +67,15 @@ Claims jobs with leases, retries recoverable failures, and completes work only a
 
 ### Review agent
 
-The current worker sends bounded merge request metadata and changed-file diffs in one structured Gemini request. Gemini returns a summary and findings whose paths must match fetched changed files; application code validates the result before persistence. Model-invocable tools and additional context retrieval are deferred.
+The worker starts with bounded merge request metadata and changed-file diffs, then runs a small explicit Gemini function-calling loop. Gemini may request bounded current-repository context through declared read-only tools. Application code dispatches each request and still requires a final summary and findings whose paths match fetched changed files before persistence.
 
 ### Tool brokers
 
-Future model-invocable tool brokers will enforce repository allowlists, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy.
+Model-invocable tool brokers enforce repository allowlists, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy. The current repository broker provides bounded file listing, text-file range reads, and case-sensitive literal search at the reviewed revision. Other brokers remain deferred.
 
 Tools may provide bounded, attributed access to:
 
-- The current repository
+- The current repository (implemented)
 - Authorized internal repositories
 - Runtime review memory
 - Public documentation and repositories
@@ -75,9 +83,9 @@ Tools may provide bounded, attributed access to:
 
 ### Repository workspace
 
-Holds a temporary checkout of the current repository. Other repositories are fetched lazily. Checkouts and caches are disposable and never authoritative state.
+When Gemini first requests repository context, the GitLab broker downloads a bounded repository archive at the exact reviewed head SHA. Trusted application code extracts validated regular UTF-8 text files into an installation-local disposable workspace; it does not invoke Git, follow symlinks, initialize submodules, or expose binary and oversized files. The workspace is removed after each review, and its dedicated root is cleaned at startup and shutdown.
 
-Repository workspaces are not implemented in the current summary-review milestone. When introduced, they may permit bounded reading and searching but must not execute repository-controlled code without an approved sandbox design.
+Repository tools may list, read, and search this snapshot but cannot execute repository-controlled code. Other repository checkouts and future caches remain disposable and never authoritative state.
 
 ### Publication broker
 
@@ -89,7 +97,7 @@ The GitLab integration supports GitLab 17 and newer. The reconciler scans each a
 
 ## Context and State
 
-The current model request contains bounded changed-file diffs, relevant metadata, the structured response schema, and application-owned limits. It declares no tools and cannot request additional context. When tools are introduced, authorization and limits remain deterministic regardless of model intent.
+The model conversation begins with bounded changed-file diffs, relevant metadata, the structured response schema, declared current-repository tools, and application-owned limits. Only validated, attributed tool results are added on later turns; conversations are not persisted. Authorization and limits remain deterministic regardless of model intent.
 
 SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 

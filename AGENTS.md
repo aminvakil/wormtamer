@@ -37,6 +37,7 @@ Read only the documents relevant to the subsystem being changed.
 - Prefer the smallest change that satisfies the documented requirements.
 - Keep GitLab integration, model reasoning, authorization, persistence, and repository access as separate concerns.
 - Make external side effects recoverable and idempotent.
+- Follow the [compatibility baseline](docs/agents/architecture.md#compatibility-baseline). Do not investigate hypothetical Gemini-version compatibility: versions earlier than 3 are out of scope, and other compatibility work requires an explicit task or concrete failure.
 - Create a task plan only for substantial work that changes architecture, security boundaries, persistent state, public contracts, or several components.
 - Do not commit or push unless explicitly requested.
 

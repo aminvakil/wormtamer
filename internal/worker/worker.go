@@ -12,6 +12,7 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 )
@@ -37,18 +38,24 @@ type JobStore interface {
 
 type GitLabBroker interface {
 	LoadReview(context.Context, gitlab.Identity) (gitlab.Snapshot, error)
+	LoadRepositoryArchive(context.Context, gitlab.Identity) ([]byte, error)
 	CheckCurrent(context.Context, gitlab.Identity) error
 	FindNote(context.Context, gitlab.Identity, string) (int64, bool, error)
 	PostNote(context.Context, gitlab.Identity, string) (int64, error)
 }
 
+type RepositoryWorkspaces interface {
+	Create(context.Context, string, []byte) (repository.Workspace, error)
+}
+
 type Reviewer interface {
-	Review(context.Context, gitlab.Snapshot) (review.Result, []byte, error)
+	Review(context.Context, gitlab.Snapshot, repository.ToolBroker) (review.Result, []byte, error)
 }
 
 type Worker struct {
 	store         JobStore
 	gitlab        GitLabBroker
+	workspaces    RepositoryWorkspaces
 	reviewer      Reviewer
 	logger        *slog.Logger
 	owner         string
@@ -57,13 +64,41 @@ type Worker struct {
 	shutdownGrace time.Duration
 }
 
-func New(storage JobStore, gitLab GitLabBroker, reviewer Reviewer, logger *slog.Logger, forbidden []string) (*Worker, error) {
+type reviewRepository struct {
+	identity   gitlab.Identity
+	gitlab     GitLabBroker
+	workspaces RepositoryWorkspaces
+	workspace  repository.Workspace
+}
+
+func (r *reviewRepository) Call(ctx context.Context, name string, arguments map[string]any) (map[string]any, error) {
+	if r.workspace == nil {
+		archive, err := r.gitlab.LoadRepositoryArchive(ctx, r.identity)
+		if err != nil {
+			return nil, err
+		}
+		r.workspace, err = r.workspaces.Create(ctx, r.identity.HeadSHA, archive)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return r.workspace.Call(ctx, name, arguments)
+}
+
+func (r *reviewRepository) Close() error {
+	if r.workspace == nil {
+		return nil
+	}
+	return r.workspace.Close()
+}
+
+func New(storage JobStore, gitLab GitLabBroker, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string) (*Worker, error) {
 	ownerBytes := make([]byte, 16)
 	if _, err := rand.Read(ownerBytes); err != nil {
 		return nil, errors.New("generate worker lease owner")
 	}
 	return &Worker{
-		store: storage, gitlab: gitLab, reviewer: reviewer, logger: logger,
+		store: storage, gitlab: gitLab, workspaces: workspaces, reviewer: reviewer, logger: logger,
 		owner: hex.EncodeToString(ownerBytes), forbidden: append([]string(nil), forbidden...),
 		now: time.Now, shutdownGrace: shutdownGracePeriod,
 	}, nil
@@ -189,9 +224,14 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if err != nil {
 			return err
 		}
-		validated, encoded, err := w.reviewer.Review(ctx, snapshot)
-		if err != nil {
-			return err
+		tools := &reviewRepository{identity: identity, gitlab: w.gitlab, workspaces: w.workspaces}
+		validated, encoded, reviewErr := w.reviewer.Review(ctx, snapshot, tools)
+		closeErr := tools.Close()
+		if reviewErr != nil {
+			return reviewErr
+		}
+		if closeErr != nil {
+			return failure.Retry("repository_workspace_cleanup_failed", 0)
 		}
 		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, w.now().UTC()); err != nil {
 			if errors.Is(err, store.ErrLeaseLost) {

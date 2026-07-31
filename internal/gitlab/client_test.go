@@ -39,6 +39,11 @@ func TestLoadReviewAndPublication(t *testing.T) {
 				t.Errorf("diff query = %q", r.URL.RawQuery)
 			}
 			writeJSON(t, w, []diffResponse{{OldPath: "old.go", NewPath: "new.go", Diff: "@@ -1 +1 @@\n-old\n+new"}})
+		case "/gitlab/api/v4/projects/42/repository/archive.tar.gz":
+			if r.URL.Query().Get("sha") != testHead || r.Header.Get("Accept") != "application/octet-stream" {
+				t.Errorf("archive request query=%q accept=%q", r.URL.RawQuery, r.Header.Get("Accept"))
+			}
+			_, _ = io.WriteString(w, "archive-at-reviewed-head")
 		case "/gitlab/api/v4/projects/42/merge_requests/7/notes":
 			if r.Method == http.MethodGet {
 				if r.URL.Query().Get("order_by") != "created_at" || r.URL.Query().Get("sort") != "desc" {
@@ -70,6 +75,10 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	}
 	if snapshot.Title != "Review title" || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
 		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	archive, err := client.LoadRepositoryArchive(context.Background(), identity)
+	if err != nil || string(archive) != "archive-at-reviewed-head" {
+		t.Fatalf("LoadRepositoryArchive() = %q, %v", archive, err)
 	}
 	if err := client.CheckCurrent(context.Background(), identity); err != nil {
 		t.Fatalf("CheckCurrent() error = %v", err)
@@ -346,6 +355,16 @@ func TestResponseAndInputLimitsFailClosed(t *testing.T) {
 		client := newTestClient(t, server.URL, "token", server.Client())
 		err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
 		assertFailure(t, err, "gitlab_response_limit_exceeded", false, false)
+	})
+
+	t.Run("archive response", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "12345")
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, "token", server.Client())
+		_, err := client.download(context.Background(), "/archive", nil, 4)
+		assertFailure(t, err, "repository_archive_response_limit_exceeded", false, false)
 	})
 
 	t.Run("diff content", func(t *testing.T) {

@@ -22,6 +22,7 @@ const (
 	requestTimeout              = 30 * time.Second
 	metadataResponseLimit       = 256 << 10
 	diffResponseLimit           = 2 << 20
+	archiveResponseLimit        = 32 << 20
 	noteResponseLimit           = 2 << 20
 	maxDiffPages                = 5
 	diffsPerPage                = 20
@@ -248,6 +249,17 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 	}, nil
 }
 
+func (c *Client) LoadRepositoryArchive(ctx context.Context, identity Identity) ([]byte, error) {
+	if err := c.validateIdentity(identity); err != nil {
+		return nil, err
+	}
+	if err := c.checkProject(ctx, identity.ProjectID); err != nil {
+		return nil, err
+	}
+	query := url.Values{"sha": {strings.ToLower(identity.HeadSHA)}}
+	return c.download(ctx, fmt.Sprintf("/projects/%d/repository/archive.tar.gz", identity.ProjectID), query, archiveResponseLimit)
+}
+
 func (c *Client) CheckCurrent(ctx context.Context, identity Identity) error {
 	if err := c.validateIdentity(identity); err != nil {
 		return err
@@ -351,7 +363,7 @@ func (c *Client) currentUserID(ctx context.Context) (int64, error) {
 }
 
 func (c *Client) validateIdentity(identity Identity) error {
-	if identity.GitLabInstance != c.baseURL.String() || identity.ProjectID <= 0 || identity.MergeRequestIID <= 0 || identity.HeadSHA == "" {
+	if identity.GitLabInstance != c.baseURL.String() || identity.ProjectID <= 0 || identity.MergeRequestIID <= 0 || !headSHAPattern.MatchString(identity.HeadSHA) {
 		return failure.Failed("review_identity_mismatch")
 	}
 	return nil
@@ -451,6 +463,41 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, lim
 }
 
 func (c *Client) request(ctx context.Context, method, endpoint string, query url.Values, body []byte, limit int64, target any) (http.Header, error) {
+	response, err := c.do(ctx, method, endpoint, query, body, "application/json")
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, failure.Retry("gitlab_response_read_failed", 0)
+	}
+	if int64(len(contents)) > limit {
+		return nil, failure.Failed("gitlab_response_limit_exceeded")
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		return nil, failure.Failed("malformed_gitlab_response")
+	}
+	return response.Header, nil
+}
+
+func (c *Client) download(ctx context.Context, endpoint string, query url.Values, limit int64) ([]byte, error) {
+	response, err := c.do(ctx, http.MethodGet, endpoint, query, nil, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, failure.Retry("gitlab_response_read_failed", 0)
+	}
+	if int64(len(contents)) > limit {
+		return nil, failure.Failed("repository_archive_response_limit_exceeded")
+	}
+	return contents, nil
+}
+
+func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, body []byte, accept string) (*http.Response, error) {
 	if err := c.waitForGate(ctx); err != nil {
 		return nil, err
 	}
@@ -473,11 +520,10 @@ func (c *Client) request(ctx context.Context, method, endpoint string, query url
 		return nil, failure.Failed("gitlab_request_invalid")
 	}
 	request.Header.Set("PRIVATE-TOKEN", c.token)
-	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Accept", accept)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -485,25 +531,16 @@ func (c *Client) request(ctx context.Context, method, endpoint string, query url
 		}
 		return nil, failure.Retry("gitlab_network_failure", 0)
 	}
-	defer response.Body.Close()
-
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		response.Body.Close()
 		return nil, failure.Failed("gitlab_redirect_rejected")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, c.statusError(response)
+		err := c.statusError(response)
+		response.Body.Close()
+		return nil, err
 	}
-	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, failure.Retry("gitlab_response_read_failed", 0)
-	}
-	if int64(len(contents)) > limit {
-		return nil, failure.Failed("gitlab_response_limit_exceeded")
-	}
-	if err := json.Unmarshal(contents, target); err != nil {
-		return nil, failure.Failed("malformed_gitlab_response")
-	}
-	return response.Header, nil
+	return response, nil
 }
 
 func (c *Client) statusError(response *http.Response) error {
