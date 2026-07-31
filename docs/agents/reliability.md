@@ -20,6 +20,14 @@ Only an `open` action that is not marked draft or work-in-progress creates a rev
 
 Reject a missing or invalid webhook secret with `401`, an unlisted project namespace with `403`, malformed input with `400`, an oversized request with `413`, and authenticated overload with retryable `503` and `Retry-After` responses. A persistence failure returns a server error rather than acknowledging the event. Rejections log bounded operational identifiers and reasons without logging secrets or payload bodies. Graceful shutdown stops accepting new requests and gives active ingress transactions a bounded opportunity to finish.
 
+## Feedback Ingestion
+
+An authenticated `Note Hook` create or update for an authorized, non-system, non-internal merge request comment is eligible when that merge request already has persisted Wormtamer findings. In one transaction, insert a delivery-deduplicated feedback event containing only bounded source identifiers and create or update one feedback job per GitLab note. Do not persist the note body. A newer source update requeues evaluation and immediately deactivates the prior derived memory; a stale update is retained as an ignored event.
+
+Feedback jobs fetch the current note after webhook commit, so processing intentionally evaluates the latest GitLab text rather than preserving comment revisions. Each job has at most five claims, a renewable three-minute lease, and the same retry categories and bounded exponential backoff used by review work. The structured current evaluation and active memory replace prior derived state transactionally. A crash may repeat GitLab reads and Gemini evaluation but cannot create duplicate current memory.
+
+GitLab emits comment webhooks for creation and updates, not deletion. Every five minutes, the feedback worker checks the source of each active comment-derived memory. A missing note or a source timestamp changed without a matching webhook deactivates that memory; a transient check failure defers another check without treating the source as deleted or changed.
+
 ## Review Identity
 
 Identify work by at least:
@@ -78,17 +86,19 @@ Reconciliation is read-only at GitLab and does not invoke Gemini or publish. Web
 
 SQLite stores the locally validated structured review result before publication and reuses that checkpoint on retry; it does not persist prompts, diffs, raw model responses, or conversations. SQLite state must represent:
 
-- Durable webhook events and processing status
-- Review identity, job state, leases, attempts, scheduling, and errors
+- Durable merge request webhook events and processing status
+- Bounded feedback delivery and source identifiers without comment bodies
+- Review and feedback job state, leases, attempts, scheduling, and errors
 - Publication markers and GitLab object IDs
 - Application-owned finding identifiers and their ordered positions under validated review results
+- Current structured feedback decisions and repository-scoped active memories
 - Last-seen and successfully reviewed merge request revisions
 
 Webhook event insertion and its job creation occur in one transaction. Webhook events retain the bounded raw JSON payload and delivery, project, merge request, revision, action, and outcome metadata needed for later inspection. Events and jobs are separate records with database-enforced delivery and review uniqueness. A reconciled job has no source event; a later webhook for the same review identity is persisted as a duplicate review without creating another job.
 
 Keep the database and WAL on persistent storage with reliable file locking. Enable foreign keys, configure bounded lock waiting, and choose durability settings and backup procedures appropriate to the deployment platform. The application owns and checks the SQLite schema version at startup. Run one replica per installation.
 
-There is no webhook-event or payload retention policy yet; ignored events and stored payloads accumulate until operational requirements establish one.
+There is no merge request webhook-event or payload retention policy yet; ignored events and stored merge request payloads accumulate until operational requirements establish one. Feedback events intentionally retain no comment payload or body.
 
 Repository workspaces are disposable and rebuilt when a review attempt restarts. The GitLab broker limits requests to 30 seconds, metadata responses to 256 KiB, each diff or note page to 2 MiB, changed diffs to five pages, 100 files, 512 KiB of aggregate diff content, and each repository archive to 32 MiB compressed. Archive extraction accepts at most 20,000 entries and 128 MiB uncompressed per repository, exposing at most 10,000 UTF-8 text files of at most 2 MiB each. One application-owned limit permits at most eight repository tool calls and eight distinct repositories per review; because each first repository access consumes a call, it is not charged again against a separate budget. One immutable revision is retained for each inspected repository. Tool results are limited to 256 KiB in aggregate per review and 64 KiB each, with narrower listing, read, search, path, and query limits owned by application code.
 

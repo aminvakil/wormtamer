@@ -76,6 +76,24 @@ type ReconciliationMergeRequest struct {
 	WorkInProgress  bool
 }
 
+type FeedbackRef struct {
+	GitLabInstance  string
+	ProjectID       int64
+	ProjectPath     string
+	MergeRequestIID int64
+	NoteID          int64
+	ActorID         int64
+}
+
+type FeedbackComment struct {
+	Body        string
+	UpdatedAt   time.Time
+	AccessLevel int
+	Role        string
+	SourceURL   string
+	Ignored     bool
+}
+
 type Client struct {
 	baseURL    *url.URL
 	token      string
@@ -137,15 +155,24 @@ type diffResponse struct {
 }
 
 type noteResponse struct {
-	ID     int64  `json:"id"`
-	Body   string `json:"body"`
-	Author struct {
+	ID        int64  `json:"id"`
+	Body      string `json:"body"`
+	System    bool   `json:"system"`
+	Internal  bool   `json:"internal"`
+	UpdatedAt string `json:"updated_at"`
+	Author    struct {
 		ID int64 `json:"id"`
 	} `json:"author"`
 }
 
 type userResponse struct {
 	ID int64 `json:"id"`
+}
+
+type memberResponse struct {
+	ID          int64  `json:"id"`
+	State       string `json:"state"`
+	AccessLevel int    `json:"access_level"`
 }
 
 func New(baseURL, token string, authorizedRepositories []string, repositorySharing map[string][]string, providedClient *http.Client) (*Client, error) {
@@ -419,6 +446,121 @@ func (c *Client) PostNote(ctx context.Context, identity Identity, body string) (
 	return note.ID, nil
 }
 
+func (c *Client) LoadFeedbackComment(ctx context.Context, ref FeedbackRef) (FeedbackComment, bool, error) {
+	if err := c.validateFeedbackRef(ref); err != nil {
+		return FeedbackComment{}, false, err
+	}
+	projectPath, err := c.checkProject(ctx, ref.ProjectID)
+	if err != nil {
+		return FeedbackComment{}, false, err
+	}
+	if projectPath != ref.ProjectPath {
+		return FeedbackComment{}, false, failure.Failed("repository_unauthorized")
+	}
+	sourceURL := c.feedbackSourceURL(projectPath, ref)
+	var note noteResponse
+	found, err := c.getOptional(ctx, fmt.Sprintf("/projects/%d/merge_requests/%d/notes/%d", ref.ProjectID, ref.MergeRequestIID, ref.NoteID), metadataResponseLimit, &note)
+	if err != nil || !found {
+		return FeedbackComment{SourceURL: sourceURL}, found, err
+	}
+	if note.ID != ref.NoteID || note.Author.ID != ref.ActorID || len(note.Body) > maxNoteBodyBytes {
+		return FeedbackComment{}, false, failure.Failed("malformed_gitlab_response")
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, note.UpdatedAt)
+	if err != nil {
+		return FeedbackComment{}, false, failure.Failed("malformed_gitlab_response")
+	}
+	userID, err := c.currentUserID(ctx)
+	if err != nil {
+		return FeedbackComment{}, false, err
+	}
+	comment := FeedbackComment{
+		Body: note.Body, UpdatedAt: updatedAt.UTC(), SourceURL: sourceURL,
+		Ignored: note.System || note.Internal || note.Author.ID == userID,
+	}
+	if comment.Ignored {
+		comment.Role = "ignored"
+		return comment, true, nil
+	}
+	var member memberResponse
+	foundMember, err := c.getOptional(ctx, fmt.Sprintf("/projects/%d/members/all/%d", ref.ProjectID, ref.ActorID), metadataResponseLimit, &member)
+	if err != nil {
+		return FeedbackComment{}, false, err
+	}
+	if !foundMember {
+		comment.Role = "non_member"
+		return comment, true, nil
+	}
+	if member.ID != ref.ActorID || member.State != "active" || member.AccessLevel < 0 || member.AccessLevel > 50 {
+		return FeedbackComment{}, false, failure.Failed("malformed_gitlab_response")
+	}
+	comment.AccessLevel = member.AccessLevel
+	comment.Role = accessRole(member.AccessLevel)
+	return comment, true, nil
+}
+
+func (c *Client) CheckFeedbackSource(ctx context.Context, ref FeedbackRef) (bool, time.Time, error) {
+	if err := c.validateFeedbackRef(ref); err != nil {
+		return false, time.Time{}, err
+	}
+	projectPath, err := c.checkProject(ctx, ref.ProjectID)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if projectPath != ref.ProjectPath {
+		return false, time.Time{}, failure.Failed("repository_unauthorized")
+	}
+	var note noteResponse
+	found, err := c.getOptional(ctx, fmt.Sprintf("/projects/%d/merge_requests/%d/notes/%d", ref.ProjectID, ref.MergeRequestIID, ref.NoteID), metadataResponseLimit, &note)
+	if err != nil || !found {
+		return found, time.Time{}, err
+	}
+	if note.ID != ref.NoteID {
+		return false, time.Time{}, failure.Failed("malformed_gitlab_response")
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, note.UpdatedAt)
+	if err != nil {
+		return false, time.Time{}, failure.Failed("malformed_gitlab_response")
+	}
+	return true, updatedAt.UTC(), nil
+}
+
+func (c *Client) validateFeedbackRef(ref FeedbackRef) error {
+	if ref.GitLabInstance != c.baseURL.String() || ref.ProjectID <= 0 || ref.ProjectPath == "" ||
+		ref.MergeRequestIID <= 0 || ref.NoteID <= 0 || ref.ActorID <= 0 {
+		return failure.Failed("feedback_identity_mismatch")
+	}
+	return nil
+}
+
+func (c *Client) feedbackSourceURL(projectPath string, ref FeedbackRef) string {
+	source := *c.baseURL
+	source.Path = strings.TrimSuffix(c.baseURL.Path, "/") + "/" + projectPath + "/-/merge_requests/" + strconv.FormatInt(ref.MergeRequestIID, 10)
+	source.RawPath = ""
+	source.RawQuery = ""
+	source.Fragment = "note_" + strconv.FormatInt(ref.NoteID, 10)
+	return source.String()
+}
+
+func accessRole(level int) string {
+	switch {
+	case level >= 50:
+		return "owner"
+	case level >= 40:
+		return "maintainer"
+	case level >= 30:
+		return "developer"
+	case level >= 20:
+		return "reporter"
+	case level >= 10:
+		return "guest"
+	case level > 0:
+		return "minimal_access"
+	default:
+		return "non_member"
+	}
+}
+
 func (c *Client) currentUserID(ctx context.Context) (int64, error) {
 	var user userResponse
 	if _, err := c.get(ctx, "/user", nil, metadataResponseLimit, &user); err != nil {
@@ -549,6 +691,34 @@ func (c *Client) request(ctx context.Context, method, endpoint string, query url
 	return response.Header, nil
 }
 
+func (c *Client) getOptional(ctx context.Context, endpoint string, limit int64, target any) (bool, error) {
+	response, err := c.send(ctx, http.MethodGet, endpoint, nil, nil, "application/json")
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		return false, failure.Failed("gitlab_redirect_rejected")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false, c.statusError(response)
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return false, failure.Retry("gitlab_response_read_failed", 0)
+	}
+	if int64(len(contents)) > limit {
+		return false, failure.Failed("gitlab_response_limit_exceeded")
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		return false, failure.Failed("malformed_gitlab_response")
+	}
+	return true, nil
+}
+
 func (c *Client) download(ctx context.Context, endpoint string, query url.Values, limit int64) ([]byte, error) {
 	response, err := c.do(ctx, http.MethodGet, endpoint, query, nil, "application/octet-stream")
 	if err != nil {
@@ -566,6 +736,23 @@ func (c *Client) download(ctx context.Context, endpoint string, query url.Values
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, body []byte, accept string) (*http.Response, error) {
+	response, err := c.send(ctx, method, endpoint, query, body, accept)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		response.Body.Close()
+		return nil, failure.Failed("gitlab_redirect_rejected")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		err := c.statusError(response)
+		response.Body.Close()
+		return nil, err
+	}
+	return response, nil
+}
+
+func (c *Client) send(ctx context.Context, method, endpoint string, query url.Values, body []byte, accept string) (*http.Response, error) {
 	if err := c.waitForGate(ctx); err != nil {
 		return nil, err
 	}
@@ -598,15 +785,6 @@ func (c *Client) do(ctx context.Context, method, endpoint string, query url.Valu
 			return nil, ctx.Err()
 		}
 		return nil, failure.Retry("gitlab_network_failure", 0)
-	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		response.Body.Close()
-		return nil, failure.Failed("gitlab_redirect_rejected")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		err := c.statusError(response)
-		response.Body.Close()
-		return nil, err
 	}
 	return response, nil
 }

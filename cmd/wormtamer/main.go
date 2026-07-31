@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/aminvakil/wormtamer/internal/config"
+	"github.com/aminvakil/wormtamer/internal/feedback"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/memory"
 	"github.com/aminvakil/wormtamer/internal/reconcile"
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
@@ -78,6 +80,16 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, []string{
+		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
+	})
+	if err != nil {
+		return err
+	}
+	feedbackWorker, err := feedback.New(storage, gitLabClient, memoryEvaluator, logger)
+	if err != nil {
+		return err
+	}
 	reconciler := reconcile.New(storage, gitLabClient, cfg.GitLab.BaseURL, cfg.AuthorizedRepositories, logger)
 
 	handler := webhook.New(webhook.Config{
@@ -116,11 +128,16 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	go func() {
 		reconcilerErrors <- reconciler.Run(componentCtx)
 	}()
+	feedbackErrors := make(chan error, 1)
+	go func() {
+		feedbackErrors <- feedbackWorker.Run(componentCtx)
+	}()
 
 	var processError error
 	serveFinished := false
 	workerFinished := false
 	reconcilerFinished := false
+	feedbackFinished := false
 	select {
 	case err := <-serveErrors:
 		serveFinished = true
@@ -140,6 +157,13 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 			processError = fmt.Errorf("run reconciler: %w", err)
 		} else {
 			processError = errors.New("reconciler stopped unexpectedly")
+		}
+	case err := <-feedbackErrors:
+		feedbackFinished = true
+		if err != nil {
+			processError = fmt.Errorf("run feedback worker: %w", err)
+		} else {
+			processError = errors.New("feedback worker stopped unexpectedly")
 		}
 	case <-ctx.Done():
 	}
@@ -167,6 +191,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if !reconcilerFinished {
 		if err := <-reconcilerErrors; err != nil && processError == nil {
 			processError = fmt.Errorf("stop reconciler: %w", err)
+		}
+	}
+	if !feedbackFinished {
+		if err := <-feedbackErrors; err != nil && processError == nil {
+			processError = fmt.Errorf("stop feedback worker: %w", err)
 		}
 	}
 	logger.Info("HTTP server stopped")

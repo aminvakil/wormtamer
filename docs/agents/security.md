@@ -10,7 +10,7 @@ Each team installation has independent credentials, configuration, allowlists, s
 
 Repository access requires both GitLab permission and an installation allowlist entry. Entries are exact GitLab namespace paths. The same list filters webhook projects and bounds the repositories that may be disclosed to or inspected by the model. Cross-repository access additionally requires an explicit directional `repository_sharing` rule from the repository under review to the related repository. Inclusion authorizes application access but does not make repository content trusted, and the model cannot modify any authorization condition.
 
-Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on each configured project. This is the minimum combination verified on GitLab 17.5.5 for project lookup, merge request and diff reads, current-user lookup, note search, and note creation. The application assumes the configured token has sufficient permissions and reports sanitized authorization failures rather than discovering or validating scopes. Administrator access is not an application requirement. Grant shared repositories explicitly; never use administrator access for convenient discovery.
+Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on each configured project. This is the minimum combination verified on GitLab 17.5.5 for project lookup, merge request and diff reads, current-user lookup, note search, and note creation. Feedback evaluation additionally retrieves an exact note and effective project membership through the same trusted broker; unavailable membership fails closed to non-Maintainer provenance, while other authorization failures remain sanitized failures. The application assumes the configured token has sufficient permissions and reports sanitized authorization failures rather than discovering or validating scopes. Administrator access is not an application requirement. Grant shared repositories explicitly; never use administrator access for convenient discovery.
 
 A bot may see content unavailable to a merge request participant. A directional sharing rule is the operator's assertion that every audience able to view merge requests in the target repository may receive information derived from the related repository; do not configure a rule based only on bot visibility or one requester's membership. The application enforces the configured direction and fails closed when no exact rule exists.
 
@@ -24,7 +24,7 @@ Authenticate GitLab webhooks with the configured webhook secret before accepting
 
 Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The explicit function-calling loop declares only repository read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
 
-Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Before constructing a model prompt, reject review metadata or diffs containing any configured secret; do not send, log, or identify the matching value. Response schemas improve structure but do not replace local validation.
+Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Before constructing a model prompt, reject review metadata, diffs, or transient feedback comments containing any configured secret; do not send, log, store, or identify the matching value. Response schemas improve structure but do not replace local validation.
 
 Plain HTTP is permitted for local self-hosted deployments, including communication with GitLab. It provides no transport confidentiality or server authentication; the operator is responsible for keeping that traffic on an appropriate local network.
 
@@ -65,9 +65,11 @@ Public content cannot grant permissions or request disclosure of private context
 
 ## Runtime Memory
 
-Feedback does not become trusted memory automatically. A memory record retains scope, lesson, evidence, source, confidence, approval status, and timestamps.
+Natural merge request comments, actor identity fields, findings, and model interpretations are untrusted evidence. Trusted code fetches the current comment transiently, verifies its author against the webhook actor, resolves effective project access through GitLab, and supplies role as attributed metadata rather than an instruction. Internal, system, and Wormtamer-authored notes are ineligible. A failed membership lookup cannot confer Maintainer authority.
 
-Human approval is the default. Any later automatic promotion requires repeated independent evidence and an audit trail. Current code and explicit team policy override memory, and records must support correction, rejection, and supersession.
+Gemini may automatically activate a bounded repository-scoped lesson after associating a comment with a supplied finding. Automatic activation is an application decision, not proof that the lesson is policy: memory remains advisory model output, and current code and explicit team policy always override it. The model cannot select another repository, invent a finding identity, broaden scope, or preserve arbitrary comment text. Trusted code validates the finding, outcome, confidence, lesson bounds, secret exclusion, and fixed repository scope.
+
+Store the GitLab project, merge request, note, actor, and finding identifiers, source URL, role snapshot, structured current decision, lesson, confidence, active state, and timestamps. Do not retain source comment bodies or revisions. Edits replace derived state, and deletion deactivates it through source reconciliation.
 
 Runtime memory is separate from contributor documentation under `docs/agents/`.
 

@@ -4,16 +4,16 @@ Status: proposed
 
 Depends on:
 
-- [Capture explicit review feedback](capture-explicit-review-feedback.md)
-- [Retrieve approved review memory](retrieve-review-memory.md)
+- [Runtime memory](../agents/architecture.md#context-and-state)
+- [Retrieve active review memory](retrieve-review-memory.md)
 
 ## Goal
 
-Establish whether approved feedback and memory improve later reviews instead of merely accumulating data or reinforcing repeated false positives.
+Establish whether comment-derived decisions and active memory improve later reviews instead of merely accumulating data or reinforcing repeated false positives.
 
 ## Scope
 
-- Preserve the bounded link between a review, retrieved memory identities, published finding identities, and subsequent explicit feedback.
+- Preserve the bounded link between a review, retrieved memory identities, published finding identities, and subsequent structured feedback decisions.
 - Report installation-local measures such as supported findings, rejected findings, repeated corrected patterns, and outcomes associated with memory use.
 - Provide a reproducible offline evaluation path using explicitly selected historical records without re-publishing GitLab notes.
 - Make evaluation output aggregate or identifier-based by default.
@@ -22,9 +22,9 @@ Do not create a centralized analytics service, compare teams, export private sou
 
 ## Approach
 
-Use existing durable finding, feedback, and memory identities to form evaluation records. Keep evaluation separate from live job decisions: it may show that a lesson is harmful or irrelevant, but memory changes still go through explicit correction or supersession.
+Use existing durable finding, feedback-source, and memory identities to form evaluation records. Keep evaluation separate from live job decisions: it may show that a lesson is harmful or irrelevant, but evaluation does not itself change active memory state.
 
-Begin with deterministic counts and a small operator-invoked replay against approved, non-sensitive cases. Add semantic or model-based judging only if human feedback cannot answer a concrete quality question, and never let a model judge its own output without attributed human evidence.
+Begin with deterministic counts and a small operator-invoked replay against active, non-sensitive cases. Add semantic or model-based judging only if human feedback cannot answer a concrete quality question, and never let a model judge its own output without attributed human evidence.
 
 ## Risks and Open Questions
 
@@ -35,7 +35,7 @@ Begin with deterministic counts and a small operator-invoked replay against appr
 
 ## Verification
 
-- Operators can determine whether a finding received explicit supported, rejected, corrected, conflicting, or no feedback without treating the last category as positive.
-- A later finding can be associated with the approved memory records actually retrieved for its review.
-- Evaluation runs do not publish, change memory approval, reset jobs, or expose repository content in default output.
-- A harmful lesson can be identified through evidence and superseded through the normal memory workflow with the audit trail intact.
+- Operators can determine whether a finding received structured supported, rejected, corrected, conflicting, or no feedback without treating the last category as positive.
+- A later finding can be associated with the active memory records actually retrieved for its review.
+- Evaluation runs do not publish, change active memory state, reset jobs, or expose repository content in default output.
+- A harmful lesson can be identified through evidence without the evaluation run silently changing live memory.

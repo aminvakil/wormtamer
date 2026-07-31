@@ -84,6 +84,39 @@ func TestWebhookIngress(t *testing.T) {
 	}
 }
 
+func TestNoteHookSchedulesNaturalCommentWithoutRetainingBody(t *testing.T) {
+	storage := &recordingStore{}
+	var logs bytes.Buffer
+	handler := newTestHandler(storage, &logs).Routes()
+	body := notePayloadJSON("group/project", "create", false, false, "sensitive comment text")
+	request := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", bytes.NewReader(body))
+	request.Header.Set("X-Gitlab-Token", testSecret)
+	request.Header.Set("X-Gitlab-Event", "Note Hook")
+	request.Header.Set("X-Gitlab-Event-UUID", "note-event")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || storage.feedbackCalls != 1 {
+		t.Fatalf("note hook status=%d calls=%d", response.Code, storage.feedbackCalls)
+	}
+	if storage.feedbackEvent.NoteID != 91 || storage.feedbackEvent.ActorID != 12 || storage.feedbackEvent.MergeRequestIID != 7 || storage.feedbackEvent.Action != "create" {
+		t.Fatalf("feedback event = %+v", storage.feedbackEvent)
+	}
+	if strings.Contains(logs.String(), "sensitive comment text") {
+		t.Fatalf("note body was logged: %s", logs.String())
+	}
+
+	storage.feedbackCalls = 0
+	internal := notePayloadJSON("group/project", "create", false, true, "internal text")
+	request = httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", bytes.NewReader(internal))
+	request.Header.Set("X-Gitlab-Token", testSecret)
+	request.Header.Set("X-Gitlab-Event", "Note Hook")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || storage.feedbackCalls != 0 {
+		t.Fatalf("internal note status=%d calls=%d", response.Code, storage.feedbackCalls)
+	}
+}
+
 func TestAuthenticationHappensBeforeReadingBody(t *testing.T) {
 	storage := &recordingStore{}
 	handler := newTestHandler(storage, io.Discard).Routes()
@@ -332,6 +365,28 @@ func payload(projectPath, action string, draft, workInProgress bool, headSHA str
 }`, projectPath, action, draft, workInProgress, headSHA))
 }
 
+func notePayloadJSON(projectPath, action string, system, internal bool, comment string) []byte {
+	return []byte(fmt.Sprintf(`{
+  "object_kind":"note",
+  "event_type":"note",
+  "user":{"id":12},
+  "project":{"id":42,"path_with_namespace":%q},
+  "object_attributes":{
+    "id":91,
+    "internal":%t,
+    "note":%q,
+    "noteable_type":"MergeRequest",
+    "author_id":12,
+    "updated_at":"2026-07-31T12:00:00Z",
+    "project_id":42,
+    "noteable_id":70,
+    "system":%t,
+    "action":%q
+  },
+  "merge_request":{"id":70,"iid":7,"target_project_id":42}
+}`, projectPath, internal, comment, system, action))
+}
+
 func payloadWithExtraField(marker string) []byte {
 	base := string(payload("group/project", "open", false, false, headA))
 	return []byte(strings.Replace(base, `"object_kind":"merge_request"`, `"marker":`+fmt.Sprintf("%q", marker)+`,"object_kind":"merge_request"`, 1))
@@ -361,13 +416,28 @@ func (s *blockingStore) AcceptEvent(_ context.Context, _ store.Event) (store.Acc
 	return store.AcceptResult{Outcome: store.OutcomeQueued}, nil
 }
 
+func (s *blockingStore) AcceptFeedbackEvent(_ context.Context, _ store.FeedbackEvent, _ time.Time) (store.AcceptFeedbackResult, error) {
+	s.started <- struct{}{}
+	<-s.release
+	return store.AcceptFeedbackResult{Outcome: store.FeedbackOutcomeQueued}, nil
+}
+
 type recordingStore struct {
-	calls int
+	calls         int
+	feedbackCalls int
+	feedbackEvent store.FeedbackEvent
 }
 
 func (s *recordingStore) AcceptEvent(_ context.Context, _ store.Event) (store.AcceptResult, error) {
 	s.calls++
 	return store.AcceptResult{}, nil
+}
+
+func (s *recordingStore) AcceptFeedbackEvent(_ context.Context, event store.FeedbackEvent, _ time.Time) (store.AcceptFeedbackResult, error) {
+	s.calls++
+	s.feedbackCalls++
+	s.feedbackEvent = event
+	return store.AcceptFeedbackResult{EventID: 1, JobID: 2, Outcome: store.FeedbackOutcomeQueued}, nil
 }
 
 func assertDatabaseCount(t *testing.T, db *sql.DB, table string, want int) {

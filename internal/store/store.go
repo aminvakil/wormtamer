@@ -13,7 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const (
 	OutcomeQueued          = "queued"
@@ -298,6 +298,78 @@ CREATE TABLE review_findings (
 );
 
 PRAGMA user_version = 4;
+`
+		case 4:
+			migration = `
+CREATE TABLE feedback_events (
+    id INTEGER PRIMARY KEY,
+    delivery_id TEXT NOT NULL UNIQUE,
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL CHECK(project_id > 0),
+    project_path TEXT NOT NULL,
+    merge_request_iid INTEGER NOT NULL CHECK(merge_request_iid > 0),
+    note_id INTEGER NOT NULL CHECK(note_id > 0),
+    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
+    action TEXT NOT NULL CHECK(action IN ('create', 'update')),
+    source_updated_at TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE feedback_jobs (
+    id INTEGER PRIMARY KEY,
+    source_event_id INTEGER NOT NULL REFERENCES feedback_events(id),
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL CHECK(project_id > 0),
+    project_path TEXT NOT NULL,
+    merge_request_iid INTEGER NOT NULL CHECK(merge_request_iid > 0),
+    note_id INTEGER NOT NULL CHECK(note_id > 0),
+    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
+    state TEXT NOT NULL DEFAULT 'queued',
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error_category TEXT,
+    updated_at TEXT NOT NULL,
+    next_source_check_at TEXT,
+    UNIQUE (gitlab_instance, project_id, note_id)
+);
+
+CREATE INDEX feedback_jobs_due_idx
+ON feedback_jobs (state, next_attempt_at, lease_expires_at);
+
+CREATE INDEX feedback_jobs_source_check_idx
+ON feedback_jobs (next_source_check_at, state);
+
+CREATE TABLE feedback_evaluations (
+    job_id INTEGER PRIMARY KEY REFERENCES feedback_jobs(id) ON DELETE CASCADE,
+    source_event_id INTEGER NOT NULL REFERENCES feedback_events(id),
+    actor_access_level INTEGER NOT NULL CHECK(actor_access_level >= 0 AND actor_access_level <= 50),
+    actor_role TEXT NOT NULL,
+    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
+    evaluated_at TEXT NOT NULL
+);
+
+CREATE TABLE review_memories (
+    memory_id TEXT PRIMARY KEY
+        CHECK(length(memory_id) = 31)
+        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
+        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
+    feedback_job_id INTEGER NOT NULL REFERENCES feedback_jobs(id) ON DELETE CASCADE,
+    finding_id TEXT NOT NULL REFERENCES review_findings(finding_id),
+    outcome TEXT NOT NULL CHECK(outcome IN ('supports_finding', 'rejects_finding', 'corrects_finding')),
+    confidence TEXT NOT NULL CHECK(confidence IN ('low', 'medium', 'high')),
+    lesson TEXT CHECK(lesson IS NULL OR (length(lesson) > 0 AND length(lesson) <= 4096)),
+    active INTEGER NOT NULL CHECK(active IN (0, 1)),
+    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
+    actor_access_level INTEGER NOT NULL CHECK(actor_access_level >= 0 AND actor_access_level <= 50),
+    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
+    updated_at TEXT NOT NULL,
+    UNIQUE (feedback_job_id, finding_id)
+);
+
+PRAGMA user_version = 5;
 `
 		}
 

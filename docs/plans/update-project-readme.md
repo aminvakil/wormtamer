@@ -30,7 +30,7 @@ Use links instead of duplicating detailed security and reliability contracts. If
 
 ## Verification
 
-- A new reader can determine what repositories and sources Wormtamer can inspect, how explicit feedback becomes approved memory, and which limitations still apply.
+- A new reader can determine what repositories and sources Wormtamer can inspect, how natural review comments can become active advisory memory, and which limitations still apply.
 - Setup examples match the final configuration schema and required GitLab events and permissions.
 - The README contains no claim for an unimplemented or deferred roadmap capability and no obsolete statement that reviews use only merge request diffs.
 - Detailed behavior has one authoritative home under `docs/agents/` or `docs/deployment.md`, with the README linking to it rather than repeating it.

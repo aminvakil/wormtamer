@@ -55,14 +55,16 @@ Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is a
 ## Components
 
 ```text
-GitLab -> webhook ingress -> SQLite jobs -> review worker -> review agent
-                                      |                    -> future tool brokers
-Periodic reconciler ------------------+                    -> publication broker -> GitLab
+GitLab -> webhook ingress -> SQLite review jobs -> review worker -> review agent
+                         |                            -> future tool brokers
+                         |                            -> publication broker -> GitLab
+                         +-> SQLite feedback jobs -> feedback evaluator -> runtime memory
+Periodic reconciler -----+
 ```
 
 ### Webhook ingress
 
-Validates and durably records webhooks, creates idempotent review jobs, and acknowledges only after the transaction commits.
+Validates and durably records merge request webhooks, and records bounded Note Hook identifiers without comment bodies. It creates separate idempotent review or feedback jobs and acknowledges eligible events only after the applicable transaction commits.
 
 ### Review worker
 
@@ -93,6 +95,12 @@ Repository tools may list, read, and search these snapshots but cannot execute r
 
 Validates findings, assigns each ordered finding a deterministic application-owned identifier under the immutable review identity, and posts one summary note per review identity using a stable hidden marker. Finding identifiers are persisted with the validated result and rendered for human reference. The broker reconciles an existing marked note before posting, owns GitLab write access, and remains outside repository workspaces.
 
+### Feedback evaluator
+
+The feedback worker fetches the current text of each eligible merge request comment transiently, resolves the actor's effective project role through GitLab, and asks Gemini to assess the comment against the latest persisted Wormtamer findings for that merge request. Gemini may classify supplied findings as supported, rejected, or corrected and may select a concise reusable lesson. Trusted code validates the structured result before replacing that comment's current decisions and repository-scoped active memory.
+
+Comments, findings, and active memory remain untrusted evidence. Maintainer and Owner status is stronger provenance for project-specific claims, not authority to override code, explicit policy, or application instructions. Developer and lower-role feedback is presented critically. No source comment body or revision history is retained.
+
 ### Reconciler
 
 The GitLab integration supports GitLab 17 and newer. The reconciler scans each authorized project immediately after startup and five minutes after each completed cycle. It lists bounded pages of open merge requests, skips drafts and work-in-progress entries as observed, and idempotently enqueues missing review identities. Scans have no durable cursor or schedule; restart repeats the scan safely.
@@ -103,7 +111,9 @@ The model conversation begins with bounded changed-file diffs, relevant metadata
 
 SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 
-Runtime memory is not implemented. If introduced, it remains installation-specific and separate from workflow state. Records must preserve scope, evidence, confidence, approval status, and timestamps, and are not trusted merely because a model generated them.
+Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, finding and GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
+
+Gemini may activate a repository-scoped lesson automatically after assessing the attributed comment and persisted finding context. Active means eligible for future bounded retrieval, not trusted policy: current code and explicit project policy override it. Comment edits replace current derived state. Periodic source checks deactivate memory after comment deletion or an update whose webhook was missed; GitLab emits Note Hooks for creation and updates but not deletion.
 
 Runtime review memory is separate from contributor guidance in `AGENTS.md` and `docs/agents/`.
 
