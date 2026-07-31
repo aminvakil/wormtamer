@@ -30,6 +30,12 @@ GitLab instance + project ID + merge request IID + head SHA
 
 The numeric project ID from the webhook remains the durable identity even though configuration authorizes repositories by namespace path. Deduplicate events for the same head SHA. Before publication, confirm that the reviewed SHA remains current; obsolete findings must not be presented as current.
 
+## Finding Identity
+
+After local model-output validation, assign each ordered finding an application-owned identifier under its immutable review identity. The identifier is `WT-F-` followed by the unpadded uppercase base32 encoding of the first 128 bits of a SHA-256 digest. Hash a `wormtamer:finding:v1` domain separator, canonical GitLab instance, numeric project ID, merge request IID, lowercase head SHA, and one-based finding ordinal as UTF-8 fields separated and terminated by zero bytes.
+
+Persist the identifiers and zero-based finding positions in the same transaction as the validated review result. The identifier and `(job, position)` are both unique. A collision or malformed identifier fails persistence rather than aliasing another finding. Retries and publication reconciliation reuse the persisted identifiers; the model cannot provide or change them.
+
 ## Jobs and Retries
 
 The conceptual lifecycle is:
@@ -75,6 +81,7 @@ SQLite stores the locally validated structured review result before publication 
 - Durable webhook events and processing status
 - Review identity, job state, leases, attempts, scheduling, and errors
 - Publication markers and GitLab object IDs
+- Application-owned finding identifiers and their ordered positions under validated review results
 - Last-seen and successfully reviewed merge request revisions
 
 Webhook event insertion and its job creation occur in one transaction. Webhook events retain the bounded raw JSON payload and delivery, project, merge request, revision, action, and outcome metadata needed for later inspection. Events and jobs are separate records with database-enforced delivery and review uniqueness. A reconciled job has no source event; a later webhook for the same review identity is persisted as a duplicate review without creating another job.

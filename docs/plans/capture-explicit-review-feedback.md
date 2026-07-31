@@ -2,8 +2,6 @@
 
 Status: proposed
 
-Depends on: [Publish addressable review findings](publish-addressable-findings.md)
-
 ## Goal
 
 Durably capture explicit human feedback about an addressable Wormtamer finding so accepted findings, false positives, corrections, and other supported outcomes can become auditable evidence for later learning.

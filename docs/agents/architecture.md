@@ -91,7 +91,7 @@ Repository tools may list, read, and search these snapshots but cannot execute r
 
 ### Publication broker
 
-Validates findings and posts one summary note per review identity using a stable hidden marker. It reconciles an existing marked note before posting, owns GitLab write access, and remains outside repository workspaces.
+Validates findings, assigns each ordered finding a deterministic application-owned identifier under the immutable review identity, and posts one summary note per review identity using a stable hidden marker. Finding identifiers are persisted with the validated result and rendered for human reference. The broker reconciles an existing marked note before posting, owns GitLab write access, and remains outside repository workspaces.
 
 ### Reconciler
 

@@ -261,10 +261,10 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, recoveredAt); !errors.Is(err, ErrLeaseLost) {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, nil, recoveredAt); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("wrong-owner SaveReviewResult() error = %v", err)
 	}
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, recoveredAt); err != nil {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, nil, recoveredAt); err != nil {
 		t.Fatalf("SaveReviewResult() error = %v", err)
 	}
 
@@ -304,8 +304,9 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, now); err != nil {
+	resultJSON := []byte(`{"summary":"ok","findings":[{"severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
+	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
+	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.Close(); err != nil {
@@ -321,9 +322,29 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	if err != nil || recovered == nil {
 		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
 	}
-	if recovered.State != JobPublishing || string(recovered.ValidatedResultJSON) != string(resultJSON) {
+	if recovered.State != JobPublishing || string(recovered.ValidatedResultJSON) != string(resultJSON) ||
+		len(recovered.FindingIDs) != 1 || recovered.FindingIDs[0] != findingIDs[0] {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
+}
+
+func TestSaveReviewResultRejectsMalformedFindingIdentifiers(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	if _, err := storage.AcceptEvent(context.Background(), readyEvent("event-1")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job, err := storage.ClaimJob(context.Background(), "owner", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
+	if err := storage.SaveReviewResult(context.Background(), job.ID, "owner", resultJSON, []string{"model-id"}, now); err == nil {
+		t.Fatal("SaveReviewResult() accepted a malformed finding identifier")
+	}
+	assertCount(t, storage.db, "review_results", 0)
+	assertCount(t, storage.db, "review_findings", 0)
 }
 
 func TestClaimJobIsAtomic(t *testing.T) {
@@ -439,6 +460,7 @@ PRAGMA user_version = 1;`)
 		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 	assertCount(t, storage.db, "review_results", 0)
+	assertCount(t, storage.db, "review_findings", 0)
 	assertCount(t, storage.db, "publications", 0)
 }
 
@@ -519,6 +541,7 @@ PRAGMA user_version = 2;`)
 		t.Fatalf("migrated job source=%+v state=%q", sourceEventID, state)
 	}
 	assertCount(t, storage.db, "review_results", 1)
+	assertCount(t, storage.db, "review_findings", 0)
 	assertCount(t, storage.db, "publications", 1)
 	if _, err := storage.CreateReconciledJob(context.Background(), ReconciledReview{
 		GitLabInstance: "http://gitlab.internal", ProjectID: 42, MergeRequestIID: 8, HeadSHA: "new-head",

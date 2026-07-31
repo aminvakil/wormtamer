@@ -79,6 +79,7 @@ Before publishing:
 
 - Verify the project, merge request, and head SHA.
 - Validate paths and line locations against the reviewed revision.
+- Assign finding identifiers in trusted application code only after validation; reject model-supplied or malformed identifiers.
 - Reject malformed or unsupported findings.
 - Exclude credentials, hidden prompts, private excerpts, and internal tool traces.
 - Include evidence and use non-sensitive stable idempotency markers.

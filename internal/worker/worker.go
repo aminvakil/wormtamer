@@ -31,7 +31,7 @@ const (
 type JobStore interface {
 	ClaimJob(context.Context, string, time.Time, time.Duration, int) (*store.Job, error)
 	RenewLease(context.Context, int64, string, time.Time, time.Duration) (bool, error)
-	SaveReviewResult(context.Context, int64, string, []byte, time.Time) error
+	SaveReviewResult(context.Context, int64, string, []byte, []string, time.Time) error
 	RetryJob(context.Context, int64, string, time.Time, time.Time, int, string, string) (string, error)
 	FinishJob(context.Context, int64, string, string, string, string, time.Time) error
 	CompletePublication(context.Context, int64, string, string, int64, time.Time) error
@@ -292,7 +292,11 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if closeErr != nil {
 			return failure.Retry("repository_workspace_cleanup_failed", 0)
 		}
-		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, w.now().UTC()); err != nil {
+		job.FindingIDs = findingIDs(identity, len(validated.Findings))
+		if err := applyFindingIDs(&validated, job.FindingIDs); err != nil {
+			return err
+		}
+		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, w.now().UTC()); err != nil {
 			if errors.Is(err, store.ErrLeaseLost) {
 				return err
 			}
@@ -305,6 +309,9 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		decoded, err := review.DecodeStored(job.ValidatedResultJSON)
 		if err != nil {
 			return failure.Failed("invalid_stored_review_result")
+		}
+		if err := applyFindingIDs(&decoded, job.FindingIDs); err != nil {
+			return err
 		}
 		result = decoded
 	}
@@ -372,6 +379,35 @@ func (w *Worker) handleFailure(ctx context.Context, job *store.Job, err error) e
 		return retryErr
 	}
 	w.logger.Info("review job deferred", append(jobLogFields(job), "outcome", state, "reason", failureError.Category)...)
+	return nil
+}
+
+func findingIDs(identity gitlab.Identity, count int) []string {
+	ids := make([]string, count)
+	for index := range ids {
+		ids[index] = review.FindingID(
+			identity.GitLabInstance, identity.ProjectID, identity.MergeRequestIID,
+			identity.HeadSHA, index+1,
+		)
+	}
+	return ids
+}
+
+func applyFindingIDs(result *review.Result, ids []string) error {
+	if len(result.Findings) != len(ids) {
+		return failure.Failed("invalid_stored_review_result")
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for index, id := range ids {
+		if !review.ValidFindingID(id) {
+			return failure.Failed("invalid_stored_review_result")
+		}
+		if _, exists := seen[id]; exists {
+			return failure.Failed("invalid_stored_review_result")
+		}
+		seen[id] = struct{}{}
+		result.Findings[index].ID = id
+	}
 	return nil
 }
 

@@ -151,12 +151,19 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	}
 	assertJobState(t, db, store.JobCompleted)
 	assertCount(t, db, "review_results", 1)
+	assertCount(t, db, "review_findings", 1)
 	assertCount(t, db, "publications", 1)
 	if broker.loadCalls != 1 || broker.archiveCalls != 0 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
 		t.Fatalf("calls: broker=%+v reviewer=%+v", broker, reviewer)
 	}
-	if !strings.Contains(broker.postedBody, "<!-- wormtamer:review=") || !strings.Contains(broker.postedBody, "Check error") {
-		t.Fatalf("posted body = %q", broker.postedBody)
+	expectedFindingID := review.FindingID("http://gitlab.internal", 42, 7, workerHead, 1)
+	var storedFindingID string
+	if err := db.QueryRow(`SELECT finding_id FROM review_findings`).Scan(&storedFindingID); err != nil {
+		t.Fatal(err)
+	}
+	if storedFindingID != expectedFindingID || !strings.Contains(broker.postedBody, "<!-- wormtamer:review=") ||
+		!strings.Contains(broker.postedBody, "Finding ID: `"+expectedFindingID+"`") || !strings.Contains(broker.postedBody, "Check error") {
+		t.Fatalf("stored finding ID = %q, posted body = %q", storedFindingID, broker.postedBody)
 	}
 	for _, secret := range []string{"gitlab-token", "gemini-key", "webhook-secret", "+private-diff", "Looks mostly good."} {
 		if strings.Contains(logs.String(), secret) {

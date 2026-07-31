@@ -9,10 +9,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/aminvakil/wormtamer/internal/review"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const (
 	OutcomeQueued          = "queued"
@@ -79,6 +80,7 @@ type Job struct {
 	LeaseExpiresAt      time.Time
 	AttemptCount        int
 	ValidatedResultJSON []byte
+	FindingIDs          []string
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -283,6 +285,20 @@ ON review_jobs (state, next_attempt_at, lease_expires_at);
 
 PRAGMA user_version = 3;
 `
+		case 3:
+			migration = `
+CREATE TABLE review_findings (
+    finding_id TEXT PRIMARY KEY
+        CHECK(length(finding_id) = 31)
+        CHECK(substr(finding_id, 1, 5) = 'WT-F-')
+        CHECK(substr(finding_id, 6) NOT GLOB '*[^A-Z2-7]*'),
+    job_id INTEGER NOT NULL REFERENCES review_results(job_id) ON DELETE CASCADE,
+    finding_index INTEGER NOT NULL CHECK(finding_index >= 0 AND finding_index < 20),
+    UNIQUE (job_id, finding_index)
+);
+
+PRAGMA user_version = 4;
+`
 		}
 
 		if _, err := tx.ExecContext(ctx, migration); err != nil {
@@ -483,6 +499,31 @@ RETURNING id, gitlab_instance, project_id, merge_request_iid, head_sha,
 	if err := s.db.QueryRowContext(ctx, `SELECT result_json FROM review_results WHERE job_id = ?`, job.ID).Scan(&job.ValidatedResultJSON); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("read claimed review result: %w", err)
 	}
+	if len(job.ValidatedResultJSON) > 0 {
+		rows, err := s.db.QueryContext(ctx, `
+SELECT finding_index, finding_id
+FROM review_findings
+WHERE job_id = ?
+ORDER BY finding_index`, job.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read claimed finding identifiers: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var index int
+			var id string
+			if err := rows.Scan(&index, &id); err != nil {
+				return nil, fmt.Errorf("scan claimed finding identifier: %w", err)
+			}
+			if index != len(job.FindingIDs) || !review.ValidFindingID(id) {
+				return nil, errors.New("invalid stored finding identifiers")
+			}
+			job.FindingIDs = append(job.FindingIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate claimed finding identifiers: %w", err)
+		}
+	}
 	return job, nil
 }
 
@@ -504,9 +545,19 @@ WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
 	return updated == 1, nil
 }
 
-func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, now time.Time) error {
-	if len(resultJSON) == 0 || len(resultJSON) > 65536 {
-		return errors.New("invalid validated review result size")
+func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, findingIDs []string, now time.Time) error {
+	if len(resultJSON) == 0 || len(resultJSON) > 65536 || len(findingIDs) > 20 {
+		return errors.New("invalid validated review result")
+	}
+	seenIDs := make(map[string]struct{}, len(findingIDs))
+	for _, id := range findingIDs {
+		if !review.ValidFindingID(id) {
+			return errors.New("invalid finding identifier")
+		}
+		if _, exists := seenIDs[id]; exists {
+			return errors.New("duplicate finding identifier")
+		}
+		seenIDs[id] = struct{}{}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -519,6 +570,13 @@ INSERT INTO review_results (job_id, result_json, created_at)
 VALUES (?, ?, ?)
 ON CONFLICT(job_id) DO NOTHING`, jobID, resultJSON, formatTime(now)); err != nil {
 		return fmt.Errorf("store validated review result: %w", err)
+	}
+	for index, id := range findingIDs {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO review_findings (finding_id, job_id, finding_index)
+VALUES (?, ?, ?)`, id, jobID, index); err != nil {
+			return fmt.Errorf("store finding identifier: %w", err)
+		}
 	}
 	update, err := tx.ExecContext(ctx, `
 UPDATE review_jobs

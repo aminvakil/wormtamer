@@ -256,6 +256,7 @@ func TestInvalidModelResultsAreRetryable(t *testing.T) {
 		{name: "unsupported severity", output: findingJSON("urgent", "internal/example.go")},
 		{name: "path outside diff", output: findingJSON("high", "other.go")},
 		{name: "line location field", output: `{"summary":"ok","findings":[{"severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"internal/example.go","line":1}]}`},
+		{name: "model-supplied finding ID", output: `{"summary":"ok","findings":[{"id":"WT-F-AAAAAAAAAAAAAAAAAAAAAAAAAA","severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"internal/example.go"}]}`},
 		{name: "sensitive output", output: `{"summary":"application-secret","findings":[]}`, secret: "application-secret"},
 		{name: "JSON-escaped sensitive output", output: `{"summary":"a\"b","findings":[]}`, secret: `a"b`},
 		{name: "multiple JSON values", output: `{"summary":"ok","findings":[]} {}`},
@@ -272,6 +273,31 @@ func TestInvalidModelResultsAreRetryable(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestFindingIDIsStableAndScoped(t *testing.T) {
+	const instance = "https://gitlab.example"
+	head := strings.Repeat("a", 40)
+	id := FindingID(instance, 42, 7, head, 1)
+	if !ValidFindingID(id) || id != FindingID(instance, 42, 7, strings.ToUpper(head), 1) {
+		t.Fatalf("unstable finding ID %q", id)
+	}
+	for _, other := range []string{
+		FindingID("https://other.example", 42, 7, head, 1),
+		FindingID(instance, 43, 7, head, 1),
+		FindingID(instance, 42, 8, head, 1),
+		FindingID(instance, 42, 7, strings.Repeat("b", 40), 1),
+		FindingID(instance, 42, 7, head, 2),
+	} {
+		if other == id || !ValidFindingID(other) {
+			t.Fatalf("finding ID is not scoped: %q and %q", id, other)
+		}
+	}
+	for _, malformed := range []string{"", "model-id", strings.ToLower(id), id + "A"} {
+		if ValidFindingID(malformed) {
+			t.Fatalf("ValidFindingID(%q) = true", malformed)
+		}
 	}
 }
 
@@ -326,7 +352,7 @@ func TestRenderNoteNeutralizesUntrustedMarkdown(t *testing.T) {
 	result := Result{
 		Summary: "@team <script>alert(1)</script>\n/assign root",
 		Findings: []Finding{{
-			Severity: "high", Title: "[click](https://example.invalid)", Path: "a*b.go",
+			ID: testFindingID(1), Severity: "high", Title: "[click](https://example.invalid)", Path: "a*b.go",
 			Explanation: "problem", Recommendation: "fix it",
 		}},
 	}
@@ -339,11 +365,22 @@ func TestRenderNoteNeutralizesUntrustedMarkdown(t *testing.T) {
 			t.Fatalf("rendered note contains unsafe text %q: %s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, "<!-- marker -->") {
-		t.Fatalf("rendered note lacks exact marker: %s", body)
+	if !strings.Contains(body, "<!-- marker -->") || !strings.Contains(body, "Finding ID: `"+testFindingID(1)+"`") {
+		t.Fatalf("rendered note lacks stable identifiers: %s", body)
 	}
 	if strings.Contains(body, "No actionable findings") {
 		t.Fatalf("rendered note lost its finding: %s", body)
+	}
+}
+
+func TestRenderNoteRejectsInvalidFindingIdentifiers(t *testing.T) {
+	finding := boundedFinding("file.go", "title")
+	if _, err := RenderNote(Result{Summary: "ok", Findings: []Finding{finding}}, "<!-- marker -->", nil); err == nil {
+		t.Fatal("RenderNote() accepted a missing finding identifier")
+	}
+	finding.ID = testFindingID(1)
+	if _, err := RenderNote(Result{Summary: "ok", Findings: []Finding{finding, finding}}, "<!-- marker -->", nil); err == nil {
+		t.Fatal("RenderNote() accepted a duplicate finding identifier")
 	}
 }
 
@@ -386,10 +423,15 @@ func makeFindings(count int) []Finding {
 func largeFindings(count int) []Finding {
 	findings := makeFindings(count)
 	for index := range findings {
+		findings[index].ID = testFindingID(index + 1)
 		findings[index].Explanation = strings.Repeat("e", maxDetailCharacters)
 		findings[index].Recommendation = strings.Repeat("r", maxDetailCharacters)
 	}
 	return findings
+}
+
+func testFindingID(ordinal int) string {
+	return FindingID("https://gitlab.example", 42, 7, strings.Repeat("a", 40), ordinal)
 }
 
 func boundedFinding(path, title string) Finding {

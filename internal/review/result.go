@@ -2,6 +2,8 @@ package review
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"html"
 	"io"
@@ -28,11 +30,32 @@ type Result struct {
 }
 
 type Finding struct {
+	ID             string `json:"-"`
 	Severity       string `json:"severity"`
 	Title          string `json:"title"`
 	Explanation    string `json:"explanation"`
 	Recommendation string `json:"recommendation"`
 	Path           string `json:"path"`
+}
+
+func FindingID(gitLabInstance string, projectID, mergeRequestIID int64, headSHA string, ordinal int) string {
+	digest := sha256.New()
+	for _, value := range []string{
+		"wormtamer:finding:v1", gitLabInstance, strconv.FormatInt(projectID, 10),
+		strconv.FormatInt(mergeRequestIID, 10), strings.ToLower(headSHA), strconv.Itoa(ordinal),
+	} {
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+	return "WT-F-" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest.Sum(nil)[:16])
+}
+
+func ValidFindingID(id string) bool {
+	if len(id) != 31 || !strings.HasPrefix(id, "WT-F-") {
+		return false
+	}
+	_, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(id[5:])
+	return err == nil
 }
 
 func DecodeAndValidate(contents []byte, changedPaths map[string]struct{}, forbidden []string) (Result, []byte, error) {
@@ -111,14 +134,24 @@ func RenderNote(result Result, marker string, forbidden []string) (string, error
 		body.WriteString("\n\nNo actionable findings.\n")
 	} else {
 		body.WriteString("\n\n### Findings\n")
+		seenIDs := make(map[string]struct{}, len(result.Findings))
 		for index, finding := range result.Findings {
+			if !ValidFindingID(finding.ID) {
+				return "", failure.Failed("invalid_finding_identifier")
+			}
+			if _, exists := seenIDs[finding.ID]; exists {
+				return "", failure.Failed("duplicate_finding_identifier")
+			}
+			seenIDs[finding.ID] = struct{}{}
 			body.WriteString("\n**")
 			body.WriteString(strconv.Itoa(index + 1))
 			body.WriteString(". ")
 			body.WriteString(markdownText(finding.Severity))
 			body.WriteString(": ")
 			body.WriteString(markdownText(finding.Title))
-			body.WriteString("**\n\nPath: ")
+			body.WriteString("** · Finding ID: `")
+			body.WriteString(finding.ID)
+			body.WriteString("`\n\nPath: ")
 			body.WriteString(markdownText(finding.Path))
 			body.WriteString("\n\nExplanation:\n")
 			writeBlockquote(&body, finding.Explanation)
