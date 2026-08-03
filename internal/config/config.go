@@ -21,6 +21,7 @@ type Config struct {
 	DatabasePath           string              `json:"database_path"`
 	GitLab                 GitLab              `json:"gitlab"`
 	Gemini                 Gemini              `json:"gemini"`
+	PublicSources          PublicSources       `json:"public_sources"`
 	AuthorizedRepositories []string            `json:"authorized_repositories"`
 	RepositorySharing      map[string][]string `json:"repository_sharing"`
 	ConfigFileBroadlyRead  bool                `json:"-"`
@@ -35,6 +36,11 @@ type GitLab struct {
 type Gemini struct {
 	APIKey string `json:"api_key"`
 	Model  string `json:"model"`
+}
+
+type PublicSources struct {
+	AllowedDomains     []string `json:"allowed_domains"`
+	GitHubRepositories []string `json:"github_repositories"`
 }
 
 func Load(path string) (Config, error) {
@@ -118,6 +124,9 @@ func validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.Gemini.Model) == "" {
 		return errors.New("gemini.model is required")
 	}
+	if err := validatePublicSources(&cfg.PublicSources); err != nil {
+		return err
+	}
 	if len(cfg.AuthorizedRepositories) == 0 {
 		return errors.New("authorized_repositories is required")
 	}
@@ -154,6 +163,80 @@ func validate(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+func validatePublicSources(sources *PublicSources) error {
+	if len(sources.AllowedDomains) == 0 {
+		return errors.New("public_sources.allowed_domains is required")
+	}
+	seenDomains := make(map[string]struct{}, len(sources.AllowedDomains))
+	for index, domain := range sources.AllowedDomains {
+		canonical := strings.ToLower(domain)
+		if domain == "" || strings.TrimSpace(domain) != domain || !validDomain(canonical) {
+			return fmt.Errorf("invalid public source domain %q", domain)
+		}
+		if _, exists := seenDomains[canonical]; exists {
+			return fmt.Errorf("duplicate public source domain %q", domain)
+		}
+		seenDomains[canonical] = struct{}{}
+		sources.AllowedDomains[index] = canonical
+	}
+	if _, exists := seenDomains["github.com"]; !exists {
+		return errors.New("public_sources.allowed_domains must include github.com")
+	}
+
+	seenRepositories := make(map[string]struct{}, len(sources.GitHubRepositories))
+	for _, repositoryURL := range sources.GitHubRepositories {
+		if !validGitHubRepositoryURL(repositoryURL) {
+			return fmt.Errorf("invalid public GitHub repository URL %q", repositoryURL)
+		}
+		key := strings.ToLower(repositoryURL)
+		if _, exists := seenRepositories[key]; exists {
+			return fmt.Errorf("duplicate public GitHub repository %q", repositoryURL)
+		}
+		seenRepositories[key] = struct{}{}
+	}
+	return nil
+}
+
+func validDomain(domain string) bool {
+	if len(domain) == 0 || len(domain) > 253 || net.ParseIP(domain) != nil {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validGitHubRepositoryURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) != 2 || parsed.Path != "/"+parts[0]+"/"+parts[1] {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || len(part) > 100 {
+			return false
+		}
+		for _, character := range part {
+			if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+				(character < '0' || character > '9') && character != '-' && character != '_' && character != '.' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateListenAddress(address string) error {

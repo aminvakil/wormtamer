@@ -49,14 +49,16 @@ type Identity struct {
 }
 
 type Snapshot struct {
-	Identity            Identity
-	ProjectPath         string
-	RelatedRepositories []string
-	Title               string
-	Description         string
-	SourceBranch        string
-	TargetBranch        string
-	Files               []ChangedFile
+	Identity                 Identity
+	ProjectPath              string
+	RelatedRepositories      []string
+	AllowedPublicDomains     []string
+	PublicGitHubRepositories []string
+	Title                    string
+	Description              string
+	SourceBranch             string
+	TargetBranch             string
+	Files                    []ChangedFile
 }
 
 type ChangedFile struct {

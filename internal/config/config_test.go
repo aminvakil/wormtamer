@@ -19,6 +19,10 @@ const validConfiguration = `{
     "api_key": "gemini-key",
     "model": "gemini-test"
   },
+  "public_sources": {
+    "allowed_domains": ["github.com", "openbao.org", "syncthing.net"],
+    "github_repositories": ["https://github.com/nginx/nginx"]
+  },
   "authorized_repositories": ["group/project", "parent/team/project"],
   "repository_sharing": {
     "group/project": ["parent/team/project"]
@@ -128,6 +132,14 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "empty Gemini API key", replace: `"gemini-key"`, with: `""`, want: "gemini.api_key is required"},
 		{name: "empty Gemini model", replace: `"gemini-test"`, with: `""`, want: "gemini.model is required"},
 		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
+		{name: "missing public domains", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `[]`, want: "public_sources.allowed_domains is required"},
+		{name: "missing GitHub domain", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `["openbao.org"]`, want: "must include github.com"},
+		{name: "invalid public domain", replace: `"openbao.org"`, with: `"fake_openbao.org"`, want: "invalid public source domain"},
+		{name: "duplicate public domain", replace: `"syncthing.net"]`, with: `"GITHUB.COM"]`, want: "duplicate public source domain"},
+		{name: "noncanonical GitHub repository", replace: `"https://github.com/nginx/nginx"`, with: `"https://github.com/nginx/nginx/"`, want: "invalid public GitHub repository"},
+		{name: "GitHub repository query", replace: `"https://github.com/nginx/nginx"`, with: `"https://github.com/nginx/nginx?q=x"`, want: "invalid public GitHub repository"},
+		{name: "encoded GitHub repository", replace: `"https://github.com/nginx/nginx"`, with: `"https://github.com/%6eginx/nginx"`, want: "invalid public GitHub repository"},
+		{name: "duplicate GitHub repository", replace: `["https://github.com/nginx/nginx"]`, with: `["https://github.com/nginx/nginx", "https://github.com/NGINX/NGINX"]`, want: "duplicate public GitHub repository"},
 		{name: "malformed repository", replace: `"group/project"`, with: `"group//project"`, want: "invalid authorized repository"},
 		{name: "duplicate repository", replace: `"parent/team/project"`, with: `"group/project"`, want: "duplicate authorized repository"},
 		{name: "unauthorized sharing target", replace: `"group/project": ["parent/team/project"]`, with: `"other/project": ["parent/team/project"]`, want: "sharing target"},

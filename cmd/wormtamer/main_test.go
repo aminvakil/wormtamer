@@ -85,6 +85,10 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
     "api_key": "gemini-key",
     "model": "gemini-test"
   },
+  "public_sources": {
+    "allowed_domains": ["github.com"],
+    "github_repositories": []
+  },
   "authorized_repositories": ["group/project"]
 }`
 	path := filepath.Join(directory, "config.json")

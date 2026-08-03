@@ -32,7 +32,7 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 	broker := &fakeGitLab{}
 	workspaces := &fakeWorkspaces{}
 	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}, useTools: true}
-	worker, err := New(storage, broker, workspaces, reviewer, slog.Default(), nil)
+	worker, err := New(storage, broker, nil, []string{"github.com"}, []string{"https://github.com/nginx/nginx"}, workspaces, reviewer, slog.Default(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +45,10 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 	}
 	if workspaces.workspace == nil || workspaces.workspace.calls != 1 || !workspaces.workspace.closed {
 		t.Fatalf("review workspace = %+v", workspaces.workspace)
+	}
+	if len(reviewer.snapshot.AllowedPublicDomains) != 1 || reviewer.snapshot.AllowedPublicDomains[0] != "github.com" ||
+		len(reviewer.snapshot.PublicGitHubRepositories) != 1 || reviewer.snapshot.PublicGitHubRepositories[0] != "https://github.com/nginx/nginx" {
+		t.Fatalf("review public sources = %+v, %+v", reviewer.snapshot.AllowedPublicDomains, reviewer.snapshot.PublicGitHubRepositories)
 	}
 }
 
@@ -443,7 +447,7 @@ func newTestWorker(t *testing.T, storage JobStore, broker *fakeGitLab, reviewer 
 	if logs == nil {
 		logs = &bytes.Buffer{}
 	}
-	result, err := New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
+	result, err := New(storage, broker, nil, nil, nil, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,6 +644,7 @@ func (w *fakeWorkspace) Close() error {
 
 type fakeReviewer struct {
 	result       review.Result
+	snapshot     gitlab.Snapshot
 	err          error
 	calls        int
 	useTools     bool
@@ -648,8 +653,9 @@ type fakeReviewer struct {
 	memoryResult map[string]any
 }
 
-func (r *fakeReviewer) Review(ctx context.Context, _ gitlab.Snapshot, tools repository.ToolBroker) (review.Result, []byte, error) {
+func (r *fakeReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, tools repository.ToolBroker) (review.Result, []byte, error) {
 	r.calls++
+	r.snapshot = snapshot
 	if r.err != nil {
 		return review.Result{}, nil, r.err
 	}

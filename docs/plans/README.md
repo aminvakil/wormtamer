@@ -6,8 +6,7 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 Implement plans in the order listed here unless a plan's status or dependencies are explicitly changed. This list is the authoritative order; filenames remain stable as completed plans are removed.
 
-1. [Research constrained public sources](research-public-sources.md)
-2. [Update the project README for completed capabilities](update-project-readme.md)
+1. [Update the project README for completed capabilities](update-project-readme.md)
 
 All roadmap plans are proposed. Resolve each plan's open policy and interaction questions before approving implementation.
 

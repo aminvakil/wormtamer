@@ -13,6 +13,7 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
@@ -56,15 +57,18 @@ type Reviewer interface {
 }
 
 type Worker struct {
-	store         JobStore
-	gitlab        GitLabBroker
-	workspaces    RepositoryWorkspaces
-	reviewer      Reviewer
-	logger        *slog.Logger
-	owner         string
-	forbidden     []string
-	now           func() time.Time
-	shutdownGrace time.Duration
+	store                    JobStore
+	gitlab                   GitLabBroker
+	public                   publicsource.Broker
+	allowedPublicDomains     []string
+	publicGitHubRepositories []string
+	workspaces               RepositoryWorkspaces
+	reviewer                 Reviewer
+	logger                   *slog.Logger
+	owner                    string
+	forbidden                []string
+	now                      func() time.Time
+	shutdownGrace            time.Duration
 }
 
 type reviewRepository struct {
@@ -152,13 +156,16 @@ func (r *reviewRepository) Close() error {
 	return firstError
 }
 
-func New(storage JobStore, gitLab GitLabBroker, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string) (*Worker, error) {
+func New(storage JobStore, gitLab GitLabBroker, publicBroker publicsource.Broker, allowedPublicDomains, publicGitHubRepositories []string, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string) (*Worker, error) {
 	ownerBytes := make([]byte, 16)
 	if _, err := rand.Read(ownerBytes); err != nil {
 		return nil, errors.New("generate worker lease owner")
 	}
 	return &Worker{
-		store: storage, gitlab: gitLab, workspaces: workspaces, reviewer: reviewer, logger: logger,
+		store: storage, gitlab: gitLab, public: publicBroker,
+		allowedPublicDomains:     append([]string(nil), allowedPublicDomains...),
+		publicGitHubRepositories: append([]string(nil), publicGitHubRepositories...),
+		workspaces:               workspaces, reviewer: reviewer, logger: logger,
 		owner: hex.EncodeToString(ownerBytes), forbidden: append([]string(nil), forbidden...),
 		now: time.Now, shutdownGrace: shutdownGracePeriod,
 	}, nil
@@ -284,7 +291,9 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if err != nil {
 			return err
 		}
-		tools := newReviewTools(snapshot, w.gitlab, w.workspaces, w.store, w.now)
+		snapshot.AllowedPublicDomains = append([]string(nil), w.allowedPublicDomains...)
+		snapshot.PublicGitHubRepositories = append([]string(nil), w.publicGitHubRepositories...)
+		tools := newReviewTools(snapshot, w.gitlab, w.public, w.workspaces, w.store, w.now)
 		validated, encoded, reviewErr := w.reviewer.Review(ctx, snapshot, tools)
 		closeErr := tools.Close()
 		if reviewErr != nil {

@@ -21,7 +21,7 @@ func TestReviewMemoryToolRejectsModelSelectedScopeAndAllowsEmptyResults(t *testi
 		Identity:    gitlab.Identity{GitLabInstance: "http://gitlab.internal", ProjectID: 42},
 		ProjectPath: "group/project",
 	}
-	tools := newReviewTools(snapshot, &fakeGitLab{}, &fakeWorkspaces{}, storage, time.Now)
+	tools := newReviewTools(snapshot, &fakeGitLab{}, nil, &fakeWorkspaces{}, storage, time.Now)
 	defer tools.Close()
 
 	_, err := tools.Call(context.Background(), review.ToolSearchMemory, map[string]any{

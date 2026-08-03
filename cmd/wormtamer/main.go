@@ -19,6 +19,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/feedback"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
+	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/reconcile"
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
@@ -68,21 +69,22 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, []string{
-		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
-	})
+	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
+	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden)
 	if err != nil {
 		return err
 	}
-	reviewWorker, err := worker.New(storage, gitLabClient, workspaceManager, geminiReviewer, logger, []string{
-		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
-	})
+	publicClient, err := publicsource.New(cfg.PublicSources.AllowedDomains, cfg.PublicSources.GitHubRepositories, forbidden)
 	if err != nil {
 		return err
 	}
-	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, []string{
-		cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey,
-	})
+	reviewWorker, err := worker.New(storage, gitLabClient, publicClient,
+		cfg.PublicSources.AllowedDomains, cfg.PublicSources.GitHubRepositories,
+		workspaceManager, geminiReviewer, logger, forbidden)
+	if err != nil {
+		return err
+	}
+	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden)
 	if err != nil {
 		return err
 	}

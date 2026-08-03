@@ -10,6 +10,7 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
+	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 )
@@ -22,22 +23,29 @@ const (
 
 type reviewTools struct {
 	repositories *reviewRepository
+	public       *reviewPublicSources
 	store        JobStore
 	snapshot     gitlab.Snapshot
 	now          func() time.Time
 	retrieved    map[string]store.ReviewMemoryRetrieval
 }
 
-func newReviewTools(snapshot gitlab.Snapshot, gitLab GitLabBroker, workspaces RepositoryWorkspaces, storage JobStore, now func() time.Time) *reviewTools {
+func newReviewTools(snapshot gitlab.Snapshot, gitLab GitLabBroker, publicBroker publicsource.Broker, workspaces RepositoryWorkspaces, storage JobStore, now func() time.Time) *reviewTools {
 	return &reviewTools{
 		repositories: newReviewRepository(snapshot, gitLab, workspaces),
+		public:       newReviewPublicSources(publicBroker, workspaces, snapshot.PublicGitHubRepositories),
 		store:        storage, snapshot: snapshot, now: now,
 		retrieved: make(map[string]store.ReviewMemoryRetrieval),
 	}
 }
 
 func (t *reviewTools) Call(ctx context.Context, name string, arguments map[string]any) (map[string]any, error) {
-	if name != review.ToolSearchMemory {
+	switch name {
+	case publicsource.ToolFetchURL, publicsource.ToolListFiles, publicsource.ToolReadFile:
+		return t.public.Call(ctx, name, arguments)
+	case review.ToolSearchMemory:
+		// Continue below.
+	default:
 		return t.repositories.Call(ctx, name, arguments)
 	}
 	if len(arguments) != 1 {
@@ -92,7 +100,12 @@ func (t *reviewTools) Call(ctx context.Context, name string, arguments map[strin
 }
 
 func (t *reviewTools) Close() error {
-	return t.repositories.Close()
+	repositoryError := t.repositories.Close()
+	publicError := t.public.Close()
+	if repositoryError != nil {
+		return repositoryError
+	}
+	return publicError
 }
 
 func (t *reviewTools) Retrievals() []store.ReviewMemoryRetrieval {

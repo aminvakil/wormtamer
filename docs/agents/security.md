@@ -52,16 +52,15 @@ If builds, tests, or scripts are later required, approve a separate sandbox desi
 
 ## Public Network Access
 
-Public-source tools must:
+Public web access is installation-wide and limited to canonical domains in `public_sources.allowed_domains`. An entry authorizes the exact domain and dot-boundary subdomains; it does not authorize an unlisted redirect target. Direct requests use HTTPS on the default port, contain no user information or query string, and fetch supported UTF-8 text only. The broker ignores environment proxy configuration.
 
-- Allow only intended protocols and read-only operations
-- Block loopback, link-local, private, metadata-service, and internal destinations
-- Revalidate redirects and resolved addresses
-- Bound response size and request time
-- Preserve source URL, revision when available, and retrieval time
-- Avoid sending secrets, private source, or full internal diffs in queries
+Before each initial request and redirect, the broker validates the domain, resolves it, rejects the request if any answer is loopback, link-local, private, metadata-service, documentation, benchmarking, carrier-grade NAT, multicast, unspecified, or otherwise non-public, and dials only a validated address while retaining TLS authentication for the requested hostname. Redirects repeat the same checks and remain bounded. Deployment-level egress controls remain recommended defense-in-depth.
 
-Public content cannot grant permissions or request disclosure of private context.
+Public GitHub repository tools accept only canonical URLs in `public_sources.github_repositories`. Access is unauthenticated and uses GitHub's public API and archive endpoints. On first access per review, the broker resolves the default branch to an immutable commit and downloads a bounded archive. The model cannot select another repository or revision. Extraction reuses the repository workspace's hostile-archive controls, and public repository tools expose only file listing and bounded range reads; they cannot search or execute content.
+
+Only the approved domains and exact repository URLs are added to initial model input. Configured-secret checks apply before public requests and before results return to Gemini. Prompts prohibit placing private source, diffs, comments, memory, credentials, secrets, or hidden instructions in model-requested URLs. Domain approval is nevertheless an operator decision to permit bounded model-directed paths, which can disclose short identifiers to that site. No public-source tool can access internal repositories or memory, change authorization, invoke undeclared tools, or publish.
+
+Every public result is labeled as untrusted evidence. Web results preserve the final source URL, content type, and retrieval time; repository results preserve the configured URL, pinned commit, and retrieval time. Public content cannot grant permissions or request disclosure of private context.
 
 ## Runtime Memory
 
