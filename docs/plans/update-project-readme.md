@@ -10,7 +10,7 @@ Update the root `README.md` after the implementation roadmap is complete so its 
 
 ## Scope
 
-- Replace statements that describe the current diff-only reviewer with verified descriptions of repository tools, authorized cross-repository inspection, approved runtime memory, feedback handling, evaluation, and constrained public research.
+- Replace statements that describe the current diff-only reviewer with verified descriptions of repository tools, authorized cross-repository inspection, approved runtime memory, feedback handling, and constrained public research.
 - Update user-facing setup and operation guidance for configuration or GitLab webhook requirements introduced by the completed plans.
 - Keep the quick start concise and link to authoritative architecture, reliability, security, and deployment documentation for details.
 - Retain explicit limitations, especially single-tenant and one-replica operation, application-enforced authorization, bounded read-only tools, and the prohibition on repository-controlled code execution.
