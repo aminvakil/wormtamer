@@ -2,7 +2,7 @@
 
 ## System Model
 
-The application is a self-hosted GitLab merge request reviewer. Each installation serves one team with independent credentials, configuration, and SQLite state. Future runtime memory and repository caches remain installation-local. Installations share no database or control plane.
+The application is a self-hosted GitLab merge request reviewer. Each installation serves one team with independent credentials, configuration, and SQLite state. Runtime memory and disposable repository workspaces remain installation-local. Installations share no database or control plane.
 
 One installation runs as one process and replica because SQLite and local repository caches are not distributed coordination mechanisms.
 

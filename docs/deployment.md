@@ -2,15 +2,15 @@
 
 Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, and public CA certificates. Configuration, credentials, and SQLite state remain outside the image.
 
-## Build
+## Image
 
-Build the image from the repository root for the local container host architecture:
+Pull the published image from GitHub Container Registry:
 
 ```sh
-docker build -t wormtamer:local .
+docker pull ghcr.io/aminvakil/wormtamer:latest
 ```
 
-The build context includes only the Go module files and application source selected by `.dockerignore`. A tag such as `v1.2.3` publishes the `linux/amd64` image as `ghcr.io/aminvakil/wormtamer:1.2.3` and `ghcr.io/aminvakil/wormtamer:latest`.
+Each release updates `ghcr.io/aminvakil/wormtamer:latest`.
 
 ## Configure
 
@@ -24,7 +24,7 @@ Use a GitLab personal access token with `api` scope whose user has at least the 
 
 `public_sources.allowed_domains` must include `github.com`. Each entry authorizes bounded model-directed HTTPS retrieval from that exact domain and its subdomains; for example, `syncthing.net` also permits `docs.syncthing.net`. `public_sources.github_repositories` lists exact public GitHub repositories that the model may inspect through bounded snapshot file tools. These public sources are available to every review, so add only domains to which the team permits bounded request paths to be disclosed. Public access is unauthenticated, ignores environment proxy settings, and remains subject to GitHub's public rate limits. Deployment-level egress filtering is recommended in addition to application checks.
 
-Configure each GitLab project to send both merge request and comment webhooks to:
+Configure each authorized GitLab project to send both merge request and comment webhooks to:
 
 ```text
 https://wormtamer.example/webhooks/gitlab
@@ -56,7 +56,7 @@ docker run --detach \
   --publish 8080:8080 \
   --mount type=bind,src=/absolute/path/config.json,dst=/etc/wormtamer/config.json,readonly \
   --mount type=volume,src=wormtamer-data,dst=/var/lib/wormtamer \
-  wormtamer:local
+  ghcr.io/aminvakil/wormtamer:latest
 ```
 
 Replace the configuration source with its absolute host path. Publishing `8080:8080` accepts webhook traffic on the host's network interfaces. Wormtamer itself serves HTTP, so expose it only on a trusted network or place it behind an operator-managed TLS reverse proxy. A reverse proxy running on the same host may instead publish Wormtamer on loopback.
@@ -77,7 +77,7 @@ A successful response confirms that startup completed and the HTTP server is liv
 docker logs wormtamer
 ```
 
-Restarting the container with the same volume preserves queued work and publication records. Stop the existing container before starting a replacement so only one replica accesses SQLite.
+Restarting the container with the same volume preserves all SQLite state, including feedback and runtime memory. Stop the existing container before starting a replacement so only one replica accesses SQLite.
 
 ## Back up and restore
 

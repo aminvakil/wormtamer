@@ -4,11 +4,7 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 ## Proposed Roadmap
 
-Implement plans in the order listed here unless a plan's status or dependencies are explicitly changed. This list is the authoritative order; filenames remain stable as completed plans are removed.
-
-1. [Update the project README for completed capabilities](update-project-readme.md)
-
-All roadmap plans are proposed. Resolve each plan's open policy and interaction questions before approving implementation.
+There are currently no proposed roadmap plans. When plans are added, implement them in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
 
 ## Deferred
 
