@@ -62,6 +62,26 @@ func TestWorkspaceListsReadsAndSearchesAttributedText(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAcceptsPAXGlobalHeader(t *testing.T) {
+	manager := newTestManager(t)
+	workspace, err := manager.Create(context.Background(), "sha", testArchive(t,
+		archiveEntry{name: "pax_global_header", kind: tar.TypeXGlobalHeader, pax: map[string]string{"comment": "sha"}},
+		archiveEntry{name: "project-sha/file.txt", body: "text"},
+	))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer workspace.Close()
+
+	listed, err := workspace.Call(context.Background(), ToolListFiles, map[string]any{})
+	if err != nil {
+		t.Fatalf("list error = %v", err)
+	}
+	if files := listed["files"].([]string); strings.Join(files, ",") != "file.txt" {
+		t.Fatalf("files = %v", files)
+	}
+}
+
 func TestWorkspaceRejectsArchiveTraversalAndMixedRoots(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -157,6 +177,7 @@ type archiveEntry struct {
 	body string
 	kind byte
 	link string
+	pax  map[string]string
 }
 
 func testArchive(t *testing.T, entries ...archiveEntry) []byte {
@@ -164,16 +185,15 @@ func testArchive(t *testing.T, entries ...archiveEntry) []byte {
 	var output bytes.Buffer
 	compressed := gzip.NewWriter(&output)
 	archive := tar.NewWriter(compressed)
-	if err := archive.WriteHeader(&tar.Header{Name: "project-sha/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
+	writeEntry := func(entry archiveEntry) {
 		kind := entry.kind
 		if kind == 0 {
 			kind = tar.TypeReg
 		}
-		header := &tar.Header{Name: entry.name, Typeflag: kind, Mode: 0o644, Linkname: entry.link}
-		if kind == tar.TypeReg {
+		header := &tar.Header{Name: entry.name, Typeflag: kind, Mode: 0o644, Linkname: entry.link, PAXRecords: entry.pax}
+		if kind == tar.TypeXGlobalHeader {
+			header = &tar.Header{Typeflag: kind, PAXRecords: entry.pax}
+		} else if kind == tar.TypeReg {
 			header.Size = int64(len(entry.body))
 		}
 		if err := archive.WriteHeader(header); err != nil {
@@ -183,6 +203,19 @@ func testArchive(t *testing.T, entries ...archiveEntry) []byte {
 			if _, err := archive.Write([]byte(entry.body)); err != nil {
 				t.Fatal(err)
 			}
+		}
+	}
+	for _, entry := range entries {
+		if entry.kind == tar.TypeXGlobalHeader {
+			writeEntry(entry)
+		}
+	}
+	if err := archive.WriteHeader(&tar.Header{Name: "project-sha/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.kind != tar.TypeXGlobalHeader {
+			writeEntry(entry)
 		}
 	}
 	if err := archive.Close(); err != nil {

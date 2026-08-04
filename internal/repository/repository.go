@@ -139,6 +139,10 @@ func extractArchive(ctx context.Context, destination string, contents []byte) er
 			return failure.Failed("repository_archive_limit_exceeded")
 		}
 		totalBytes += header.Size
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			// Global PAX metadata has no repository-relative path and may precede the archive root.
+			continue
+		}
 
 		relative, root, skip, err := archiveEntryPath(header.Name)
 		if err != nil {
