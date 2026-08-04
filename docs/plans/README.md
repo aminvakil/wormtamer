@@ -2,13 +2,6 @@
 
 Use a plan for substantial work that changes architecture, security boundaries, persistent state, public contracts, or several components. Routine fixes, contained implementation work, and documentation cleanup do not need permanent plan files.
 
-## Proposed Roadmap
-
-Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
-
-1. [Evaluate review generation settings on current merge requests](evaluate-review-generation-settings.md): compare default and high thinking on the observed MRs and raise the generation ceiling only when measured truncation requires it.
-2. [Enable high thinking for merge request reviews](enable-high-thinking-for-reviews.md): apply the evaluated high-thinking setting and smallest sufficient bounded generation budget.
-
 ## Deferred
 
 - [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md): revisit after a deployed installation has accumulated enough meaningful structured feedback to define useful measures and sample sizes from evidence.

@@ -52,11 +52,30 @@ func TestLoad(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
 	}
+	if cfg.Gemini.ThinkingLevel != "default" {
+		t.Fatalf("Gemini.ThinkingLevel = %q, want default", cfg.Gemini.ThinkingLevel)
+	}
 	if cfg.ShareAllAuthorizedRepositories {
 		t.Fatal("ShareAllAuthorizedRepositories = true when omitted")
 	}
 	if related := cfg.RepositorySharing["group/project"]; len(related) != 1 || related[0] != "parent/team/project" {
 		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
+	}
+}
+
+func TestLoadPassesThroughGeminiThinkingLevel(t *testing.T) {
+	contents := strings.Replace(validConfiguration, `"model": "gemini-test"`, `"model": "gemini-test", "thinking_level": " max "`, 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Gemini.ThinkingLevel != "max" {
+		t.Fatalf("Gemini.ThinkingLevel = %q, want max", cfg.Gemini.ThinkingLevel)
 	}
 }
 

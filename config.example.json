@@ -9,7 +9,8 @@
   },
   "gemini": {
     "api_key": "replace-me",
-    "model": "replace-me"
+    "model": "replace-me",
+    "thinking_level": "default"
   },
   "public_sources": {
     "allowed_domains": ["github.com"],

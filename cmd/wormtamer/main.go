@@ -74,7 +74,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
-	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden, logger)
+	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden, logger)
 	if err != nil {
 		return err
 	}

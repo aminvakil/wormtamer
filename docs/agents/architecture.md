@@ -14,7 +14,7 @@ One installation runs as one process and replica because SQLite and local reposi
 - The Gemini Developer API through `google.golang.org/genai` as the only model backend
 - A small explicit Gemini function-calling loop with no general agent framework or automatic tool execution
 
-A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value; generation settings remain application-owned rather than deployment-configurable.
+A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
 
 ## Compatibility Baseline
 
@@ -26,7 +26,7 @@ Establish an upgrade and compatibility policy before the first production deploy
 
 ## Deployment Configuration
 
-The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, log level, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, Gemini API key and model, authorized internal repositories, approved public domains, and exact public GitHub repositories; required values must be non-empty and repository entries must be well-formed and unique. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` when omitted. The validated GitLab URL is canonicalized before it participates in durable identity. The review worker is always enabled, so its credentials are required at startup without making external validation calls.
+The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, log level, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, Gemini API key, model, and review thinking level, authorized internal repositories, approved public domains, and exact public GitHub repositories; required values must be non-empty and repository entries must be well-formed and unique. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` when omitted. `gemini.thinking_level` defaults to `default`, which leaves the SDK thinking configuration unset. Any other non-empty value is passed through to Gemini without a local allowlist so model-specific support is decided by the API. The validated GitLab URL is canonicalized before it participates in durable identity. The review worker is always enabled, so its credentials are required at startup without making external validation calls.
 
 ```json
 {
@@ -40,7 +40,8 @@ The process starts with an explicit JSON configuration path, for example `wormta
   },
   "gemini": {
     "api_key": "replace-me",
-    "model": "replace-me"
+    "model": "replace-me",
+    "thinking_level": "default"
   },
   "public_sources": {
     "allowed_domains": ["github.com", "openbao.org", "syncthing.net"],

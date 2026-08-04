@@ -18,7 +18,7 @@ import (
 )
 
 func TestGeminiGenerationDeclaresOnlyBrokeredFunctions(t *testing.T) {
-	config := generationConfig()
+	config := generationConfig("default")
 	if len(config.Tools) != 1 || len(config.Tools[0].FunctionDeclarations) != 7 || config.Tools[0].CodeExecution != nil || config.Tools[0].GoogleSearch != nil || config.Tools[0].URLContext != nil {
 		t.Fatalf("tools = %+v", config.Tools)
 	}
@@ -107,9 +107,20 @@ func TestGeminiReviewModelContract(t *testing.T) {
 		}
 	}
 
-	config := generationConfig()
+	config := generationConfig("default")
 	if config.ResponseMIMEType != "application/json" {
 		t.Fatalf("response MIME type = %q", config.ResponseMIMEType)
+	}
+	if config.MaxOutputTokens != 16384 || config.ThinkingConfig != nil {
+		t.Fatalf("default generation settings = %+v", config)
+	}
+	highConfig := generationConfig("high")
+	if highConfig.MaxOutputTokens != 16384 || highConfig.ThinkingConfig == nil || highConfig.ThinkingConfig.ThinkingLevel != genai.ThinkingLevelHigh || highConfig.ThinkingConfig.IncludeThoughts {
+		t.Fatalf("high generation settings = %+v", highConfig)
+	}
+	unknownConfig := generationConfig("max")
+	if unknownConfig.ThinkingConfig == nil || unknownConfig.ThinkingConfig.ThinkingLevel != genai.ThinkingLevel("MAX") {
+		t.Fatalf("unknown pass-through generation settings = %+v", unknownConfig)
 	}
 	schema := config.ResponseJsonSchema.(map[string]any)
 	if schema["additionalProperties"] != false || !slices.Equal(schema["required"].([]string), []string{"summary", "findings"}) {
@@ -158,14 +169,42 @@ func TestGeminiReviewerValidatesStructuredResult(t *testing.T) {
 	}
 }
 
+func TestGeminiReviewerRejectsIncompleteFinish(t *testing.T) {
+	generator := &fakeGenerator{
+		output:       []byte(`{"summary":"must not be accepted","findings":[]}`),
+		finishReason: genai.FinishReasonMaxTokens,
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
+
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "incomplete_model_response" || !failureError.Retryable {
+		t.Fatalf("Review() error = %v", err)
+	}
+	output := logs.String()
+	for _, expected := range []string{"Gemini review generation", "MAX_TOKENS", "not_attempted_incomplete_finish"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("generation metadata does not contain %q: %s", expected, output)
+		}
+	}
+	if strings.Contains(output, "must not be accepted") {
+		t.Fatalf("generation metadata exposed response content: %s", output)
+	}
+}
+
 func TestGeminiReviewerDebugLogsModelTranscript(t *testing.T) {
-	generator := &fakeGenerator{turns: []*genai.Content{
-		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
-			ID: "call-1", Name: repository.ToolReadFile,
-			Args: map[string]any{"repository": "group/related", "path": "helper.go"},
-		}}}, genai.RoleModel),
-		genai.NewContentFromText(`{"summary":"related repository checked","findings":[]}`, genai.RoleModel),
-	}}
+	generator := &fakeGenerator{
+		modelVersion: "resolved-test-version", candidateTokenCount: 12,
+		candidatesTokenCount: 10, thoughtsTokenCount: 2, usageMetadataAvailable: true,
+		turns: []*genai.Content{
+			genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call-1", Name: repository.ToolReadFile,
+				Args: map[string]any{"repository": "group/related", "path": "helper.go"},
+			}}}, genai.RoleModel),
+			genai.NewContentFromText(`{"summary":"related repository checked","findings":[]}`, genai.RoleModel),
+		}}
 	broker := &fakeToolBroker{result: map[string]any{"repository": "group/related", "path": "helper.go", "lines": []string{"package helper"}}}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -180,9 +219,21 @@ func TestGeminiReviewerDebugLogsModelTranscript(t *testing.T) {
 		"Gemini review tool call", repository.ToolReadFile, "group/related", "helper.go",
 		"Gemini review tool result", "package helper",
 		"Gemini review response", "related repository checked",
+		"Gemini review generation", "configured_endpoint", "resolved-test-version",
+		"candidate_token_count", "candidates_token_count", "thinking_token_count",
+		"latency_ms", "tool_call_count", "tool_names", "not_final", "valid",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("debug logs do not contain %q: %s", expected, output)
+		}
+	}
+	generationEvents := jsonLogEvents(t, output, "Gemini review generation")
+	if len(generationEvents) != 2 {
+		t.Fatalf("generation log events = %d, want 2", len(generationEvents))
+	}
+	for turn, event := range generationEvents {
+		if event["turn"] != float64(turn) || event["project_id"] != float64(42) || event["merge_request_iid"] != float64(7) || event["head_sha"] != strings.Repeat("a", 40) {
+			t.Fatalf("generation event lacks review correlation: %+v", event)
 		}
 	}
 }
@@ -619,11 +670,14 @@ func TestGeminiReviewerEnforcesPublicSourceToolCallLimit(t *testing.T) {
 }
 
 func TestGeminiReviewerRejectsUndeclaredTool(t *testing.T) {
+	const undeclaredName = "private-source-in-tool-name"
 	generator := &fakeGenerator{turns: []*genai.Content{
-		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "shell"}}}, genai.RoleModel),
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: undeclaredName}}}, genai.RoleModel),
 	}}
 	broker := &fakeToolBroker{}
-	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
 	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
 	var failureError *failure.Error
 	if !errors.As(err, &failureError) || failureError.Category != "model_requested_undeclared_tool" || !failureError.Retryable {
@@ -631,6 +685,45 @@ func TestGeminiReviewerRejectsUndeclaredTool(t *testing.T) {
 	}
 	if broker.calls != 0 {
 		t.Fatalf("undeclared tool dispatched %d times", broker.calls)
+	}
+	output := logs.String()
+	if strings.Contains(output, undeclaredName) {
+		t.Fatalf("info logs exposed undeclared model-controlled tool name: %s", output)
+	}
+	events := jsonLogEvents(t, output, "Gemini review generation")
+	if len(events) != 1 || events[0]["undeclared_tool_count"] != float64(1) || events[0]["turn"] != float64(0) ||
+		events[0]["project_id"] != float64(42) || events[0]["merge_request_iid"] != float64(7) {
+		t.Fatalf("undeclared tool generation telemetry = %+v", events)
+	}
+	names, ok := events[0]["tool_names"].([]any)
+	if !ok || len(names) != 1 || names[0] != "[undeclared]" {
+		t.Fatalf("safe tool names = %+v", events[0]["tool_names"])
+	}
+}
+
+func TestGeminiReviewerBoundsUndeclaredToolDebugDiagnostics(t *testing.T) {
+	const undeclaredName = "private-source-in-tool-name"
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			Name: undeclaredName, Args: map[string]any{"value": strings.Repeat("x", 5000)},
+		}}}, genai.RoleModel),
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
+
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), &fakeToolBroker{})
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "model_requested_undeclared_tool" {
+		t.Fatalf("Review() error = %v", err)
+	}
+	events := jsonLogEvents(t, logs.String(), "Gemini review tool call")
+	if len(events) != 1 || events[0]["tool"] != undeclaredName {
+		t.Fatalf("debug tool-call events = %+v", events)
+	}
+	arguments, ok := events[0]["arguments"].(string)
+	if !ok || len(arguments) > 4096+len("[truncated]") || !strings.HasSuffix(arguments, "[truncated]") {
+		t.Fatalf("bounded debug arguments length=%d value=%q", len(arguments), arguments)
 	}
 }
 
@@ -864,6 +957,24 @@ func TestGeminiErrorClassification(t *testing.T) {
 	}
 }
 
+func jsonLogEvents(t *testing.T, output, message string) []map[string]any {
+	t.Helper()
+	var events []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode log event: %v", err)
+		}
+		if event["msg"] == message {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
 func makeFindings(count int) []Finding {
 	findings := make([]Finding, count)
 	for index := range findings {
@@ -920,16 +1031,22 @@ func (b *fakeToolBroker) Call(_ context.Context, name string, args map[string]an
 }
 
 type fakeGenerator struct {
-	output   []byte
-	turns    []*genai.Content
-	err      error
-	model    string
-	prompt   string
-	calls    int
-	requests [][]*genai.Content
+	output                 []byte
+	turns                  []*genai.Content
+	err                    error
+	model                  string
+	prompt                 string
+	calls                  int
+	requests               [][]*genai.Content
+	modelVersion           string
+	finishReason           genai.FinishReason
+	candidateTokenCount    int32
+	candidatesTokenCount   int32
+	thoughtsTokenCount     int32
+	usageMetadataAvailable bool
 }
 
-func (g *fakeGenerator) Generate(_ context.Context, model string, contents []*genai.Content) (*genai.Content, error) {
+func (g *fakeGenerator) Generate(_ context.Context, model string, contents []*genai.Content) (Generation, error) {
 	g.calls++
 	g.model = model
 	g.requests = append(g.requests, append([]*genai.Content(nil), contents...))
@@ -937,12 +1054,20 @@ func (g *fakeGenerator) Generate(_ context.Context, model string, contents []*ge
 		g.prompt = contents[0].Parts[0].Text
 	}
 	if g.err != nil {
-		return nil, g.err
+		return Generation{}, g.err
 	}
+	content := genai.NewContentFromText(string(g.output), genai.RoleModel)
 	if len(g.turns) > 0 {
-		turn := g.turns[0]
+		content = g.turns[0]
 		g.turns = g.turns[1:]
-		return turn, nil
 	}
-	return genai.NewContentFromText(string(g.output), genai.RoleModel), nil
+	finishReason := g.finishReason
+	if finishReason == "" {
+		finishReason = genai.FinishReasonStop
+	}
+	return Generation{
+		Content: content, ModelVersion: g.modelVersion, FinishReason: finishReason,
+		CandidateTokenCount: g.candidateTokenCount, CandidatesTokenCount: g.candidatesTokenCount,
+		ThoughtsTokenCount: g.thoughtsTokenCount, UsageMetadataAvailable: g.usageMetadataAvailable,
+	}, nil
 }

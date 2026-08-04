@@ -36,8 +36,9 @@ type GitLab struct {
 }
 
 type Gemini struct {
-	APIKey string `json:"api_key"`
-	Model  string `json:"model"`
+	APIKey        string `json:"api_key"`
+	Model         string `json:"model"`
+	ThinkingLevel string `json:"thinking_level"`
 }
 
 type PublicSources struct {
@@ -133,6 +134,10 @@ func validate(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.Gemini.Model) == "" {
 		return errors.New("gemini.model is required")
+	}
+	cfg.Gemini.ThinkingLevel = strings.TrimSpace(cfg.Gemini.ThinkingLevel)
+	if cfg.Gemini.ThinkingLevel == "" {
+		cfg.Gemini.ThinkingLevel = "default"
 	}
 	if err := validatePublicSources(&cfg.PublicSources); err != nil {
 		return err
