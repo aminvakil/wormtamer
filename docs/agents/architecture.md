@@ -43,7 +43,7 @@ The process starts with an explicit JSON configuration path, for example `wormta
   },
   "public_sources": {
     "allowed_domains": ["github.com", "openbao.org", "syncthing.net"],
-    "github_repositories": ["https://github.com/nginx/nginx"]
+    "github_repositories": ["nginx/nginx"]
   },
   "authorized_repositories": ["group/project", "group/shared-contracts"],
   "repository_sharing": {
@@ -54,7 +54,7 @@ The process starts with an explicit JSON configuration path, for example `wormta
 
 Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and bounds which internal repositories can be disclosed to and inspected by the model. `repository_sharing` adds directional rules from a repository under review to related repositories whose information may be disclosed to that review's audience. Both sides must be authorized, self-sharing and duplicate entries are rejected, and a missing rule denies cross-repository access. Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
 
-`public_sources.allowed_domains` must include `github.com`; each canonical entry authorizes that domain and dot-boundary subdomains for bounded direct HTTPS retrieval. `public_sources.github_repositories` contains canonical `https://github.com/<owner>/<repository>` URLs and authorizes snapshot tools only for those exact repositories. These installation-wide lists are disclosed to every review. Public GitHub access is unauthenticated.
+`public_sources.allowed_domains` must include `github.com`; each canonical entry authorizes that domain and dot-boundary subdomains for bounded direct HTTPS retrieval. `public_sources.github_repositories` contains exact `<owner>/<repository>` slugs and authorizes snapshot tools only for those repositories. These installation-wide lists are disclosed to every review. Public GitHub access is unauthenticated.
 
 Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. Operational job visibility is through bounded logs rather than a status API.
 
@@ -117,7 +117,7 @@ The GitLab integration supports GitLab 17 and newer. The reconciler scans each a
 
 ## Context and State
 
-The model conversation begins with bounded changed-file diffs, relevant metadata, the exact current and sharing-eligible repository paths, approved public domains and exact GitHub repository URLs, the structured response schema, declared tools, and application-owned limits. Only validated, attributed tool results are added on later turns; conversations and retrieved public content are not persisted. Authorization and limits remain deterministic regardless of model intent.
+The model conversation begins with bounded changed-file diffs, relevant metadata, the exact current and sharing-eligible repository paths, approved public domains and exact GitHub repository slugs, the structured response schema, declared tools, and application-owned limits. Only validated, attributed tool results are added on later turns; conversations and retrieved public content are not persisted. Authorization and limits remain deterministic regardless of model intent.
 
 SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 

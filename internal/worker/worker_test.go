@@ -32,7 +32,7 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 	broker := &fakeGitLab{}
 	workspaces := &fakeWorkspaces{}
 	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}, useTools: true}
-	worker, err := New(storage, broker, nil, []string{"github.com"}, []string{"https://github.com/nginx/nginx"}, workspaces, reviewer, slog.Default(), nil)
+	worker, err := New(storage, broker, nil, []string{"github.com"}, []string{"nginx/nginx"}, workspaces, reviewer, slog.Default(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 		t.Fatalf("review workspace = %+v", workspaces.workspace)
 	}
 	if len(reviewer.snapshot.AllowedPublicDomains) != 1 || reviewer.snapshot.AllowedPublicDomains[0] != "github.com" ||
-		len(reviewer.snapshot.PublicGitHubRepositories) != 1 || reviewer.snapshot.PublicGitHubRepositories[0] != "https://github.com/nginx/nginx" {
+		len(reviewer.snapshot.PublicGitHubRepositories) != 1 || reviewer.snapshot.PublicGitHubRepositories[0] != "nginx/nginx" {
 		t.Fatalf("review public sources = %+v, %+v", reviewer.snapshot.AllowedPublicDomains, reviewer.snapshot.PublicGitHubRepositories)
 	}
 }

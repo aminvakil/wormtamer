@@ -27,26 +27,26 @@ func TestReviewPublicSourcesFetchesAndAttributesApprovedWebContent(t *testing.T)
 }
 
 func TestReviewPublicSourcesPinsConfiguredRepositoryAndClosesWorkspace(t *testing.T) {
-	repositoryURL := "https://github.com/nginx/nginx"
+	repositorySlug := "nginx/nginx"
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	broker := &fakePublicBroker{snapshot: publicsource.RepositorySnapshot{
-		Repository: repositoryURL, Revision: workerHead, Archive: []byte("public-archive"), RetrievedAt: now,
+		Repository: repositorySlug, Revision: workerHead, Archive: []byte("public-archive"), RetrievedAt: now,
 	}}
 	workspaces := &fakeWorkspaces{}
-	tools := newReviewPublicSources(broker, workspaces, []string{repositoryURL})
+	tools := newReviewPublicSources(broker, workspaces, []string{repositorySlug})
 	result, err := tools.Call(context.Background(), publicsource.ToolReadFile, map[string]any{
-		"repository": repositoryURL, "path": "src/nginx.c",
+		"repository": repositorySlug, "path": "src/nginx.c",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tools.Call(context.Background(), publicsource.ToolListFiles, map[string]any{"repository": repositoryURL}); err != nil {
+	if _, err := tools.Call(context.Background(), publicsource.ToolListFiles, map[string]any{"repository": repositorySlug}); err != nil {
 		t.Fatal(err)
 	}
 	if broker.loadCalls != 1 || workspaces.createCalls != 1 || workspaces.revision != workerHead || string(workspaces.archive) != "public-archive" {
 		t.Fatalf("broker=%+v workspaces=%+v", broker, workspaces)
 	}
-	if result["repository"] != repositoryURL || result["authority"] != "untrusted_public" || result["retrieved_at"] != now.Format(time.RFC3339Nano) {
+	if result["repository"] != repositorySlug || result["authority"] != "untrusted_public" || result["retrieved_at"] != now.Format(time.RFC3339Nano) {
 		t.Fatalf("result = %+v", result)
 	}
 	if err := tools.Close(); err != nil || !workspaces.workspace.closed {
@@ -56,8 +56,8 @@ func TestReviewPublicSourcesPinsConfiguredRepositoryAndClosesWorkspace(t *testin
 
 func TestReviewPublicSourcesRejectsUnconfiguredRepositoryBeforeNetwork(t *testing.T) {
 	broker := &fakePublicBroker{}
-	tools := newReviewPublicSources(broker, &fakeWorkspaces{}, []string{"https://github.com/nginx/nginx"})
-	_, err := tools.Call(context.Background(), publicsource.ToolListFiles, map[string]any{"repository": "https://github.com/other/project"})
+	tools := newReviewPublicSources(broker, &fakeWorkspaces{}, []string{"nginx/nginx"})
+	_, err := tools.Call(context.Background(), publicsource.ToolListFiles, map[string]any{"repository": "other/project"})
 	var failureError *failure.Error
 	if !errors.As(err, &failureError) || failureError.Category != "public_repository_unavailable" || broker.loadCalls != 0 {
 		t.Fatalf("error=%v broker=%+v", err, broker)

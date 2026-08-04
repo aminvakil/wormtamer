@@ -21,7 +21,7 @@ const validConfiguration = `{
   },
   "public_sources": {
     "allowed_domains": ["github.com", "openbao.org", "syncthing.net"],
-    "github_repositories": ["https://github.com/nginx/nginx"]
+    "github_repositories": ["nginx/nginx"]
   },
   "authorized_repositories": ["group/project", "parent/team/project"],
   "repository_sharing": {
@@ -136,10 +136,11 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "missing GitHub domain", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `["openbao.org"]`, want: "must include github.com"},
 		{name: "invalid public domain", replace: `"openbao.org"`, with: `"fake_openbao.org"`, want: "invalid public source domain"},
 		{name: "duplicate public domain", replace: `"syncthing.net"]`, with: `"GITHUB.COM"]`, want: "duplicate public source domain"},
-		{name: "noncanonical GitHub repository", replace: `"https://github.com/nginx/nginx"`, with: `"https://github.com/nginx/nginx/"`, want: "invalid public GitHub repository"},
-		{name: "GitHub repository query", replace: `"https://github.com/nginx/nginx"`, with: `"https://github.com/nginx/nginx?q=x"`, want: "invalid public GitHub repository"},
-		{name: "encoded GitHub repository", replace: `"https://github.com/nginx/nginx"`, with: `"https://github.com/%6eginx/nginx"`, want: "invalid public GitHub repository"},
-		{name: "duplicate GitHub repository", replace: `["https://github.com/nginx/nginx"]`, with: `["https://github.com/nginx/nginx", "https://github.com/NGINX/NGINX"]`, want: "duplicate public GitHub repository"},
+		{name: "GitHub repository URL", replace: `"nginx/nginx"`, with: `"https://github.com/nginx/nginx"`, want: "invalid public GitHub repository slug"},
+		{name: "GitHub repository extra path", replace: `"nginx/nginx"`, with: `"nginx/nginx/tree"`, want: "invalid public GitHub repository slug"},
+		{name: "GitHub repository query", replace: `"nginx/nginx"`, with: `"nginx/nginx?q=x"`, want: "invalid public GitHub repository slug"},
+		{name: "encoded GitHub repository", replace: `"nginx/nginx"`, with: `"%6eginx/nginx"`, want: "invalid public GitHub repository slug"},
+		{name: "duplicate GitHub repository", replace: `["nginx/nginx"]`, with: `["nginx/nginx", "NGINX/NGINX"]`, want: "duplicate public GitHub repository"},
 		{name: "malformed repository", replace: `"group/project"`, with: `"group//project"`, want: "invalid authorized repository"},
 		{name: "duplicate repository", replace: `"parent/team/project"`, with: `"group/project"`, want: "duplicate authorized repository"},
 		{name: "unauthorized sharing target", replace: `"group/project": ["parent/team/project"]`, with: `"other/project": ["parent/team/project"]`, want: "sharing target"},

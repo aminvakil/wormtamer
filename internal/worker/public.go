@@ -24,8 +24,8 @@ type publicWorkspace struct {
 
 func newReviewPublicSources(broker publicsource.Broker, workspaces RepositoryWorkspaces, repositories []string) *reviewPublicSources {
 	allowed := make(map[string]struct{}, len(repositories))
-	for _, repositoryURL := range repositories {
-		allowed[repositoryURL] = struct{}{}
+	for _, repositorySlug := range repositories {
+		allowed[repositorySlug] = struct{}{}
 	}
 	return &reviewPublicSources{
 		broker: broker, workspaces: workspaces, repositories: allowed,

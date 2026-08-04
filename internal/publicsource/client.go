@@ -105,12 +105,12 @@ func newClient(allowedDomains, githubRepositories, forbidden []string, resolver 
 		domains[domain] = struct{}{}
 	}
 	repositories := make(map[string]githubRepository, len(githubRepositories))
-	for _, repositoryURL := range githubRepositories {
-		repository, err := parseGitHubRepository(repositoryURL)
+	for _, repositorySlug := range githubRepositories {
+		repository, err := parseGitHubRepository(repositorySlug)
 		if err != nil {
 			return nil, err
 		}
-		repositories[repositoryURL] = repository
+		repositories[repositorySlug] = repository
 	}
 	return &Client{
 		allowedDomains: domains, repositories: repositories,
@@ -149,8 +149,8 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (WebResult, error) {
 	}, nil
 }
 
-func (c *Client) LoadGitHubRepository(ctx context.Context, repositoryURL string) (RepositorySnapshot, error) {
-	repository, allowed := c.repositories[repositoryURL]
+func (c *Client) LoadGitHubRepository(ctx context.Context, repositorySlug string) (RepositorySnapshot, error) {
+	repository, allowed := c.repositories[repositorySlug]
 	if !allowed {
 		return RepositorySnapshot{}, failure.Failed("public_repository_unavailable")
 	}
@@ -190,7 +190,7 @@ func (c *Client) LoadGitHubRepository(ctx context.Context, repositoryURL string)
 		return RepositorySnapshot{}, err
 	}
 	return RepositorySnapshot{
-		Repository: repositoryURL, Revision: revision, Archive: archive,
+		Repository: repositorySlug, Revision: revision, Archive: archive,
 		RetrievedAt: c.now().UTC(),
 	}, nil
 }
@@ -365,14 +365,21 @@ func (c *Client) domainAllowed(hostname string) bool {
 	return false
 }
 
-func parseGitHubRepository(raw string) (githubRepository, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" {
-		return githubRepository{}, errors.New("invalid GitHub repository URL")
+func parseGitHubRepository(slug string) (githubRepository, error) {
+	parts := strings.Split(slug, "/")
+	if len(parts) != 2 {
+		return githubRepository{}, errors.New("invalid GitHub repository slug")
 	}
-	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parsed.Path != "/"+parts[0]+"/"+parts[1] {
-		return githubRepository{}, errors.New("invalid GitHub repository URL")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || len(part) > 100 {
+			return githubRepository{}, errors.New("invalid GitHub repository slug")
+		}
+		for _, character := range part {
+			if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+				(character < '0' || character > '9') && character != '-' && character != '_' && character != '.' {
+				return githubRepository{}, errors.New("invalid GitHub repository slug")
+			}
+		}
 	}
 	return githubRepository{owner: parts[0], name: parts[1]}, nil
 }

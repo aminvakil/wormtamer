@@ -191,24 +191,31 @@ func TestLoadGitHubRepositoryPinsDefaultBranchHead(t *testing.T) {
 		"api.github.com":      {"140.82.112.5"},
 		"codeload.github.com": {"140.82.112.9"},
 	}
-	client := testClient(t, []string{"github.com"}, []string{"https://github.com/nginx/nginx"}, resolver, server)
+	client := testClient(t, []string{"github.com"}, []string{"nginx/nginx"}, resolver, server)
 	client.now = func() time.Time { return time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC) }
 
-	snapshot, err := client.LoadGitHubRepository(context.Background(), "https://github.com/nginx/nginx")
+	snapshot, err := client.LoadGitHubRepository(context.Background(), "nginx/nginx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Repository != "https://github.com/nginx/nginx" || snapshot.Revision != revision || string(snapshot.Archive) != "archive" || !snapshot.RetrievedAt.Equal(client.now()) {
+	if snapshot.Repository != "nginx/nginx" || snapshot.Revision != revision || string(snapshot.Archive) != "archive" || !snapshot.RetrievedAt.Equal(client.now()) {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 }
 
+func TestNewRejectsGitHubRepositoryURL(t *testing.T) {
+	_, err := New([]string{"github.com"}, []string{"https://github.com/nginx/nginx"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid GitHub repository slug") {
+		t.Fatalf("New() error = %v", err)
+	}
+}
+
 func TestGitHubRepositoryMustBeConfigured(t *testing.T) {
-	client, err := New([]string{"github.com"}, []string{"https://github.com/nginx/nginx"}, nil)
+	client, err := New([]string{"github.com"}, []string{"nginx/nginx"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.LoadGitHubRepository(context.Background(), "https://github.com/other/project")
+	_, err = client.LoadGitHubRepository(context.Background(), "other/project")
 	var failureError *failure.Error
 	if !errors.As(err, &failureError) || failureError.Category != "public_repository_unavailable" {
 		t.Fatalf("LoadGitHubRepository() error = %v", err)

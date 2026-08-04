@@ -186,13 +186,13 @@ func validatePublicSources(sources *PublicSources) error {
 	}
 
 	seenRepositories := make(map[string]struct{}, len(sources.GitHubRepositories))
-	for _, repositoryURL := range sources.GitHubRepositories {
-		if !validGitHubRepositoryURL(repositoryURL) {
-			return fmt.Errorf("invalid public GitHub repository URL %q", repositoryURL)
+	for _, repositorySlug := range sources.GitHubRepositories {
+		if !validGitHubRepositorySlug(repositorySlug) {
+			return fmt.Errorf("invalid public GitHub repository slug %q", repositorySlug)
 		}
-		key := strings.ToLower(repositoryURL)
+		key := strings.ToLower(repositorySlug)
 		if _, exists := seenRepositories[key]; exists {
-			return fmt.Errorf("duplicate public GitHub repository %q", repositoryURL)
+			return fmt.Errorf("duplicate public GitHub repository %q", repositorySlug)
 		}
 		seenRepositories[key] = struct{}{}
 	}
@@ -216,13 +216,9 @@ func validDomain(domain string) bool {
 	return true
 }
 
-func validGitHubRepositoryURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
-		return false
-	}
-	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
-	if len(parts) != 2 || parsed.Path != "/"+parts[0]+"/"+parts[1] {
+func validGitHubRepositorySlug(slug string) bool {
+	parts := strings.Split(slug, "/")
+	if len(parts) != 2 {
 		return false
 	}
 	for _, part := range parts {
