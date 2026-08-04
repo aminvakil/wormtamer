@@ -25,11 +25,16 @@ func TestGeminiGenerationDeclaresOnlyBrokeredFunctions(t *testing.T) {
 	names := make([]string, 0, 7)
 	for _, declaration := range config.Tools[0].FunctionDeclarations {
 		names = append(names, declaration.Name)
-		if declaration.Name == repository.ToolListFiles {
-			for _, expected := range []string{"recursively", "bounded", "narrowest relevant path"} {
-				if !strings.Contains(declaration.Description, expected) {
-					t.Fatalf("%s description does not contain %q: %q", declaration.Name, expected, declaration.Description)
-				}
+		var expectedDescription []string
+		switch declaration.Name {
+		case repository.ToolListFiles:
+			expectedDescription = []string{"recursively", "bounded", "narrowest relevant path"}
+		case repository.ToolSearch:
+			expectedDescription = []string{"Recursively", "bounded", "case-sensitive literal", "narrowest relevant path", "scan or output limit", "retried"}
+		}
+		for _, expected := range expectedDescription {
+			if !strings.Contains(declaration.Description, expected) {
+				t.Fatalf("%s description does not contain %q: %q", declaration.Name, expected, declaration.Description)
 			}
 		}
 		schema := declaration.ParametersJsonSchema.(map[string]any)
@@ -350,24 +355,80 @@ func TestGeminiReviewerRecoversFromOversizedRepositoryToolRequest(t *testing.T) 
 	}
 }
 
-func TestGeminiReviewerChargesRepeatedOversizedRepositoryToolRequests(t *testing.T) {
-	turns := make([]*genai.Content, repository.ReviewResourceLimit+1)
-	for index := range turns {
-		turns[index] = genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
-			Name: repository.ToolListFiles, Args: map[string]any{"repository": "group/project"},
-		}}}, genai.RoleModel)
-	}
-	generator := &fakeGenerator{turns: turns}
-	broker := &fakeToolBroker{err: failure.Failed("repository_tool_output_limit_exceeded")}
-	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+func TestGeminiReviewerRecoversFromBroadRepositorySearch(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "broad-search", Name: repository.ToolSearch, Args: map[string]any{"repository": "group/project", "query": "Check"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "narrow-search", Name: repository.ToolSearch, Args: map[string]any{"repository": "group/project", "query": "Check", "path": "internal/review"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromText(`{"summary":"completed after narrowing search","findings":[]}`, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{callFn: func(call int, name string, args map[string]any) (map[string]any, error) {
+		switch call {
+		case 1:
+			if name != repository.ToolSearch || args["path"] != nil {
+				t.Fatalf("broad call = %s(%v)", name, args)
+			}
+			return map[string]any{"matches": []string{"private partial match"}}, failure.Failed("repository_search_limit_exceeded")
+		case 2:
+			if name != repository.ToolSearch || args["path"] != "internal/review" {
+				t.Fatalf("narrow call = %s(%v)", name, args)
+			}
+			return map[string]any{"repository": "group/project", "revision": strings.Repeat("a", 40), "matches": []any{}}, nil
+		default:
+			t.Fatalf("unexpected broker call %d", call)
+			return nil, nil
+		}
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
 
-	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
-	var failureError *failure.Error
-	if !errors.As(err, &failureError) || failureError.Category != "repository_tool_call_limit_exceeded" || !failureError.Retryable {
-		t.Fatalf("Review() error = %v", err)
+	result, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	if err != nil || result.Summary != "completed after narrowing search" {
+		t.Fatalf("Review() result=%+v error=%v", result, err)
 	}
-	if broker.calls != repository.ReviewResourceLimit || generator.calls != repository.ReviewResourceLimit+1 {
+	if broker.calls != 2 || generator.calls != 3 {
 		t.Fatalf("broker calls=%d generator calls=%d", broker.calls, generator.calls)
+	}
+	failureResponse := generator.requests[1][2].Parts[0].FunctionResponse
+	if failureResponse == nil || len(failureResponse.Response) != 1 || failureResponse.Response["error"] != "repository_search_limit_exceeded" {
+		t.Fatalf("broad function response = %+v", failureResponse)
+	}
+	if strings.Contains(logs.String(), "private partial match") {
+		t.Fatalf("partial search result was logged: %s", logs.String())
+	}
+}
+
+func TestGeminiReviewerChargesRepeatedCorrectableRepositoryLimitFailures(t *testing.T) {
+	for _, test := range []struct {
+		name, tool, category string
+	}{
+		{name: "output limit", tool: repository.ToolListFiles, category: "repository_tool_output_limit_exceeded"},
+		{name: "search scan limit", tool: repository.ToolSearch, category: "repository_search_limit_exceeded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			turns := make([]*genai.Content, repository.ReviewResourceLimit+1)
+			for index := range turns {
+				turns[index] = genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+					Name: test.tool, Args: map[string]any{"repository": "group/project"},
+				}}}, genai.RoleModel)
+			}
+			generator := &fakeGenerator{turns: turns}
+			broker := &fakeToolBroker{err: failure.Failed(test.category)}
+			reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+
+			_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+			var failureError *failure.Error
+			if !errors.As(err, &failureError) || failureError.Category != "repository_tool_call_limit_exceeded" || !failureError.Retryable {
+				t.Fatalf("Review() error = %v", err)
+			}
+			if broker.calls != repository.ReviewResourceLimit || generator.calls != repository.ReviewResourceLimit+1 {
+				t.Fatalf("broker calls=%d generator calls=%d", broker.calls, generator.calls)
+			}
+		})
 	}
 }
 
@@ -380,7 +441,6 @@ func TestGeminiReviewerPropagatesRepositoryBoundaryFailures(t *testing.T) {
 		"repository_archive_invalid_path",
 		"repository_archive_duplicate_path",
 		"repository_archive_limit_exceeded",
-		"repository_search_limit_exceeded",
 	} {
 		t.Run(category, func(t *testing.T) {
 			generator := &fakeGenerator{turns: []*genai.Content{
@@ -394,6 +454,35 @@ func TestGeminiReviewerPropagatesRepositoryBoundaryFailures(t *testing.T) {
 			_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
 			var failureError *failure.Error
 			if !errors.As(err, &failureError) || failureError.Category != category {
+				t.Fatalf("Review() error = %v", err)
+			}
+			if generator.calls != 1 {
+				t.Fatalf("review continued after boundary failure; calls=%d", generator.calls)
+			}
+		})
+	}
+}
+
+func TestGeminiReviewerDoesNotRecoverInternalLimitsForOtherTools(t *testing.T) {
+	for _, test := range []struct {
+		name, tool, category string
+	}{
+		{name: "search limit from internal read", tool: repository.ToolReadFile, category: "repository_search_limit_exceeded"},
+		{name: "output limit from public URL", tool: publicsource.ToolFetchURL, category: "repository_tool_output_limit_exceeded"},
+		{name: "output limit from public repository", tool: publicsource.ToolListFiles, category: "repository_tool_output_limit_exceeded"},
+		{name: "public response limit", tool: publicsource.ToolFetchURL, category: "public_source_response_limit_exceeded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			generator := &fakeGenerator{turns: []*genai.Content{
+				genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: test.tool}}}, genai.RoleModel),
+				genai.NewContentFromText(`{"summary":"degraded review","findings":[]}`, genai.RoleModel),
+			}}
+			broker := &fakeToolBroker{err: failure.Failed(test.category)}
+			reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+
+			_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+			var failureError *failure.Error
+			if !errors.As(err, &failureError) || failureError.Category != test.category {
 				t.Fatalf("Review() error = %v", err)
 			}
 			if generator.calls != 1 {

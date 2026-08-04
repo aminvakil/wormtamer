@@ -2,10 +2,6 @@
 
 Status: proposed
 
-Depends on:
-
-- [Recover from broad internal repository searches](recover-from-broad-internal-repository-searches.md)
-
 ## Goal
 
 Review and improve every current Gemini-facing instruction and structured contract so the model receives concise, consistent guidance about its task, evidence hierarchy, tool selection, security boundaries, and required output. Reduce avoidable broad repository requests when exact or path-scoped context is already known without weakening broker enforcement or adding persistent model hints.
@@ -39,7 +35,7 @@ Treat the model interface as four layers with separate responsibilities:
 
 Inventory every instruction, prompt builder, function declaration, and response schema used by `internal/review` and `internal/memory`. Check each statement against trusted validation and broker code. Change wording only when it maps to current behavior, a documented constraint, or an observed failure mode; do not rewrite clear text for style alone.
 
-For repository access, add general pre-call guidance that prefers the smallest direct request capable of answering the question. An exact path from the diff should normally be read directly; a known directory should be supplied to recursive listing or search. Keep root operations valid when the model lacks narrower context. Coordinate this wording with the search-limit recovery plan so recursion, bounded failures, and narrower retries are described once in the most useful model-facing locations.
+For repository access, add general pre-call guidance that prefers the smallest direct request capable of answering the question. An exact path from the diff should normally be read directly; a known directory should be supplied to recursive listing or search. Keep root operations valid when the model lacks narrower context. Coordinate this wording with search-limit recovery behavior so recursion, bounded failures, and narrower retries are described once in the most useful model-facing locations.
 
 For feedback evaluation, verify that the instruction, input framing, schema, and local validation consistently express natural overall-review and finding feedback without user-facing identifier syntax, role as provenance rather than authority, optional reusable project-specific lessons, and no decision for unrelated or ambiguous comments. Preserve the absence of model tools in this workflow.
 

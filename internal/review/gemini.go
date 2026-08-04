@@ -191,7 +191,7 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 						"turn", turn, "tool", diagnosticValue(call.Name, r.forbidden), "reason", "repository_tool_failed")
 					return Result{}, nil, failure.Retry("repository_tool_failed", 0)
 				}
-				if !modelCorrectableToolFailure(toolFailure) {
+				if !modelCorrectableToolFailure(call.Name, toolFailure) {
 					logger.DebugContext(requestCtx, "Gemini review tool failure",
 						"turn", turn, "tool", diagnosticValue(call.Name, r.forbidden), "reason", toolFailure.Category)
 					return Result{}, nil, callErr
@@ -308,7 +308,7 @@ func toolDeclarations() []*genai.FunctionDeclaration {
 			},
 		},
 		{
-			Name: repository.ToolSearch, Description: "Search text files for a case-sensitive literal string in the current or a related internal repository listed in the review input.",
+			Name: repository.ToolSearch, Description: "Recursively search bounded text content for a case-sensitive literal string in the current or a related internal repository listed in the review input. Supply the narrowest relevant path when known; a broad search may exceed the scan or output limit and can be retried with a narrower path.",
 			ParametersJsonSchema: map[string]any{
 				"type": "object", "additionalProperties": false, "required": []string{"repository", "query"},
 				"properties": map[string]any{
@@ -392,12 +392,16 @@ func parseModelTurn(content *genai.Content) (string, []*genai.FunctionCall, erro
 	return text.String(), calls, nil
 }
 
-func modelCorrectableToolFailure(toolFailure *failure.Error) bool {
+func modelCorrectableToolFailure(tool string, toolFailure *failure.Error) bool {
 	if toolFailure.Retryable || toolFailure.Obsolete {
 		return false
 	}
 	switch toolFailure.Category {
-	case "repository_tool_arguments_invalid", "repository_path_invalid", "repository_path_not_found", "repository_unavailable", "repository_tool_output_limit_exceeded", "memory_tool_arguments_invalid", "public_source_tool_arguments_invalid", "public_repository_unavailable", "public_source_request_rejected", "public_source_response_type_unsupported":
+	case "repository_tool_output_limit_exceeded":
+		return tool == repository.ToolListFiles || tool == repository.ToolReadFile || tool == repository.ToolSearch
+	case "repository_search_limit_exceeded":
+		return tool == repository.ToolSearch
+	case "repository_tool_arguments_invalid", "repository_path_invalid", "repository_path_not_found", "repository_unavailable", "memory_tool_arguments_invalid", "public_source_tool_arguments_invalid", "public_repository_unavailable", "public_source_request_rejected", "public_source_response_type_unsupported":
 		return true
 	default:
 		return false
