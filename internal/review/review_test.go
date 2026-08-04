@@ -760,19 +760,59 @@ func TestStructuredResultBounds(t *testing.T) {
 	}
 }
 
-func TestRenderNoteNeutralizesUntrustedMarkdown(t *testing.T) {
+func TestRenderNoteKeepsQuotesReadableInEveryField(t *testing.T) {
 	result := Result{
-		Summary: "@team <script>alert(1)</script>\n/assign root",
+		Summary: `variable 'windows_public_ip' to 'windows_public_ips' & <summary>`,
 		Findings: []Finding{{
-			ID: testFindingID(1), Severity: "high", Title: "[click](https://example.invalid)", Path: "a*b.go",
-			Explanation: "problem", Recommendation: "fix it",
+			ID: testFindingID(1), Severity: "high", Title: `title's "quote" & <title>`,
+			Path: `dir/path's "quote" & <path>`, Explanation: `explanation's "quote" & <explanation>`,
+			Recommendation: `recommendation's "quote" & <recommendation>`,
 		}},
 	}
 	body, err := RenderNote(result, "<!-- marker -->", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"@team", "<script>", "[click](https://example.invalid)", "\n/assign root"} {
+	for _, expected := range []string{
+		`variable 'windows\_public\_ip' to 'windows\_public\_ips' &amp; &lt;summary&gt;`,
+		`high: title's "quote" &amp; &lt;title&gt;`,
+		`Path: dir/path's "quote" &amp; &lt;path&gt;`,
+		`explanation's "quote" &amp; &lt;explanation&gt;`,
+		`recommendation's "quote" &amp; &lt;recommendation&gt;`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("rendered note does not contain %q: %s", expected, body)
+		}
+	}
+	for _, broken := range []string{"&#34;", "&#39;", "&#x22;", "&#x27;", "&quot;", "&apos;"} {
+		if strings.Contains(body, broken) {
+			t.Fatalf("rendered note contains escaped quote %q: %s", broken, body)
+		}
+	}
+}
+
+func TestRenderNoteNeutralizesUntrustedMarkdownAndHTML(t *testing.T) {
+	result := Result{
+		Summary: "@team <script>alert(\"x\")</script> &lt;b&gt;\n# heading\n> quote\n- list",
+		Findings: []Finding{{
+			ID: testFindingID(1), Severity: "high", Title: "*emphasis* **strong**", Path: "a*b.go",
+			Explanation: "`code`\n[click](https://example.invalid)", Recommendation: "/assign root",
+		}},
+	}
+	body, err := RenderNote(result, "<!-- marker -->", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"@\u200bteam", `&lt;script&gt;alert\("x"\)&lt;/script&gt;`, `&amp;lt;b&amp;gt;`,
+		`> \# heading`, `> &gt; quote`, `> \- list`, `\*emphasis\* \*\*strong\*\*`,
+		`Path: a\*b\.go`, "> \\`code\\`", `\[click\]\(https://example\.invalid\)`, `> /assign root`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("rendered note does not contain inert text %q: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"@team", "<script>", "[click](https://example.invalid)", "\n# heading", "\n> quote", "\n- list", "\n/assign root"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("rendered note contains unsafe text %q: %s", forbidden, body)
 		}

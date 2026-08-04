@@ -78,7 +78,7 @@ Runtime memory is separate from contributor documentation under `docs/agents/`.
 
 ## Publication and Logging
 
-The current summary renderer escapes model-controlled Markdown and HTML constructs, neutralizes mentions, and rejects output containing known configured secrets. Publication reconciliation accepts a hidden marker only when the note author matches the PAT's authenticated GitLab user; untrusted contributors cannot suppress a review by copying the marker. These controls supplement, rather than replace, structured result validation.
+The current summary renderer escapes model-controlled Markdown syntax, ampersands, and HTML angle brackets, neutralizes mentions, and rejects output containing known configured secrets. Apostrophes and quotation marks remain literal because they are safe in HTML text content. Publication reconciliation accepts a hidden marker only when the note author matches the PAT's authenticated GitLab user; untrusted contributors cannot suppress a review by copying the marker. These controls supplement, rather than replace, structured result validation.
 
 Before publishing:
 

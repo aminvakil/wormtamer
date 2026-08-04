@@ -6,9 +6,8 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
 
-1. [Fix review note HTML and Markdown double escaping](fix-review-note-double-escaping.md): keep model-controlled text inert while rendering ordinary apostrophes and quotation marks readably in GitLab notes.
-2. [Evaluate review generation settings on current merge requests](evaluate-review-generation-settings.md): compare default and high thinking on the observed MRs and raise the generation ceiling only when measured truncation requires it.
-3. [Enable high thinking for merge request reviews](enable-high-thinking-for-reviews.md): apply the evaluated high-thinking setting and smallest sufficient bounded generation budget.
+1. [Evaluate review generation settings on current merge requests](evaluate-review-generation-settings.md): compare default and high thinking on the observed MRs and raise the generation ceiling only when measured truncation requires it.
+2. [Enable high thinking for merge request reviews](enable-high-thinking-for-reviews.md): apply the evaluated high-thinking setting and smallest sufficient bounded generation budget.
 
 ## Deferred
 

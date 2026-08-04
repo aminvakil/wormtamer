@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/json"
-	"html"
 	"io"
 	"strconv"
 	"strings"
@@ -228,7 +227,9 @@ func writeBlockquote(body *strings.Builder, value string) {
 }
 
 func markdownText(value string) string {
-	value = html.EscapeString(value)
+	value = strings.ReplaceAll(value, "&", "&amp;")
+	value = strings.ReplaceAll(value, "<", "&lt;")
+	value = strings.ReplaceAll(value, ">", "&gt;")
 	var escaped strings.Builder
 	for _, character := range value {
 		if strings.ContainsRune(`\\`+"`*_{}[]()#+-.!|>~", character) {
