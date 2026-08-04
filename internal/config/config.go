@@ -19,6 +19,7 @@ var repositoryPathPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.
 type Config struct {
 	ListenAddress          string              `json:"listen_address"`
 	DatabasePath           string              `json:"database_path"`
+	LogLevel               string              `json:"log_level"`
 	GitLab                 GitLab              `json:"gitlab"`
 	Gemini                 Gemini              `json:"gemini"`
 	PublicSources          PublicSources       `json:"public_sources"`
@@ -103,6 +104,14 @@ func validate(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.DatabasePath) == "" {
 		return errors.New("database_path is required")
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	switch cfg.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return errors.New("log_level must be debug, info, warn, or error")
 	}
 	if strings.TrimSpace(cfg.GitLab.BaseURL) == "" {
 		return errors.New("gitlab.base_url is required")

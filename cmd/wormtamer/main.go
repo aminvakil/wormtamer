@@ -31,7 +31,7 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -49,6 +49,10 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
+	}
+	logger = slog.New(logLevelHandler{Handler: logger.Handler(), level: configuredLogLevel(cfg.LogLevel)})
+	if cfg.LogLevel == "debug" {
+		logger.Warn("debug logging enabled; logs include private model prompts, responses, and tool content")
 	}
 	if cfg.ConfigFileBroadlyRead {
 		logger.Warn("configuration file is readable by group or other users")
@@ -70,7 +74,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
-	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden)
+	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden, logger)
 	if err != nil {
 		return err
 	}
@@ -84,7 +88,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden)
+	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.Model, forbidden, logger)
 	if err != nil {
 		return err
 	}
@@ -218,6 +222,36 @@ func parseConfigPath(args []string) (string, error) {
 		return "", errors.New("-config is required")
 	}
 	return *configPath, nil
+}
+
+func configuredLogLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+type logLevelHandler struct {
+	slog.Handler
+	level slog.Level
+}
+
+func (h logLevelHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= h.level
+}
+
+func (h logLevelHandler) WithAttrs(attributes []slog.Attr) slog.Handler {
+	return logLevelHandler{Handler: h.Handler.WithAttrs(attributes), level: h.level}
+}
+
+func (h logLevelHandler) WithGroup(name string) slog.Handler {
+	return logLevelHandler{Handler: h.Handler.WithGroup(name), level: h.level}
 }
 
 func bounded(value string) string {

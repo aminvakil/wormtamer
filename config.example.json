@@ -1,6 +1,7 @@
 {
   "listen_address": "0.0.0.0:8080",
   "database_path": "/var/lib/wormtamer/wormtamer.db",
+  "log_level": "info",
   "gitlab": {
     "base_url": "https://gitlab.example",
     "webhook_secret": "replace-me",

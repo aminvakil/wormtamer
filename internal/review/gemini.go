@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -42,13 +43,14 @@ type GeminiReviewer struct {
 	generator Generator
 	model     string
 	forbidden []string
+	logger    *slog.Logger
 }
 
 type sdkGenerator struct {
 	client *genai.Client
 }
 
-func NewGeminiReviewer(ctx context.Context, apiKey, model string, forbidden []string) (*GeminiReviewer, error) {
+func NewGeminiReviewer(ctx context.Context, apiKey, model string, forbidden []string, logger *slog.Logger) (*GeminiReviewer, error) {
 	httpClient := &http.Client{
 		Timeout: geminiRequestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -63,14 +65,22 @@ func NewGeminiReviewer(ctx context.Context, apiKey, model string, forbidden []st
 	if err != nil {
 		return nil, errors.New("initialize Gemini client")
 	}
-	return NewGeminiReviewerWithGenerator(&sdkGenerator{client: client}, model, forbidden), nil
+	return newGeminiReviewer(&sdkGenerator{client: client}, model, forbidden, logger), nil
 }
 
 func NewGeminiReviewerWithGenerator(generator Generator, model string, forbidden []string) *GeminiReviewer {
+	return newGeminiReviewer(generator, model, forbidden, slog.New(slog.DiscardHandler))
+}
+
+func newGeminiReviewer(generator Generator, model string, forbidden []string, logger *slog.Logger) *GeminiReviewer {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &GeminiReviewer{
 		generator: generator,
 		model:     strings.TrimSpace(model),
 		forbidden: append([]string(nil), forbidden...),
+		logger:    logger,
 	}
 }
 
@@ -85,6 +95,16 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 	requestCtx, cancel := context.WithTimeout(ctx, geminiRequestTimeout)
 	defer cancel()
 	contents := []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)}
+	logger := r.logger.With(
+		"model", diagnosticValue(r.model, r.forbidden),
+		"project_id", snapshot.Identity.ProjectID,
+		"merge_request_iid", snapshot.Identity.MergeRequestIID,
+		"head_sha", diagnosticValue(snapshot.Identity.HeadSHA, r.forbidden))
+	if logger.Enabled(requestCtx, slog.LevelDebug) {
+		logger.DebugContext(requestCtx, "Gemini review prompt",
+			"system_instruction", diagnosticValue(systemInstruction, r.forbidden),
+			"prompt", diagnosticValue(prompt, r.forbidden))
+	}
 	repositoryCalls := 0
 	memoryCalls := 0
 	publicCalls := 0
@@ -107,7 +127,24 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			for _, file := range snapshot.Files {
 				paths[file.NewPath] = struct{}{}
 			}
-			return DecodeAndValidate([]byte(text), paths, r.forbidden)
+			result, encoded, err := DecodeAndValidate([]byte(text), paths, r.forbidden)
+			if err != nil {
+				return Result{}, nil, err
+			}
+			if logger.Enabled(requestCtx, slog.LevelDebug) {
+				logger.DebugContext(requestCtx, "Gemini review response",
+					"turn", turn, "response", string(encoded))
+			}
+			return result, encoded, nil
+		}
+		if logger.Enabled(requestCtx, slog.LevelDebug) {
+			for _, call := range calls {
+				logger.DebugContext(requestCtx, "Gemini review tool call",
+					"turn", turn,
+					"tool_call_id", diagnosticValue(call.ID, r.forbidden),
+					"tool", diagnosticValue(call.Name, r.forbidden),
+					"arguments", diagnosticJSON(call.Args, r.forbidden))
+			}
 		}
 		if tools == nil {
 			return Result{}, nil, failure.Retry("tool_call_limit_exceeded", 0)
@@ -150,9 +187,13 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 				}
 				var toolFailure *failure.Error
 				if !errors.As(callErr, &toolFailure) {
+					logger.DebugContext(requestCtx, "Gemini review tool failure",
+						"turn", turn, "tool", diagnosticValue(call.Name, r.forbidden), "reason", "repository_tool_failed")
 					return Result{}, nil, failure.Retry("repository_tool_failed", 0)
 				}
 				if !modelCorrectableToolFailure(toolFailure) {
+					logger.DebugContext(requestCtx, "Gemini review tool failure",
+						"turn", turn, "tool", diagnosticValue(call.Name, r.forbidden), "reason", toolFailure.Category)
 					return Result{}, nil, callErr
 				}
 				result = map[string]any{"error": toolFailure.Category}
@@ -168,6 +209,13 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			if toolBytes > maxToolResultBytes {
 				return Result{}, nil, failure.Retry("tool_result_limit_exceeded", 0)
 			}
+			if logger.Enabled(requestCtx, slog.LevelDebug) {
+				logger.DebugContext(requestCtx, "Gemini review tool result",
+					"turn", turn,
+					"tool_call_id", diagnosticValue(call.ID, r.forbidden),
+					"tool", diagnosticValue(call.Name, r.forbidden),
+					"result", diagnosticValue(string(encoded), r.forbidden))
+			}
 			responses = append(responses, &genai.Part{FunctionResponse: &genai.FunctionResponse{
 				ID: call.ID, Name: call.Name, Response: result,
 			}})
@@ -175,6 +223,21 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 		contents = append(contents, genai.NewContentFromParts(responses, genai.RoleUser))
 	}
 	return Result{}, nil, failure.Retry("tool_call_limit_exceeded", 0)
+}
+
+func diagnosticJSON(value any, forbidden []string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "[unencodable diagnostic content]"
+	}
+	return diagnosticValue(string(encoded), forbidden)
+}
+
+func diagnosticValue(value string, forbidden []string) string {
+	if encodedContainsForbidden([]byte(value), forbidden) {
+		return "[redacted sensitive content]"
+	}
+	return value
 }
 
 func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*genai.Content) (*genai.Content, error) {

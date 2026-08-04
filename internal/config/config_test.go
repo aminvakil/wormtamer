@@ -10,6 +10,7 @@ import (
 const validConfiguration = `{
   "listen_address": ":8080",
   "database_path": "data/wormtamer.db",
+  "log_level": "info",
   "gitlab": {
     "base_url": "http://gitlab.internal",
     "webhook_secret": "secret",
@@ -47,6 +48,9 @@ func TestLoad(t *testing.T) {
 	if cfg.ConfigFileBroadlyRead {
 		t.Fatal("ConfigFileBroadlyRead = true for a 0600 file")
 	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
+	}
 	if related := cfg.RepositorySharing["group/project"]; len(related) != 1 || related[0] != "parent/team/project" {
 		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
 	}
@@ -76,6 +80,22 @@ func TestCanonicalGitLabURL(t *testing.T) {
 				t.Fatalf("canonicalGitLabURL() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestLoadDefaultsLogLevelToInfo(t *testing.T) {
+	contents := strings.Replace(validConfiguration, "  \"log_level\": \"info\",\n", "", 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
 	}
 }
 
@@ -121,6 +141,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "empty address", replace: `":8080"`, with: `""`, want: "listen_address is required"},
 		{name: "invalid address", replace: `":8080"`, with: `"8080"`, want: "host:port"},
 		{name: "empty database", replace: `"data/wormtamer.db"`, with: `""`, want: "database_path is required"},
+		{name: "invalid log level", replace: `"log_level": "info"`, with: `"log_level": "trace"`, want: "log_level must be"},
 		{name: "invalid URL scheme", replace: `"http://gitlab.internal"`, with: `"ftp://gitlab.internal"`, want: "HTTP or HTTPS"},
 		{name: "URL credentials", replace: `"http://gitlab.internal"`, with: `"http://user:pass@gitlab.internal"`, want: "must not contain credentials"},
 		{name: "empty URL query", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal?"`, want: "must not contain credentials"},

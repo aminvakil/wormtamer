@@ -1,9 +1,11 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -69,6 +71,65 @@ func TestGeminiReviewerValidatesStructuredResult(t *testing.T) {
 	}
 	if len(result.Findings) != 1 || result.Findings[0].Path != "internal/example.go" || !strings.Contains(string(encoded), `"summary"`) {
 		t.Fatalf("result = %+v; encoded = %s", result, encoded)
+	}
+}
+
+func TestGeminiReviewerDebugLogsModelTranscript(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "call-1", Name: repository.ToolReadFile,
+			Args: map[string]any{"repository": "group/related", "path": "helper.go"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromText(`{"summary":"related repository checked","findings":[]}`, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{result: map[string]any{"repository": "group/related", "path": "helper.go", "lines": []string{"package helper"}}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
+
+	if _, _, err := reviewer.Review(context.Background(), testSnapshot(), broker); err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	output := logs.String()
+	for _, expected := range []string{
+		"Gemini review prompt", "system_instruction", "merge_request_json",
+		"Gemini review tool call", repository.ToolReadFile, "group/related", "helper.go",
+		"Gemini review tool result", "package helper",
+		"Gemini review response", "related repository checked",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("debug logs do not contain %q: %s", expected, output)
+		}
+	}
+}
+
+func TestGeminiReviewerDoesNotLogRejectedSensitiveResponses(t *testing.T) {
+	const secret = `configured-credential`
+	tests := []struct {
+		name     string
+		output   string
+		disallow string
+	}{
+		{name: "plain", output: `{"summary":"configured-credential","findings":[]}`, disallow: secret},
+		{name: "Unicode escaped", output: `{"summary":"configured-\u0063redential","findings":[]}`, disallow: `configured-\u0063redential`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			generator := &fakeGenerator{output: []byte(test.output)}
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			reviewer := newGeminiReviewer(generator, "gemini-test", []string{secret}, logger)
+
+			_, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+			var failureError *failure.Error
+			if !errors.As(err, &failureError) || failureError.Category != "sensitive_model_output" {
+				t.Fatalf("Review() error = %v, want sensitive_model_output", err)
+			}
+			output := logs.String()
+			if strings.Contains(output, secret) || strings.Contains(output, test.disallow) || strings.Contains(output, "Gemini review response") {
+				t.Fatalf("debug logs exposed rejected model output: %s", output)
+			}
+		})
 	}
 }
 

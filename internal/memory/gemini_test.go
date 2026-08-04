@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -26,6 +28,44 @@ func TestEvaluatorProducesBoundedActiveLesson(t *testing.T) {
 	}
 	if got := ID("http://gitlab.internal", 42, 91, findingID); len(got) != 31 || !strings.HasPrefix(got, "WT-M-") || got != ID("http://gitlab.internal", 42, 91, findingID) {
 		t.Fatalf("memory ID = %q", got)
+	}
+}
+
+func TestEvaluatorDebugLogsModelTranscript(t *testing.T) {
+	findingID := "WT-F-" + strings.Repeat("A", 26)
+	generator := &fakeGenerator{output: `{"decisions":[]}`}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	evaluator := newEvaluator(generator, "gemini-test", nil, logger)
+
+	if _, err := evaluator.Evaluate(context.Background(), testInput(findingID)); err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	output := logs.String()
+	for _, expected := range []string{"Gemini feedback prompt", "system_instruction", "feedback_json", "Gemini feedback response", "decisions"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("debug logs do not contain %q: %s", expected, output)
+		}
+	}
+}
+
+func TestEvaluatorDoesNotLogUnicodeEscapedCredential(t *testing.T) {
+	const (
+		secret  = `configured-credential`
+		escaped = `configured-\u0063redential`
+	)
+	findingID := "WT-F-" + strings.Repeat("A", 26)
+	generator := &fakeGenerator{output: `{"decisions":[{"finding_id":"` + findingID + `","outcome":"rejects_finding","confidence":"high","create_memory":true,"lesson":"` + escaped + `"}]}`}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	evaluator := newEvaluator(generator, "gemini-test", []string{secret}, logger)
+
+	if _, err := evaluator.Evaluate(context.Background(), testInput(findingID)); failureCategory(err) != "invalid_feedback_model_output" {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	output := logs.String()
+	if strings.Contains(output, secret) || strings.Contains(output, escaped) || strings.Contains(output, "Gemini feedback response") {
+		t.Fatalf("debug logs exposed rejected model output: %s", output)
 	}
 }
 

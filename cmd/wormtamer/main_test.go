@@ -25,6 +25,24 @@ func TestParseConfigPath(t *testing.T) {
 	}
 }
 
+func TestConfiguredLogLevel(t *testing.T) {
+	var logs bytes.Buffer
+	handler := slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(logLevelHandler{Handler: handler, level: configuredLogLevel("info")})
+	logger.Debug("hidden debug message")
+	logger.Info("visible info message")
+	if strings.Contains(logs.String(), "hidden debug message") || !strings.Contains(logs.String(), "visible info message") {
+		t.Fatalf("info log filtering failed: %s", logs.String())
+	}
+
+	logs.Reset()
+	logger = slog.New(logLevelHandler{Handler: handler, level: configuredLogLevel("debug")})
+	logger.Debug("visible debug message")
+	if !strings.Contains(logs.String(), "visible debug message") {
+		t.Fatalf("debug log filtering failed: %s", logs.String())
+	}
+}
+
 func TestRunStartsAndShutsDown(t *testing.T) {
 	directory := t.TempDir()
 	configPath := writeConfig(t, directory, "wormtamer.db")

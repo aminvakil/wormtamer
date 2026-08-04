@@ -14,7 +14,7 @@ Each release updates `ghcr.io/aminvakil/wormtamer:latest`.
 
 ## Configure
 
-Copy `config.example.json` to a location outside the repository and image, then replace every placeholder with the installation's GitLab URL, credentials, Gemini model, and authorized repositories. Wormtamer does not support Gemini models earlier than version 3; see the project [compatibility baseline](agents/architecture.md#compatibility-baseline). The example already uses the container listen address and persistent database path:
+Copy `config.example.json` to a location outside the repository and image, then replace every placeholder with the installation's GitLab URL, credentials, Gemini model, and authorized repositories. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` if omitted. Wormtamer does not support Gemini models earlier than version 3; see the project [compatibility baseline](agents/architecture.md#compatibility-baseline). The example already uses the container listen address and persistent database path:
 
 ```sh
 cp config.example.json /secure/path/config.json
@@ -76,6 +76,8 @@ A successful response confirms that startup completed and the HTTP server is liv
 ```sh
 docker logs wormtamer
 ```
+
+For model diagnostics, set `"log_level": "debug"` and restart the container. Debug events include the complete model system instruction and prompt, each requested tool and its arguments, each validated tool result, and the validated final model response. Review tool-call arguments show when Gemini chooses a directionally shared repository. These logs can contain private merge request data, repository content, comments, and secrets unknown to Wormtamer. Restrict access and retention, and restore `"log_level": "info"` after diagnosis. Wormtamer replaces any diagnostic value containing a configured GitLab or Gemini credential rather than logging it.
 
 Restarting the container with the same volume preserves all SQLite state, including feedback and runtime memory. Stop the existing container before starting a replacement so only one replica accesses SQLite.
 
