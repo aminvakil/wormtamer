@@ -291,7 +291,7 @@ func toolDeclarations() []*genai.FunctionDeclaration {
 	repositoryProperty := map[string]any{"type": "string", "minLength": 1, "maxLength": 1024}
 	return []*genai.FunctionDeclaration{
 		{
-			Name: repository.ToolListFiles, Description: "List text files recursively under an optional path in the current or a related internal repository listed in the review input.",
+			Name: repository.ToolListFiles, Description: "List text files recursively with bounded output under an optional path in the current or a related internal repository listed in the review input. Supply the narrowest relevant path when known.",
 			ParametersJsonSchema: map[string]any{
 				"type": "object", "additionalProperties": false, "required": []string{"repository"},
 				"properties": map[string]any{"repository": repositoryProperty, "path": pathProperty},
@@ -397,7 +397,7 @@ func modelCorrectableToolFailure(toolFailure *failure.Error) bool {
 		return false
 	}
 	switch toolFailure.Category {
-	case "repository_tool_arguments_invalid", "repository_path_invalid", "repository_path_not_found", "repository_unavailable", "memory_tool_arguments_invalid", "public_source_tool_arguments_invalid", "public_repository_unavailable", "public_source_request_rejected", "public_source_response_type_unsupported":
+	case "repository_tool_arguments_invalid", "repository_path_invalid", "repository_path_not_found", "repository_unavailable", "repository_tool_output_limit_exceeded", "memory_tool_arguments_invalid", "public_source_tool_arguments_invalid", "public_repository_unavailable", "public_source_request_rejected", "public_source_response_type_unsupported":
 		return true
 	default:
 		return false
