@@ -14,6 +14,7 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
+	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -40,7 +41,7 @@ func TestWorkerEvaluatesCurrentCommentAndActivatesMemory(t *testing.T) {
 		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91",
 	}}
 	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
-		FindingID: findingID, Outcome: "rejects_finding", Confidence: "high",
+		TargetType: "finding", TargetID: findingID, Outcome: "rejects_finding", Confidence: "high",
 		CreateMemory: true, Lesson: "Generated files should be assessed through their source generator.",
 	}}}}
 	worker, err := New(storage, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -52,7 +53,8 @@ func TestWorkerEvaluatesCurrentCommentAndActivatesMemory(t *testing.T) {
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
 	}
-	if evaluator.input.ActorRole != "maintainer" || evaluator.input.Comment != broker.comment.Body || len(evaluator.input.Findings) != 1 || evaluator.input.Findings[0].ID != findingID {
+	if evaluator.input.ActorRole != "maintainer" || evaluator.input.Comment != broker.comment.Body || evaluator.input.Summary != "summary" ||
+		len(evaluator.input.Findings) != 1 || evaluator.input.Findings[0].TargetID != findingID || evaluator.input.ReviewTargetID == "" {
 		t.Fatalf("evaluation input = %+v", evaluator.input)
 	}
 	if err := storage.Close(); err != nil {
@@ -64,14 +66,16 @@ func TestWorkerEvaluatesCurrentCommentAndActivatesMemory(t *testing.T) {
 	}
 	defer db.Close()
 	var active int
-	var lesson, role string
+	var lesson, role, state string
 	if err := db.QueryRow(`
-SELECT m.active, m.lesson, e.actor_role
-FROM review_memories m JOIN feedback_evaluations e ON e.job_id = m.feedback_job_id`).Scan(&active, &lesson, &role); err != nil {
+SELECT m.active, m.lesson, e.actor_role, j.state
+FROM review_memories m
+JOIN feedback_evaluations e ON e.job_id = m.feedback_job_id
+JOIN feedback_jobs j ON j.id = m.feedback_job_id`).Scan(&active, &lesson, &role, &state); err != nil {
 		t.Fatal(err)
 	}
-	if active != 1 || role != "maintainer" || lesson != evaluator.result.Decisions[0].Lesson {
-		t.Fatalf("memory active=%d role=%q lesson=%q", active, role, lesson)
+	if active != 1 || role != "maintainer" || lesson != evaluator.result.Decisions[0].Lesson || state != store.FeedbackCompleted {
+		t.Fatalf("memory active=%d role=%q lesson=%q feedback_state=%q", active, role, lesson, state)
 	}
 	databaseBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -79,6 +83,78 @@ FROM review_memories m JOIN feedback_evaluations e ON e.job_id = m.feedback_job_
 	}
 	if strings.Contains(string(databaseBytes), broker.comment.Body) {
 		t.Fatal("SQLite retained the source comment body")
+	}
+}
+
+func TestWorkerEvaluatesNaturalFeedbackAgainstZeroFindingReview(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	storage, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	now := time.Now().UTC().Add(time.Second)
+	head := strings.Repeat("b", 40)
+	if _, err := storage.AcceptEvent(context.Background(), store.Event{
+		DeliveryID: "zero-review", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		ProjectPath: "group/project", MergeRequestIID: 7, HeadSHA: head, Action: "open",
+		Payload: []byte(`{"object_kind":"merge_request"}`), QueueReview: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := storage.ClaimJob(context.Background(), "review-owner", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", []byte(`{"summary":"No actionable findings.","findings":[]}`), nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CompletePublication(context.Background(), job.ID, "review-owner", "<!-- zero-review -->", 100, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
+		DeliveryID: "missed-issue", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 92, ActorID: 12,
+		Action: "create", SourceUpdatedAt: now.Add(2 * time.Second),
+	}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	targetID := review.ReviewID("http://gitlab.internal", 42, 7, head)
+	broker := &fakeGitLab{comment: gitlab.FeedbackComment{
+		Body:      "Wormtamer missed that generated configuration must be changed through its schema.",
+		UpdatedAt: now.Add(2 * time.Second), AccessLevel: 40, Role: "maintainer",
+		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_92",
+	}}
+	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
+		TargetType: "review", TargetID: targetID, Outcome: "corrects_review", Confidence: "high",
+		CreateMemory: true, Lesson: "Generated configuration must be changed through its schema.",
+	}}}}
+	worker, err := New(storage, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.now = func() time.Time { return now.Add(3 * time.Second) }
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	if evaluator.input.ReviewTargetID != targetID || evaluator.input.Summary != "No actionable findings." || len(evaluator.input.Findings) != 0 {
+		t.Fatalf("evaluation input = %+v", evaluator.input)
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var targetType, storedTargetID, outcome string
+	if err := db.QueryRow(`SELECT target_type, target_id, outcome FROM review_memories`).Scan(&targetType, &storedTargetID, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if targetType != "review" || storedTargetID != targetID || outcome != "corrects_review" {
+		t.Fatalf("stored target = %q %q %q", targetType, storedTargetID, outcome)
+	}
+	memories, err := storage.ListActiveReviewMemories(context.Background(), "http://gitlab.internal", 42)
+	if err != nil || len(memories) != 1 || memories[0].TargetType != "review" || memories[0].TargetID != targetID {
+		t.Fatalf("active review memories = %+v, %v", memories, err)
 	}
 }
 
@@ -103,7 +179,7 @@ func TestRunReconcilesDueSourcesWhileFeedbackRemainsQueued(t *testing.T) {
 		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91",
 	}}
 	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
-		FindingID: findingID, Outcome: "rejects_finding", Confidence: "high",
+		TargetType: "finding", TargetID: findingID, Outcome: "rejects_finding", Confidence: "high",
 		CreateMemory: true, Lesson: "Generated files should be assessed through their source generator.",
 	}}}}
 	initialWorker, err := New(storage, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -162,6 +238,9 @@ func prepareReviewFinding(t *testing.T, storage *store.Store, now time.Time) str
 	findingID := "WT-F-" + strings.Repeat("A", 26)
 	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
 	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", result, []string{findingID}, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CompletePublication(context.Background(), job.ID, "review-owner", "<!-- review -->", 99, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	return findingID

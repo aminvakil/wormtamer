@@ -505,6 +505,28 @@ func TestInvalidModelResultsAreRetryable(t *testing.T) {
 	}
 }
 
+func TestReviewIDIsStableAndScoped(t *testing.T) {
+	instance := "https://gitlab.example"
+	head := strings.Repeat("a", 40)
+	id := ReviewID(instance, 42, 7, head)
+	if !ValidReviewID(id) || id != ReviewID(instance, 42, 7, strings.ToUpper(head)) {
+		t.Fatalf("review ID is invalid or unstable: %q", id)
+	}
+	for _, other := range []string{
+		ReviewID("https://other.example", 42, 7, head),
+		ReviewID(instance, 43, 7, head),
+		ReviewID(instance, 42, 8, head),
+		ReviewID(instance, 42, 7, strings.Repeat("b", 40)),
+	} {
+		if other == id || !ValidReviewID(other) {
+			t.Fatalf("review ID is not scoped: %q", other)
+		}
+	}
+	if ValidReviewID(FindingID(instance, 42, 7, head, 1)) {
+		t.Fatal("finding ID accepted as review ID")
+	}
+}
+
 func TestFindingIDIsStableAndScoped(t *testing.T) {
 	const instance = "https://gitlab.example"
 	head := strings.Repeat("a", 40)

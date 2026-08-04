@@ -7,8 +7,7 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
 
 1. [Recover from broad internal repository searches](recover-from-broad-internal-repository-searches.md): let Gemini narrow an internal search that exceeds its scan limit while keeping repository size-limit recovery scoped to internal tools.
-2. [Learn from natural review feedback](learn-from-natural-review-feedback.md): evaluate ordinary post-review comments as overall-review feedback, finding feedback, or unrelated discussion without requiring identifiers or special syntax.
-3. [Improve model-facing instructions](improve-model-facing-instructions.md): review and sharpen every current Gemini instruction, prompt, tool declaration, and response contract, including guidance to prefer the smallest useful repository request.
+2. [Improve model-facing instructions](improve-model-facing-instructions.md): review and sharpen every current Gemini instruction, prompt, tool declaration, and response contract, including guidance to prefer the smallest useful repository request.
 
 ## Deferred
 

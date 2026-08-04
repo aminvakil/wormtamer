@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aminvakil/wormtamer/internal/review"
 )
 
 func TestFeedbackEventAndMemoryLifecycle(t *testing.T) {
@@ -36,7 +38,7 @@ func TestFeedbackEventAndMemoryLifecycle(t *testing.T) {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", job, err)
 	}
 	decision := FeedbackDecision{
-		MemoryID: "WT-M-" + strings.Repeat("A", 26), FindingID: findingID,
+		MemoryID: "WT-M-" + strings.Repeat("A", 26), TargetType: "finding", TargetID: findingID,
 		Outcome: "rejects_finding", Confidence: "high", Lesson: "Generated files in this repository are not reviewed manually.",
 	}
 	if err := storage.CompleteFeedbackJob(ctx, job.ID, job.SourceEventID, "feedback-owner", 40, "maintainer",
@@ -99,6 +101,35 @@ func TestFeedbackEventAndMemoryLifecycle(t *testing.T) {
 	}
 }
 
+func TestFeedbackCompletionRejectsTargetsOutsideBoundReview(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	now := time.Now().UTC().Add(time.Second)
+	prepareFinding(t, storage, now)
+	accepted, err := storage.AcceptFeedbackEvent(context.Background(), FeedbackEvent{
+		DeliveryID: "target-check", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
+		Action: "create", SourceUpdatedAt: now,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := storage.ClaimFeedbackJob(context.Background(), "feedback-owner", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimFeedbackJob() = %+v, %v", job, err)
+	}
+	wrongTarget := review.ReviewID(job.GitLabInstance, job.ProjectID, job.MergeRequestIID, strings.Repeat("f", 40))
+	err = storage.CompleteFeedbackJob(context.Background(), job.ID, accepted.EventID, "feedback-owner", 40, "maintainer",
+		"http://gitlab.internal/group/project/-/merge_requests/7#note_91", []FeedbackDecision{{
+			MemoryID: "WT-M-" + strings.Repeat("Z", 26), TargetType: "review", TargetID: wrongTarget,
+			Outcome: "corrects_review", Confidence: "high",
+		}}, now.Add(time.Second), 5*time.Minute)
+	if err == nil {
+		t.Fatal("CompleteFeedbackJob() accepted a review target outside the bound review")
+	}
+	assertCount(t, storage.db, "review_memories", 0)
+}
+
 func TestFeedbackSourceTimestampChangeDeactivatesMemory(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
@@ -118,7 +149,7 @@ func TestFeedbackSourceTimestampChangeDeactivatesMemory(t *testing.T) {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", job, err)
 	}
 	decision := FeedbackDecision{
-		MemoryID: "WT-M-" + strings.Repeat("A", 26), FindingID: findingID,
+		MemoryID: "WT-M-" + strings.Repeat("A", 26), TargetType: "finding", TargetID: findingID,
 		Outcome: "rejects_finding", Confidence: "high", Lesson: "Generated files are maintained through their generator.",
 	}
 	if err := storage.CompleteFeedbackJob(ctx, job.ID, accepted.EventID, "feedback-owner", 40, "maintainer",
@@ -182,36 +213,82 @@ func TestSupersededFeedbackFailureCannotFailNewUpdate(t *testing.T) {
 	}
 }
 
-func TestFeedbackEventWithoutFindingsIsIgnored(t *testing.T) {
+func TestFeedbackEventWithoutPublishedReviewIsIgnored(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 	now := time.Now().UTC()
 	result, err := storage.AcceptFeedbackEvent(context.Background(), FeedbackEvent{
-		DeliveryID: "no-findings", GitLabInstance: "http://gitlab.internal",
+		DeliveryID: "no-review", GitLabInstance: "http://gitlab.internal",
 		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
 		NoteID: 91, ActorID: 12, Action: "create", SourceUpdatedAt: now,
 	}, now)
-	if err != nil || result.Outcome != FeedbackOutcomeIgnoredFindings || result.JobID != 0 {
-		t.Fatalf("AcceptFeedbackEvent(no findings) = %+v, %v", result, err)
+	if err != nil || result.Outcome != FeedbackOutcomeIgnoredReview || result.JobID != 0 {
+		t.Fatalf("AcceptFeedbackEvent(no review) = %+v, %v", result, err)
 	}
 	assertCount(t, storage.db, "feedback_events", 1)
 	assertCount(t, storage.db, "feedback_jobs", 0)
 }
 
+func TestFeedbackBindsLatestPublishedReviewWithoutFallingBackToFindings(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	now := time.Now().UTC().Add(time.Second)
+	prepareFinding(t, storage, now)
+	newHead := strings.Repeat("b", 40)
+	latestID := preparePublishedReview(t, storage, now.Add(10*time.Second), "zero-review", newHead,
+		[]byte(`{"summary":"No actionable findings.","findings":[]}`), nil)
+
+	accepted, err := storage.AcceptFeedbackEvent(context.Background(), FeedbackEvent{
+		DeliveryID: "natural-feedback", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "create", SourceUpdatedAt: now.Add(20 * time.Second),
+	}, now.Add(20*time.Second))
+	if err != nil || accepted.JobID == 0 || accepted.Outcome != FeedbackOutcomeQueued {
+		t.Fatalf("AcceptFeedbackEvent() = %+v, %v", accepted, err)
+	}
+	newerFindingID := "WT-F-" + strings.Repeat("B", 26)
+	preparePublishedReview(t, storage, now.Add(30*time.Second), "newer-review", strings.Repeat("c", 40),
+		[]byte(`{"summary":"A newer review.","findings":[{"severity":"medium","title":"newer","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`), []string{newerFindingID})
+	updated, err := storage.AcceptFeedbackEvent(context.Background(), FeedbackEvent{
+		DeliveryID: "natural-feedback-update", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "update", SourceUpdatedAt: now.Add(35 * time.Second),
+	}, now.Add(35*time.Second))
+	if err != nil || updated.JobID != accepted.JobID || updated.Outcome != FeedbackOutcomeQueued {
+		t.Fatalf("updated feedback = %+v, %v", updated, err)
+	}
+	job, err := storage.ClaimFeedbackJob(context.Background(), "feedback-owner", now.Add(40*time.Second), time.Minute, 5)
+	if err != nil || job == nil || job.ReviewJobID != latestID || job.HeadSHA != newHead || len(job.FindingIDs) != 0 {
+		t.Fatalf("ClaimFeedbackJob() = %+v, %v", job, err)
+	}
+}
+
 func prepareFinding(t *testing.T, storage *Store, now time.Time) string {
 	t.Helper()
+	findingID := "WT-F-" + strings.Repeat("A", 26)
+	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
+	preparePublishedReview(t, storage, now, "review-event", readyEvent("review-event").HeadSHA, result, []string{findingID})
+	return findingID
+}
+
+func preparePublishedReview(t *testing.T, storage *Store, now time.Time, delivery, head string, result []byte, findingIDs []string) int64 {
+	t.Helper()
 	ctx := context.Background()
-	if _, err := storage.AcceptEvent(ctx, readyEvent("review-event")); err != nil {
+	event := readyEvent(delivery)
+	event.HeadSHA = head
+	if _, err := storage.AcceptEvent(ctx, event); err != nil {
 		t.Fatal(err)
 	}
-	job, err := storage.ClaimJob(ctx, "review-owner", now, 2*time.Minute, 5)
+	owner := "review-owner-" + delivery
+	job, err := storage.ClaimJob(ctx, owner, now, 2*time.Minute, 5)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	findingID := "WT-F-" + strings.Repeat("A", 26)
-	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "review-owner", result, []string{findingID}, nil, now.Add(time.Second)); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, findingIDs, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	return findingID
+	if err := storage.CompletePublication(ctx, job.ID, owner, "<!-- "+delivery+" -->", job.ID, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return job.ID
 }

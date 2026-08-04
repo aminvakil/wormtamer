@@ -13,7 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const (
 	OutcomeQueued          = "queued"
@@ -85,7 +85,8 @@ type Job struct {
 
 type ReviewMemory struct {
 	MemoryID   string
-	FindingID  string
+	TargetType string
+	TargetID   string
 	Outcome    string
 	Confidence string
 	Lesson     string
@@ -402,6 +403,65 @@ CREATE TABLE review_memory_retrievals (
 );
 
 PRAGMA user_version = 6;
+`
+		case 6:
+			migration = `
+ALTER TABLE feedback_jobs ADD COLUMN review_job_id INTEGER REFERENCES review_results(job_id);
+
+UPDATE feedback_jobs
+SET review_job_id = (
+    SELECT j.id
+    FROM review_jobs j
+    JOIN review_results r ON r.job_id = j.id
+    WHERE j.gitlab_instance = feedback_jobs.gitlab_instance
+      AND j.project_id = feedback_jobs.project_id
+      AND j.merge_request_iid = feedback_jobs.merge_request_iid
+      AND EXISTS (SELECT 1 FROM review_findings f WHERE f.job_id = j.id)
+    ORDER BY j.id DESC
+    LIMIT 1
+);
+
+CREATE TABLE review_memories_v7 (
+    memory_id TEXT PRIMARY KEY
+        CHECK(length(memory_id) = 31)
+        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
+        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
+    feedback_job_id INTEGER NOT NULL REFERENCES feedback_jobs(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK(target_type IN ('review', 'finding')),
+    target_id TEXT NOT NULL
+        CHECK(length(target_id) = 31)
+        CHECK(substr(target_id, 6) NOT GLOB '*[^A-Z2-7]*'),
+    finding_id TEXT REFERENCES review_findings(finding_id),
+    outcome TEXT NOT NULL CHECK(outcome IN (
+        'supports_review', 'rejects_review', 'corrects_review',
+        'supports_finding', 'rejects_finding', 'corrects_finding'
+    )),
+    confidence TEXT NOT NULL CHECK(confidence IN ('low', 'medium', 'high')),
+    lesson TEXT CHECK(lesson IS NULL OR (length(lesson) > 0 AND length(lesson) <= 4096)),
+    active INTEGER NOT NULL CHECK(active IN (0, 1)),
+    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
+    actor_access_level INTEGER NOT NULL CHECK(actor_access_level >= 0 AND actor_access_level <= 50),
+    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
+    updated_at TEXT NOT NULL,
+    CHECK(
+        (target_type = 'finding' AND finding_id = target_id AND substr(target_id, 1, 5) = 'WT-F-') OR
+        (target_type = 'review' AND finding_id IS NULL AND substr(target_id, 1, 5) = 'WT-R-')
+    ),
+    UNIQUE (feedback_job_id, target_type, target_id)
+);
+
+INSERT INTO review_memories_v7 (
+    memory_id, feedback_job_id, target_type, target_id, finding_id, outcome,
+    confidence, lesson, active, actor_id, actor_access_level, source_url, updated_at
+)
+SELECT memory_id, feedback_job_id, 'finding', finding_id, finding_id, outcome,
+       confidence, lesson, active, actor_id, actor_access_level, source_url, updated_at
+FROM review_memories;
+
+DROP TABLE review_memories;
+ALTER TABLE review_memories_v7 RENAME TO review_memories;
+
+PRAGMA user_version = 7;
 `
 		}
 

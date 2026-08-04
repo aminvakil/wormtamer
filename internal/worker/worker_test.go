@@ -154,6 +154,10 @@ func TestWorkerRetrievesScopedMemoryAndPersistsSuccessfulAudit(t *testing.T) {
 	if !ok || len(memories) != 1 || memories[0]["memory_id"] != memoryID || reviewer.memoryResult["authority"] != "untrusted_advisory" {
 		t.Fatalf("memory result = %+v", reviewer.memoryResult)
 	}
+	target, ok := memories[0]["target"].(map[string]any)
+	if !ok || target["type"] != "finding" || target["id"] == "" {
+		t.Fatalf("memory target = %+v", memories[0]["target"])
+	}
 	var auditMemoryID string
 	if err := db.QueryRow(`SELECT memory_id FROM review_memory_retrievals`).Scan(&auditMemoryID); err != nil {
 		t.Fatal(err)
@@ -499,6 +503,9 @@ func prepareActiveMemoryForWorker(t *testing.T, storage *store.Store, now time.T
 	if err := storage.SaveReviewResult(ctx, job.ID, "memory-source-review", result, []string{findingID}, nil, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.CompletePublication(ctx, job.ID, "memory-source-review", "<!-- memory-source-review -->", 99, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	accepted, err := storage.AcceptFeedbackEvent(ctx, store.FeedbackEvent{
 		DeliveryID: "memory-feedback", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
 		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
@@ -514,7 +521,7 @@ func prepareActiveMemoryForWorker(t *testing.T, storage *store.Store, now time.T
 	memoryID := "WT-M-" + strings.Repeat("A", 26)
 	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, feedbackJob.SourceEventID, "memory-feedback-owner", 40, "maintainer",
 		"http://gitlab.internal/group/project/-/merge_requests/7#note_91",
-		[]store.FeedbackDecision{{MemoryID: memoryID, FindingID: findingID, Outcome: "corrects_finding", Confidence: "high", Lesson: "Generated source must be fixed through its generator."}},
+		[]store.FeedbackDecision{{MemoryID: memoryID, TargetType: "finding", TargetID: findingID, Outcome: "corrects_finding", Confidence: "high", Lesson: "Generated source must be fixed through its generator."}},
 		now, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}

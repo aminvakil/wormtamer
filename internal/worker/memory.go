@@ -78,7 +78,9 @@ func (t *reviewTools) Call(ctx context.Context, name string, arguments map[strin
 			"scope": map[string]any{
 				"type": "repository", "project_id": t.snapshot.Identity.ProjectID, "project_path": t.snapshot.ProjectPath,
 			},
-			"finding_id":         memory.FindingID,
+			"target": map[string]any{
+				"type": memory.TargetType, "id": memory.TargetID,
+			},
 			"outcome":            memory.Outcome,
 			"confidence":         memory.Confidence,
 			"lesson":             memory.Lesson,

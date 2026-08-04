@@ -90,7 +90,7 @@ The worker starts with bounded merge request metadata and changed-file diffs, th
 
 Model-invocable tool brokers enforce repository allowlists, directional sharing rules, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy. The repository broker provides bounded file listing, text-file range reads, and case-sensitive literal search in the current repository and sharing-eligible related repositories. Every request names an exact repository exposed in the review input, and every result identifies its repository and immutable revision.
 
-The memory broker provides bounded lexical search over active comment-derived lessons for the exact GitLab instance and numeric project under review. The model supplies only a query, not scope. Directional repository sharing does not broaden memory access. Results identify their repository scope, memory and finding identities, source reference and role, outcome, confidence, and memory update time, and label lessons as untrusted advisory guidance.
+The memory broker provides bounded lexical search over active comment-derived lessons for the exact GitLab instance and numeric project under review. The model supplies only a query, not scope. Directional repository sharing does not broaden memory access. Results identify their repository scope, memory identity, typed review or finding target, source reference and role, outcome, confidence, and memory update time, and label lessons as untrusted advisory guidance.
 
 The public-source broker fetches one independently authorized HTTPS text URL at a time and provides file listing and range reads from exact configured GitHub repositories. It performs no search or automatic crawling. A GitHub repository's default-branch HEAD is resolved and pinned on first access in each review; content is extracted under the same hostile-archive rules as internal repositories. Results are labeled as untrusted public evidence and attributed with a final URL and retrieval time or an exact repository and commit.
 
@@ -113,9 +113,9 @@ Validates findings, assigns each ordered finding a deterministic application-own
 
 ### Feedback evaluator
 
-The feedback worker fetches the current text of each eligible merge request comment transiently, resolves the actor's effective project role through GitLab, and asks Gemini to assess the comment against the latest persisted Wormtamer findings for that merge request. Gemini may classify supplied findings as supported, rejected, or corrected and may select a concise reusable lesson. Trusted code validates the structured result before replacing that comment's current decisions and repository-scoped active memory.
+The feedback worker fetches the current text of each eligible merge request comment transiently, resolves the actor's effective project role through GitLab, and asks Gemini to assess the natural-language comment against the exact published Wormtamer review bound when that source note was first accepted. The evaluator receives the persisted summary, complete supplied findings, immutable review metadata, and application-owned review and finding targets. It may return no decision for ordinary or ambiguous discussion, classify the overall review or supplied findings as supported, rejected, or corrected, and optionally select a concise reusable lesson. People do not need to mention internal identifiers or use special syntax. Trusted code validates every selected target and the structured result before replacing that comment's current decisions and repository-scoped active memory.
 
-Comments, findings, and active memory remain untrusted evidence. Maintainer and Owner status is stronger provenance for project-specific claims, not authority to override code, explicit policy, or application instructions. Developer and lower-role feedback is presented critically. No source comment body or revision history is retained.
+Comments, summaries, findings, and active memory remain untrusted evidence. Maintainer and Owner status is stronger provenance for project-specific claims, not authority to override code, explicit policy, or application instructions. Developer and lower-role feedback is presented critically. A feedback decision does not automatically create memory; one-off defects and non-reusable reactions retain no active lesson. No source comment body or revision history is retained.
 
 ### Reconciler
 
@@ -127,7 +127,7 @@ The model conversation begins with bounded changed-file diffs, relevant metadata
 
 SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
 
-Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, finding and GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
+Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, typed review or finding target, GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
 
 For a successful review, SQLite records each unique memory identity and version returned to Gemini and its retrieval time in the same checkpoint as the validated result. This establishes which memory was exposed, not which memory affected model reasoning. The audit shares the review result's lifetime and stores no query, lesson copy, prompt, tool response, or failed-attempt history.
 

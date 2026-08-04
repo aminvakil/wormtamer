@@ -17,9 +17,9 @@ const (
 	FeedbackCompleted = "completed"
 	FeedbackFailed    = "failed"
 
-	FeedbackOutcomeQueued          = "queued"
-	FeedbackOutcomeIgnoredFindings = "ignored_no_findings"
-	FeedbackOutcomeStale           = "stale_update"
+	FeedbackOutcomeQueued        = "queued"
+	FeedbackOutcomeIgnoredReview = "ignored_no_review"
+	FeedbackOutcomeStale         = "stale_update"
 )
 
 type FeedbackEvent struct {
@@ -54,6 +54,8 @@ type FeedbackJob struct {
 	LeaseOwner          string
 	LeaseExpiresAt      time.Time
 	AttemptCount        int
+	ReviewJobID         int64
+	ReviewTargetID      string
 	HeadSHA             string
 	ValidatedResultJSON []byte
 	FindingIDs          []string
@@ -61,7 +63,8 @@ type FeedbackJob struct {
 
 type FeedbackDecision struct {
 	MemoryID   string
-	FindingID  string
+	TargetType string
+	TargetID   string
 	Outcome    string
 	Confidence string
 	Lesson     string
@@ -130,37 +133,18 @@ WHERE e.delivery_id = ?`, event.DeliveryID).Scan(&result.EventID, &result.Outcom
 		return result, fmt.Errorf("read feedback event ID: %w", err)
 	}
 
-	var findingCount int
-	if err := tx.QueryRowContext(ctx, `
-SELECT count(*)
-FROM review_findings f
-JOIN review_jobs j ON j.id = f.job_id
-WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.merge_request_iid = ?`,
-		event.GitLabInstance, event.ProjectID, event.MergeRequestIID).Scan(&findingCount); err != nil {
-		return result, fmt.Errorf("check feedback findings: %w", err)
-	}
-	if findingCount == 0 {
-		result.Outcome = FeedbackOutcomeIgnoredFindings
-		if _, err := tx.ExecContext(ctx, `UPDATE feedback_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {
-			return result, fmt.Errorf("ignore feedback without findings: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return AcceptFeedbackResult{}, fmt.Errorf("commit ignored feedback event: %w", err)
-		}
-		return result, nil
-	}
-
-	var currentJobID int64
+	var currentJobID, reviewJobID int64
 	var currentUpdatedAt string
 	err = tx.QueryRowContext(ctx, `
-SELECT j.id, e.source_updated_at
+SELECT j.id, j.review_job_id, e.source_updated_at
 FROM feedback_jobs j
 JOIN feedback_events e ON e.id = j.source_event_id
 WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.note_id = ?`,
-		event.GitLabInstance, event.ProjectID, event.NoteID).Scan(&currentJobID, &currentUpdatedAt)
+		event.GitLabInstance, event.ProjectID, event.NoteID).Scan(&currentJobID, &reviewJobID, &currentUpdatedAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return result, fmt.Errorf("read current feedback job: %w", err)
 	}
+	newJob := errors.Is(err, sql.ErrNoRows)
 	if err == nil && formatTime(event.SourceUpdatedAt) <= currentUpdatedAt {
 		result.JobID = currentJobID
 		result.Outcome = FeedbackOutcomeStale
@@ -172,16 +156,39 @@ WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.note_id = ?`,
 		}
 		return result, nil
 	}
+	if newJob {
+		err = tx.QueryRowContext(ctx, `
+SELECT j.id
+FROM review_jobs j
+JOIN review_results r ON r.job_id = j.id
+JOIN publications p ON p.job_id = j.id
+WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.merge_request_iid = ?
+ORDER BY p.created_at DESC, j.id DESC
+LIMIT 1`, event.GitLabInstance, event.ProjectID, event.MergeRequestIID).Scan(&reviewJobID)
+		if errors.Is(err, sql.ErrNoRows) {
+			result.Outcome = FeedbackOutcomeIgnoredReview
+			if _, err := tx.ExecContext(ctx, `UPDATE feedback_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {
+				return result, fmt.Errorf("ignore feedback without review: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return AcceptFeedbackResult{}, fmt.Errorf("commit ignored feedback event: %w", err)
+			}
+			return result, nil
+		}
+		if err != nil {
+			return result, fmt.Errorf("select feedback review: %w", err)
+		}
+	}
 
 	nowText := formatTime(now)
-	if errors.Is(err, sql.ErrNoRows) {
+	if newJob {
 		jobInsert, err := tx.ExecContext(ctx, `
 INSERT INTO feedback_jobs (
     source_event_id, gitlab_instance, project_id, project_path, merge_request_iid,
-    note_id, actor_id, state, next_attempt_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    note_id, actor_id, state, next_attempt_at, updated_at, review_job_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			result.EventID, event.GitLabInstance, event.ProjectID, event.ProjectPath,
-			event.MergeRequestIID, event.NoteID, event.ActorID, FeedbackQueued, nowText, nowText)
+			event.MergeRequestIID, event.NoteID, event.ActorID, FeedbackQueued, nowText, nowText, reviewJobID)
 		if err != nil {
 			return result, fmt.Errorf("create feedback job: %w", err)
 		}
@@ -241,14 +248,14 @@ WHERE id = (
 )
 RETURNING id, source_event_id, gitlab_instance, project_id, project_path,
           merge_request_iid, note_id, actor_id, state, lease_owner,
-          lease_expires_at, attempt_count`,
+          lease_expires_at, attempt_count, review_job_id`,
 		FeedbackRunning, owner, formatTime(now.Add(leaseDuration)), nowText,
 		maxAttempts, FeedbackQueued, nowText, FeedbackRunning, nowText)
 	job := &FeedbackJob{}
 	var leaseExpires string
 	if err := row.Scan(&job.ID, &job.SourceEventID, &job.GitLabInstance, &job.ProjectID,
 		&job.ProjectPath, &job.MergeRequestIID, &job.NoteID, &job.ActorID, &job.State,
-		&job.LeaseOwner, &leaseExpires, &job.AttemptCount); err != nil {
+		&job.LeaseOwner, &leaseExpires, &job.AttemptCount, &job.ReviewJobID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -259,18 +266,17 @@ RETURNING id, source_event_id, gitlab_instance, project_id, project_path,
 SELECT j.head_sha, r.result_json
 FROM review_jobs j
 JOIN review_results r ON r.job_id = j.id
-WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.merge_request_iid = ?
-  AND EXISTS (SELECT 1 FROM review_findings f WHERE f.job_id = j.id)
-ORDER BY j.id DESC
-LIMIT 1`, job.GitLabInstance, job.ProjectID, job.MergeRequestIID).Scan(&job.HeadSHA, &job.ValidatedResultJSON); err != nil {
+JOIN publications p ON p.job_id = j.id
+WHERE j.id = ? AND j.gitlab_instance = ? AND j.project_id = ? AND j.merge_request_iid = ?`,
+		job.ReviewJobID, job.GitLabInstance, job.ProjectID, job.MergeRequestIID).Scan(&job.HeadSHA, &job.ValidatedResultJSON); err != nil {
 		return nil, fmt.Errorf("read feedback review context: %w", err)
 	}
+	job.ReviewTargetID = review.ReviewID(job.GitLabInstance, job.ProjectID, job.MergeRequestIID, job.HeadSHA)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT f.finding_id
-FROM review_findings f
-JOIN review_jobs j ON j.id = f.job_id
-WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.merge_request_iid = ? AND j.head_sha = ?
-ORDER BY f.finding_index`, job.GitLabInstance, job.ProjectID, job.MergeRequestIID, job.HeadSHA)
+SELECT finding_id
+FROM review_findings
+WHERE job_id = ?
+ORDER BY finding_index`, job.ReviewJobID)
 	if err != nil {
 		return nil, fmt.Errorf("read feedback finding identifiers: %w", err)
 	}
@@ -338,9 +344,31 @@ WHERE id = ? AND state = ? AND lease_owner = ?`,
 		return ErrFeedbackSuperseded
 	}
 
-	var actorID int64
-	if err := tx.QueryRowContext(ctx, `SELECT actor_id FROM feedback_jobs WHERE id = ?`, jobID).Scan(&actorID); err != nil {
-		return fmt.Errorf("read feedback actor: %w", err)
+	var actorID, projectID, mergeRequestIID, reviewJobID int64
+	var gitLabInstance, headSHA string
+	if err := tx.QueryRowContext(ctx, `
+SELECT f.actor_id, f.review_job_id, j.gitlab_instance, j.project_id, j.merge_request_iid, j.head_sha
+FROM feedback_jobs f
+JOIN review_jobs j ON j.id = f.review_job_id
+WHERE f.id = ?`, jobID).Scan(&actorID, &reviewJobID, &gitLabInstance, &projectID, &mergeRequestIID, &headSHA); err != nil {
+		return fmt.Errorf("read feedback target context: %w", err)
+	}
+	reviewTargetID := review.ReviewID(gitLabInstance, projectID, mergeRequestIID, headSHA)
+	for _, decision := range decisions {
+		if decision.TargetType == "review" {
+			if decision.TargetID != reviewTargetID {
+				return errors.New("invalid feedback review target")
+			}
+			continue
+		}
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_findings WHERE job_id = ? AND finding_id = ?)`,
+			reviewJobID, decision.TargetID).Scan(&exists); err != nil {
+			return fmt.Errorf("validate feedback finding target: %w", err)
+		}
+		if exists != 1 {
+			return errors.New("invalid feedback finding target")
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM review_memories WHERE feedback_job_id = ?`, jobID); err != nil {
 		return fmt.Errorf("replace feedback memories: %w", err)
@@ -354,13 +382,18 @@ WHERE id = ? AND state = ? AND lease_owner = ?`,
 			lesson = decision.Lesson
 			active = true
 		}
+		var findingID any
+		if decision.TargetType == "finding" {
+			findingID = decision.TargetID
+		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO review_memories (
-    memory_id, feedback_job_id, finding_id, outcome, confidence, lesson, active,
-    actor_id, actor_access_level, source_url, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			decision.MemoryID, jobID, decision.FindingID, decision.Outcome, decision.Confidence,
-			lesson, memoryActive, actorID, accessLevel, sourceURL, formatTime(now)); err != nil {
+    memory_id, feedback_job_id, target_type, target_id, finding_id, outcome,
+    confidence, lesson, active, actor_id, actor_access_level, source_url, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			decision.MemoryID, jobID, decision.TargetType, decision.TargetID, findingID,
+			decision.Outcome, decision.Confidence, lesson, memoryActive, actorID,
+			accessLevel, sourceURL, formatTime(now)); err != nil {
 			return fmt.Errorf("store feedback decision: %w", err)
 		}
 	}
@@ -554,20 +587,28 @@ WHERE j.id = ?`, jobID).Scan(&storedUpdatedAt); err != nil {
 }
 
 func validFeedbackDecisions(decisions []FeedbackDecision) bool {
-	if len(decisions) > 20 {
+	if len(decisions) > 21 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(decisions))
 	for _, decision := range decisions {
-		if !validMemoryID(decision.MemoryID) || !review.ValidFindingID(decision.FindingID) || len(decision.Lesson) > 4096 || strings.ContainsRune(decision.Lesson, '\x00') {
+		if !validMemoryID(decision.MemoryID) || len(decision.Lesson) > 4096 || strings.ContainsRune(decision.Lesson, '\x00') {
 			return false
 		}
-		if _, exists := seen[decision.FindingID]; exists {
+		key := decision.TargetType + "\x00" + decision.TargetID
+		if _, exists := seen[key]; exists {
 			return false
 		}
-		seen[decision.FindingID] = struct{}{}
-		switch decision.Outcome {
-		case "supports_finding", "rejects_finding", "corrects_finding":
+		seen[key] = struct{}{}
+		switch decision.TargetType {
+		case "review":
+			if !review.ValidReviewID(decision.TargetID) || (decision.Outcome != "supports_review" && decision.Outcome != "rejects_review" && decision.Outcome != "corrects_review") {
+				return false
+			}
+		case "finding":
+			if !review.ValidFindingID(decision.TargetID) || (decision.Outcome != "supports_finding" && decision.Outcome != "rejects_finding" && decision.Outcome != "corrects_finding") {
+				return false
+			}
 		default:
 			return false
 		}

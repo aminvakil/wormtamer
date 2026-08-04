@@ -157,16 +157,18 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 	if err != nil || len(result.Findings) != len(job.FindingIDs) {
 		return failure.Failed("invalid_stored_review_result")
 	}
+	findings := make([]memory.Finding, len(result.Findings))
 	for index := range result.Findings {
 		if !review.ValidFindingID(job.FindingIDs[index]) {
 			return failure.Failed("invalid_stored_review_result")
 		}
-		result.Findings[index].ID = job.FindingIDs[index]
+		findings[index] = memory.Finding{TargetID: job.FindingIDs[index], Finding: result.Findings[index]}
 	}
 	assessment, err := w.evaluator.Evaluate(ctx, memory.Input{
 		ProjectID: job.ProjectID, ProjectPath: job.ProjectPath, MergeRequestIID: job.MergeRequestIID,
-		HeadSHA: job.HeadSHA, ActorID: job.ActorID, ActorAccess: comment.AccessLevel,
-		ActorRole: comment.Role, Comment: comment.Body, Findings: result.Findings,
+		ReviewTargetID: job.ReviewTargetID, HeadSHA: job.HeadSHA, Summary: result.Summary,
+		ActorID: job.ActorID, ActorAccess: comment.AccessLevel, ActorRole: comment.Role,
+		Comment: comment.Body, Findings: findings,
 	})
 	if err != nil {
 		return err
@@ -174,8 +176,8 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 	decisions := make([]store.FeedbackDecision, len(assessment.Decisions))
 	for index, decision := range assessment.Decisions {
 		decisions[index] = store.FeedbackDecision{
-			MemoryID:  memory.ID(job.GitLabInstance, job.ProjectID, job.NoteID, decision.FindingID),
-			FindingID: decision.FindingID, Outcome: decision.Outcome,
+			MemoryID:   memory.ID(job.GitLabInstance, job.ProjectID, job.NoteID, decision.TargetType, decision.TargetID),
+			TargetType: decision.TargetType, TargetID: decision.TargetID, Outcome: decision.Outcome,
 			Confidence: decision.Confidence, Lesson: decision.Lesson,
 		}
 	}

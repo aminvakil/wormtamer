@@ -38,20 +38,35 @@ type Finding struct {
 	Path           string `json:"path"`
 }
 
+func ReviewID(gitLabInstance string, projectID, mergeRequestIID int64, headSHA string) string {
+	return scopedID("WT-R-", "wormtamer:review:v1", gitLabInstance, strconv.FormatInt(projectID, 10),
+		strconv.FormatInt(mergeRequestIID, 10), strings.ToLower(headSHA))
+}
+
+func ValidReviewID(id string) bool {
+	return validScopedID(id, "WT-R-")
+}
+
 func FindingID(gitLabInstance string, projectID, mergeRequestIID int64, headSHA string, ordinal int) string {
-	digest := sha256.New()
-	for _, value := range []string{
-		"wormtamer:finding:v1", gitLabInstance, strconv.FormatInt(projectID, 10),
-		strconv.FormatInt(mergeRequestIID, 10), strings.ToLower(headSHA), strconv.Itoa(ordinal),
-	} {
-		_, _ = digest.Write([]byte(value))
-		_, _ = digest.Write([]byte{0})
-	}
-	return "WT-F-" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest.Sum(nil)[:16])
+	return scopedID("WT-F-", "wormtamer:finding:v1", gitLabInstance, strconv.FormatInt(projectID, 10),
+		strconv.FormatInt(mergeRequestIID, 10), strings.ToLower(headSHA), strconv.Itoa(ordinal))
 }
 
 func ValidFindingID(id string) bool {
-	if len(id) != 31 || !strings.HasPrefix(id, "WT-F-") {
+	return validScopedID(id, "WT-F-")
+}
+
+func scopedID(prefix string, values ...string) string {
+	digest := sha256.New()
+	for _, value := range values {
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+	return prefix + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest.Sum(nil)[:16])
+}
+
+func validScopedID(id, prefix string) bool {
+	if len(id) != 31 || !strings.HasPrefix(id, prefix) {
 		return false
 	}
 	_, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(id[5:])

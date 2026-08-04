@@ -109,6 +109,9 @@ func activateReviewMemory(t *testing.T, storage *Store, fixture memoryFixture, n
 	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, []string{fixture.findingID}, nil, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := storage.CompletePublication(ctx, job.ID, owner, "<!-- "+fixture.delivery+" -->", job.ID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	accepted, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
 		DeliveryID: fixture.feedbackDelivery, GitLabInstance: fixture.instance, ProjectID: fixture.projectID,
 		ProjectPath: fixture.projectPath, MergeRequestIID: 7, NoteID: fixture.noteID, ActorID: 12,
@@ -124,9 +127,9 @@ func activateReviewMemory(t *testing.T, storage *Store, fixture memoryFixture, n
 	}
 	sourceURL := fixture.instance + "/" + fixture.projectPath + "/-/merge_requests/7#note_" + fixture.feedbackDelivery
 	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, feedbackJob.SourceEventID, feedbackOwner, 40, "maintainer", sourceURL,
-		[]FeedbackDecision{{MemoryID: fixture.memoryID, FindingID: fixture.findingID, Outcome: "corrects_finding", Confidence: "high", Lesson: fixture.lesson}},
+		[]FeedbackDecision{{MemoryID: fixture.memoryID, TargetType: "finding", TargetID: fixture.findingID, Outcome: "corrects_finding", Confidence: "high", Lesson: fixture.lesson}},
 		now, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	return ReviewMemory{MemoryID: fixture.memoryID, FindingID: fixture.findingID, Lesson: fixture.lesson, UpdatedAt: now}
+	return ReviewMemory{MemoryID: fixture.memoryID, TargetType: "finding", TargetID: fixture.findingID, Lesson: fixture.lesson, UpdatedAt: now}
 }

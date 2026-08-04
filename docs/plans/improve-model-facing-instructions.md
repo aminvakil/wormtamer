@@ -5,7 +5,6 @@ Status: proposed
 Depends on:
 
 - [Recover from broad internal repository searches](recover-from-broad-internal-repository-searches.md)
-- [Learn from natural review feedback](learn-from-natural-review-feedback.md)
 
 ## Goal
 

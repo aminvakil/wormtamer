@@ -22,9 +22,9 @@ Reject a missing or invalid webhook secret with `401`, an unlisted project names
 
 ## Feedback Ingestion
 
-An authenticated `Note Hook` create or update for an authorized, non-system, non-internal merge request comment is eligible when that merge request already has persisted Wormtamer findings. In one transaction, insert a delivery-deduplicated feedback event containing only bounded source identifiers and create or update one feedback job per GitLab note. Do not persist the note body. A newer source update requeues evaluation and immediately deactivates the prior derived memory; a stale update is retained as an ignored event.
+An authenticated `Note Hook` create or update for an authorized, non-system, non-internal merge request comment is eligible when that merge request already has a durably published Wormtamer review. In one transaction, insert a delivery-deduplicated feedback event containing only bounded source identifiers and create or update one feedback job per GitLab note. A note's first eligible event binds the job to the exact latest published review; later updates retain that immutable target. Do not persist the note body. An event without a published review is retained as ignored. A newer source update requeues evaluation and immediately deactivates prior derived memory; a stale update is retained as ignored.
 
-Feedback jobs fetch the current note after webhook commit, so processing intentionally evaluates the latest GitLab text rather than preserving comment revisions. Each job has at most five claims, a renewable three-minute lease, and the same retry categories and bounded exponential backoff used by review work. The structured current evaluation and active memory replace prior derived state transactionally. A crash may repeat GitLab reads and Gemini evaluation but cannot create duplicate current memory.
+Every eligible comment is evaluated, including comments bound to zero-finding reviews and ordinary discussion that may produce no structured decision. Feedback jobs fetch the current note after webhook commit, so processing intentionally evaluates the latest GitLab text rather than preserving comment revisions. Each job has at most five claims, a renewable three-minute lease, and the same retry categories and bounded exponential backoff used by review work. The structured current evaluation and active memory replace prior derived state transactionally. A crash may repeat GitLab reads and Gemini evaluation but cannot create duplicate current memory.
 
 GitLab emits comment webhooks for creation and updates, not deletion. Every five minutes, the feedback worker checks the source of each active comment-derived memory. A missing note or a source timestamp changed without a matching webhook deactivates that memory; a transient check failure defers another check without treating the source as deleted or changed.
 
@@ -37,6 +37,12 @@ GitLab instance + project ID + merge request IID + head SHA
 ```
 
 The numeric project ID from the webhook remains the durable identity even though configuration authorizes repositories by namespace path. Deduplicate events for the same head SHA. Before publication, confirm that the reviewed SHA remains current; obsolete findings must not be presented as current.
+
+## Review Feedback Target Identity
+
+The first-class overall-review target is `WT-R-` followed by the unpadded uppercase base32 encoding of the first 128 bits of a SHA-256 digest. Hash a `wormtamer:review:v1` domain separator, canonical GitLab instance, numeric project ID, merge request IID, and lowercase head SHA as UTF-8 fields separated and terminated by zero bytes. The target is supplied by trusted application code and remains distinct from finding identities.
+
+A newly derived typed memory identity is `WT-M-` plus the same bounded digest encoding over a `wormtamer:memory:v2` domain separator, canonical GitLab instance, numeric project ID, note ID, target type, and target identity. Including the target type prevents review and finding targets from aliasing.
 
 ## Finding Identity
 
@@ -91,7 +97,7 @@ SQLite stores the locally validated structured review result before publication 
 - Review and feedback job state, leases, attempts, scheduling, and errors
 - Publication markers and GitLab object IDs
 - Application-owned finding identifiers and their ordered positions under validated review results
-- Current structured feedback decisions and repository-scoped active memories
+- Feedback jobs bound to immutable published reviews, plus current typed review- or finding-target decisions and repository-scoped active memories
 - Versioned identities of memory returned during each successfully checkpointed review, without queries or lesson copies
 - Last-seen and successfully reviewed merge request revisions
 
