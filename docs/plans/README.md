@@ -7,6 +7,7 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
 
 1. [Learn from no-finding reviews](learn-from-no-finding-reviews.md): accept review-level feedback and derive repository-scoped advisory lessons when the latest published review has no findings.
+2. [Recover from oversized repository tool requests](recover-from-oversized-repository-tool-requests.md): let Gemini retry an authorized internal repository request with narrower arguments while preserving all resource and security limits.
 
 ## Deferred
 
