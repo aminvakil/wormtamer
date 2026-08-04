@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -51,7 +52,84 @@ func TestLoad(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
 	}
+	if cfg.ShareAllAuthorizedRepositories {
+		t.Fatal("ShareAllAuthorizedRepositories = true when omitted")
+	}
 	if related := cfg.RepositorySharing["group/project"]; len(related) != 1 || related[0] != "parent/team/project" {
+		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
+	}
+}
+
+func TestLoadShareAllAuthorizedRepositories(t *testing.T) {
+	contents := strings.Replace(validConfiguration,
+		`"authorized_repositories": ["group/project", "parent/team/project"]`,
+		`"authorized_repositories": ["group/project", "parent/team/project", "group/third"]`, 1)
+	contents = strings.Replace(contents, `"repository_sharing": {
+    "group/project": ["parent/team/project"]
+  }`, `"share_all_authorized_repositories": true,
+  "repository_sharing": {}`, 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.ShareAllAuthorizedRepositories {
+		t.Fatal("ShareAllAuthorizedRepositories = false")
+	}
+	want := map[string][]string{
+		"group/project":       {"parent/team/project", "group/third"},
+		"parent/team/project": {"group/project", "group/third"},
+		"group/third":         {"group/project", "parent/team/project"},
+	}
+	if len(cfg.RepositorySharing) != len(want) {
+		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
+	}
+	for target, related := range want {
+		if !slices.Equal(cfg.RepositorySharing[target], related) {
+			t.Errorf("RepositorySharing[%q] = %v, want %v", target, cfg.RepositorySharing[target], related)
+		}
+	}
+}
+
+func TestLoadShareAllWithOneRepository(t *testing.T) {
+	contents := strings.Replace(validConfiguration,
+		`"authorized_repositories": ["group/project", "parent/team/project"]`,
+		`"authorized_repositories": ["group/project"]`, 1)
+	contents = strings.Replace(contents, `"repository_sharing": {
+    "group/project": ["parent/team/project"]
+  }`, `"share_all_authorized_repositories": true`, 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.RepositorySharing) != 0 {
+		t.Fatalf("RepositorySharing = %+v, want no related repositories", cfg.RepositorySharing)
+	}
+}
+
+func TestLoadExplicitFalsePreservesRepositorySharing(t *testing.T) {
+	contents := strings.Replace(validConfiguration, `"repository_sharing": {`,
+		`"share_all_authorized_repositories": false,
+  "repository_sharing": {`, 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if related := cfg.RepositorySharing["group/project"]; !slices.Equal(related, []string{"parent/team/project"}) {
 		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
 	}
 }
@@ -169,6 +247,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "self sharing", replace: `["parent/team/project"]`, with: `["group/project"]`, want: "includes itself"},
 		{name: "duplicate shared repository", replace: `["parent/team/project"]`, with: `["parent/team/project", "parent/team/project"]`, want: "duplicate shared repository"},
 		{name: "empty sharing rule", replace: `["parent/team/project"]`, with: `[]`, want: "has no related repositories"},
+		{name: "share all with directional sharing", replace: `"repository_sharing": {`, with: `"share_all_authorized_repositories": true, "repository_sharing": {`, want: "cannot be true with non-empty repository_sharing"},
 	}
 
 	for _, test := range tests {

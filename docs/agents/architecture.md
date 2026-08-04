@@ -47,13 +47,18 @@ The process starts with an explicit JSON configuration path, for example `wormta
     "github_repositories": ["nginx/nginx"]
   },
   "authorized_repositories": ["group/project", "group/shared-contracts"],
+  "share_all_authorized_repositories": false,
   "repository_sharing": {
     "group/project": ["group/shared-contracts"]
   }
 }
 ```
 
-Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and bounds which internal repositories can be disclosed to and inspected by the model. `repository_sharing` adds directional rules from a repository under review to related repositories whose information may be disclosed to that review's audience. Both sides must be authorized, self-sharing and duplicate entries are rejected, and a missing rule denies cross-repository access. Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
+Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and bounds which internal repositories can be disclosed to and inspected by the model. `repository_sharing` adds directional rules from a repository under review to related repositories whose information may be disclosed to that review's audience. Both sides must be authorized, self-sharing and duplicate entries are rejected, and a missing rule denies cross-repository access.
+
+`share_all_authorized_repositories` defaults to `false`. When `true`, it derives a directional rule from every authorized repository to every other authorized repository; the current repository is excluded. It cannot be combined with a non-empty `repository_sharing` map. This is an operator assertion that every authorized repository has the same review audience, not a request to inspect repositories eagerly or exhaustively. Directional rules remain recommended when repository audiences differ.
+
+Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
 
 `public_sources.allowed_domains` must include `github.com`; each canonical entry authorizes that domain and dot-boundary subdomains for bounded direct HTTPS retrieval. `public_sources.github_repositories` contains exact `<owner>/<repository>` slugs and authorizes snapshot tools only for those repositories. These installation-wide lists are disclosed to every review. Public GitHub access is unauthenticated.
 

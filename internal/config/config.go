@@ -17,15 +17,16 @@ import (
 var repositoryPathPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$`)
 
 type Config struct {
-	ListenAddress          string              `json:"listen_address"`
-	DatabasePath           string              `json:"database_path"`
-	LogLevel               string              `json:"log_level"`
-	GitLab                 GitLab              `json:"gitlab"`
-	Gemini                 Gemini              `json:"gemini"`
-	PublicSources          PublicSources       `json:"public_sources"`
-	AuthorizedRepositories []string            `json:"authorized_repositories"`
-	RepositorySharing      map[string][]string `json:"repository_sharing"`
-	ConfigFileBroadlyRead  bool                `json:"-"`
+	ListenAddress                  string              `json:"listen_address"`
+	DatabasePath                   string              `json:"database_path"`
+	LogLevel                       string              `json:"log_level"`
+	GitLab                         GitLab              `json:"gitlab"`
+	Gemini                         Gemini              `json:"gemini"`
+	PublicSources                  PublicSources       `json:"public_sources"`
+	AuthorizedRepositories         []string            `json:"authorized_repositories"`
+	ShareAllAuthorizedRepositories bool                `json:"share_all_authorized_repositories"`
+	RepositorySharing              map[string][]string `json:"repository_sharing"`
+	ConfigFileBroadlyRead          bool                `json:"-"`
 }
 
 type GitLab struct {
@@ -149,6 +150,23 @@ func validate(cfg *Config) error {
 			return fmt.Errorf("duplicate authorized repository %q", repository)
 		}
 		authorized[repository] = struct{}{}
+	}
+	if cfg.ShareAllAuthorizedRepositories {
+		if len(cfg.RepositorySharing) > 0 {
+			return errors.New("share_all_authorized_repositories cannot be true with non-empty repository_sharing")
+		}
+		cfg.RepositorySharing = make(map[string][]string, len(cfg.AuthorizedRepositories))
+		for _, target := range cfg.AuthorizedRepositories {
+			relatedRepositories := make([]string, 0, len(cfg.AuthorizedRepositories)-1)
+			for _, related := range cfg.AuthorizedRepositories {
+				if related != target {
+					relatedRepositories = append(relatedRepositories, related)
+				}
+			}
+			if len(relatedRepositories) > 0 {
+				cfg.RepositorySharing[target] = relatedRepositories
+			}
+		}
 	}
 	for target, relatedRepositories := range cfg.RepositorySharing {
 		if _, allowed := authorized[target]; !allowed {

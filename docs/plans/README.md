@@ -7,7 +7,6 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
 
 1. [Learn from no-finding reviews](learn-from-no-finding-reviews.md): accept review-level feedback and derive repository-scoped advisory lessons when the latest published review has no findings.
-2. [Share all authorized repositories](share-all-authorized-repositories.md): add an explicit false-by-default operator assertion that makes every authorized repository available as related context to every other authorized repository.
 
 ## Deferred
 

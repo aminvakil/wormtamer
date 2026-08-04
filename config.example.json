@@ -16,6 +16,7 @@
     "github_repositories": []
   },
   "authorized_repositories": ["group/project", "group/shared-contracts"],
+  "share_all_authorized_repositories": false,
   "repository_sharing": {
     "group/project": ["group/shared-contracts"]
   }
