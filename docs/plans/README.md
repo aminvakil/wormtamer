@@ -6,8 +6,9 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
 
-1. [Recover from broad internal repository searches](recover-from-broad-internal-repository-searches.md): let Gemini narrow an internal search that exceeds its scan limit while keeping repository size-limit recovery scoped to internal tools.
-2. [Improve model-facing instructions](improve-model-facing-instructions.md): review and sharpen every current Gemini instruction, prompt, tool declaration, and response contract, including guidance to prefer the smallest useful repository request.
+1. [Fix review note HTML and Markdown double escaping](fix-review-note-double-escaping.md): keep model-controlled text inert while rendering ordinary apostrophes and quotation marks readably in GitLab notes.
+2. [Recover from broad internal repository searches](recover-from-broad-internal-repository-searches.md): let Gemini narrow an internal search that exceeds its scan limit while keeping repository size-limit recovery scoped to internal tools.
+3. [Improve model-facing instructions](improve-model-facing-instructions.md): review and sharpen every current Gemini instruction, prompt, tool declaration, and response contract, including guidance to prefer the smallest useful repository request.
 
 ## Deferred
 
