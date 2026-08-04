@@ -5,7 +5,7 @@ Status: proposed
 Depends on:
 
 - [Recover from broad internal repository searches](recover-from-broad-internal-repository-searches.md)
-- [Learn from no-finding reviews](learn-from-no-finding-reviews.md)
+- [Learn from natural review feedback](learn-from-natural-review-feedback.md)
 
 ## Goal
 
@@ -42,7 +42,7 @@ Inventory every instruction, prompt builder, function declaration, and response 
 
 For repository access, add general pre-call guidance that prefers the smallest direct request capable of answering the question. An exact path from the diff should normally be read directly; a known directory should be supplied to recursive listing or search. Keep root operations valid when the model lacks narrower context. Coordinate this wording with the search-limit recovery plan so recursion, bounded failures, and narrower retries are described once in the most useful model-facing locations.
 
-For feedback evaluation, verify that the instruction, input framing, schema, and local validation consistently express the implemented finding- and review-level target rules, role as provenance rather than authority, optional reusable project-specific lessons, and no decision for unrelated or ambiguous comments. Preserve the absence of model tools in this workflow.
+For feedback evaluation, verify that the instruction, input framing, schema, and local validation consistently express natural overall-review and finding feedback without user-facing identifier syntax, role as provenance rather than authority, optional reusable project-specific lessons, and no decision for unrelated or ambiguous comments. Preserve the absence of model tools in this workflow.
 
 Use focused assertions for required semantics and generated declarations or schemas rather than snapshotting entire prompts. Existing local validation remains authoritative even when equivalent guidance appears in prose.
 
