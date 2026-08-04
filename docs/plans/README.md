@@ -4,7 +4,9 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 ## Proposed Roadmap
 
-There are currently no proposed roadmap plans. When plans are added, implement them in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
+Implement proposed plans in the listed order unless a plan's status or dependencies are explicitly changed; this list is the authoritative order.
+
+1. [Learn from no-finding reviews](learn-from-no-finding-reviews.md): accept review-level feedback and derive repository-scoped advisory lessons when the latest published review has no findings.
 
 ## Deferred
 
