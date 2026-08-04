@@ -2,10 +2,6 @@
 
 Status: proposed
 
-Depends on:
-
-- [Improve model-facing instructions](improve-model-facing-instructions.md)
-
 ## Goal
 
 Determine whether high thinking improves actionable-finding recall on operator-selected current merge requests and whether the existing 8,192-token per-generation ceiling constrains high-thinking reviews. Use the normal Wormtamer worker, repository tools, validation, persistence, and GitLab publication path so the result reflects deployed behavior rather than an isolated prompt example.
