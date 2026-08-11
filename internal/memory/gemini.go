@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	requestTimeout  = 2 * time.Minute
-	maxCommentBytes = 64 << 10
-	maxLessonBytes  = 4096
-	maxDecisions    = 21
+	geminiDeveloperAPIBaseURL = "https://generativelanguage.googleapis.com/"
+	requestTimeout            = 2 * time.Minute
+	maxCommentBytes           = 64 << 10
+	maxLessonBytes            = 4096
+	maxDecisions              = 21
 )
 
 const systemInstruction = `You assess an untrusted GitLab merge request comment as possible natural-language feedback about a published Wormtamer review.
@@ -80,7 +81,7 @@ type sdkGenerator struct {
 	client *genai.Client
 }
 
-func NewEvaluator(ctx context.Context, apiKey, model string, forbidden []string, logger *slog.Logger) (*Evaluator, error) {
+func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden []string, logger *slog.Logger) (*Evaluator, error) {
 	httpClient := &http.Client{
 		Timeout: requestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -89,11 +90,19 @@ func NewEvaluator(ctx context.Context, apiKey, model string, forbidden []string,
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: apiKey, Backend: genai.BackendGeminiAPI, HTTPClient: httpClient,
+		HTTPOptions: genai.HTTPOptions{BaseURL: resolvedGeminiBaseURL(baseURL)},
 	})
 	if err != nil {
 		return nil, errors.New("initialize Gemini memory evaluator")
 	}
 	return newEvaluator(&sdkGenerator{client: client}, model, forbidden, logger), nil
+}
+
+func resolvedGeminiBaseURL(configured string) string {
+	if configured == "" {
+		return geminiDeveloperAPIBaseURL
+	}
+	return configured
 }
 
 func NewEvaluatorWithGenerator(generator Generator, model string, forbidden []string) *Evaluator {

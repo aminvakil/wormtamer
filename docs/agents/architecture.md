@@ -11,7 +11,7 @@ One installation runs as one process and replica because SQLite and local reposi
 - Go with the standard library HTTP server unless a concrete requirement proves it insufficient
 - One OCI image with persistent SQLite storage
 - SQLite through `github.com/mattn/go-sqlite3`, built with CGO, as the only application database
-- The Gemini Developer API through `google.golang.org/genai` as the only model backend
+- Gemini through `google.golang.org/genai`, using the Developer API directly or a configured Gemini Developer API-compatible endpoint, as the only model backend
 - A small explicit Gemini function-calling loop with no general agent framework or automatic tool execution
 
 A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
@@ -26,7 +26,7 @@ Establish an upgrade and compatibility policy before the first production deploy
 
 ## Deployment Configuration
 
-The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, log level, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, Gemini API key, model, and review thinking level, authorized internal repositories, approved public domains, and exact public GitHub repositories; required values must be non-empty and repository entries must be well-formed and unique. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` when omitted. `gemini.thinking_level` defaults to `default`, which leaves the SDK thinking configuration unset. Any other non-empty value is passed through to Gemini without a local allowlist so model-specific support is decided by the API. The validated GitLab URL is canonicalized before it participates in durable identity. The review worker is always enabled, so its credentials are required at startup without making external validation calls.
+The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, log level, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, model API key, optional Gemini Developer API-compatible base URL, model, and review thinking level, authorized internal repositories, approved public domains, and exact public GitHub repositories; required values must be non-empty and repository entries must be well-formed and unique. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` when omitted. When `gemini.base_url` is omitted, the SDK uses the Gemini Developer API. When set, it is the validated HTTP or HTTPS base URL used for both reviews and feedback evaluation. The endpoint must accept the Gemini Developer API request path, authentication header, function-calling, structured-output, and thinking configuration used by Wormtamer and return native Gemini responses. OpenAI-compatible endpoints serving Gemini models are not sufficient. `gemini.thinking_level` defaults to `default`, which leaves the SDK thinking configuration unset. Any other non-empty value is passed through without a local allowlist so model-specific support is decided by the endpoint. The validated GitLab and configured model endpoint URLs are canonicalized. The review worker is always enabled, so its credentials are required at startup without making external validation calls.
 
 ```json
 {
@@ -40,6 +40,7 @@ The process starts with an explicit JSON configuration path, for example `wormta
   },
   "gemini": {
     "api_key": "replace-me",
+    "base_url": "",
     "model": "replace-me",
     "thinking_level": "default"
   },

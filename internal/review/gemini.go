@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	geminiRequestTimeout = 2 * time.Minute
-	maxToolResultBytes   = 256 << 10
-	maxMemoryToolCalls   = 8
-	maxTotalToolCalls    = repository.ReviewResourceLimit + maxMemoryToolCalls
+	geminiDeveloperAPIBaseURL = "https://generativelanguage.googleapis.com/"
+	geminiRequestTimeout      = 2 * time.Minute
+	maxToolResultBytes        = 256 << 10
+	maxMemoryToolCalls        = 8
+	maxTotalToolCalls         = repository.ReviewResourceLimit + maxMemoryToolCalls
 )
 
 const ToolSearchMemory = "search_review_memory"
@@ -62,7 +63,7 @@ type sdkGenerator struct {
 	thinkingLevel string
 }
 
-func NewGeminiReviewer(ctx context.Context, apiKey, model, thinkingLevel string, forbidden []string, logger *slog.Logger) (*GeminiReviewer, error) {
+func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger) (*GeminiReviewer, error) {
 	httpClient := &http.Client{
 		Timeout: geminiRequestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -73,11 +74,21 @@ func NewGeminiReviewer(ctx context.Context, apiKey, model, thinkingLevel string,
 		APIKey:     apiKey,
 		Backend:    genai.BackendGeminiAPI,
 		HTTPClient: httpClient,
+		HTTPOptions: genai.HTTPOptions{
+			BaseURL: resolvedGeminiBaseURL(baseURL),
+		},
 	})
 	if err != nil {
 		return nil, errors.New("initialize Gemini client")
 	}
 	return newGeminiReviewer(&sdkGenerator{client: client, thinkingLevel: thinkingLevel}, model, forbidden, logger), nil
+}
+
+func resolvedGeminiBaseURL(configured string) string {
+	if configured == "" {
+		return geminiDeveloperAPIBaseURL
+	}
+	return configured
 }
 
 func NewGeminiReviewerWithGenerator(generator Generator, model string, forbidden []string) *GeminiReviewer {

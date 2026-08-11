@@ -9,6 +9,7 @@
   },
   "gemini": {
     "api_key": "replace-me",
+    "base_url": "",
     "model": "replace-me",
     "thinking_level": "default"
   },

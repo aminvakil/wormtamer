@@ -37,6 +37,7 @@ type GitLab struct {
 
 type Gemini struct {
 	APIKey        string `json:"api_key"`
+	BaseURL       string `json:"base_url"`
 	Model         string `json:"model"`
 	ThinkingLevel string `json:"thinking_level"`
 }
@@ -131,6 +132,13 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Gemini.APIKey == "" {
 		return errors.New("gemini.api_key is required")
+	}
+	if cfg.Gemini.BaseURL != "" {
+		canonicalBaseURL, err := canonicalHTTPBaseURL(cfg.Gemini.BaseURL, "gemini.base_url")
+		if err != nil {
+			return err
+		}
+		cfg.Gemini.BaseURL = canonicalBaseURL
 	}
 	if strings.TrimSpace(cfg.Gemini.Model) == "" {
 		return errors.New("gemini.model is required")
@@ -280,16 +288,20 @@ func validateListenAddress(address string) error {
 }
 
 func canonicalGitLabURL(raw string) (string, error) {
+	return canonicalHTTPBaseURL(raw, "gitlab.base_url")
+}
+
+func canonicalHTTPBaseURL(raw, field string) (string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", errors.New("gitlab.base_url is invalid")
+		return "", fmt.Errorf("%s is invalid", field)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Hostname() == "" {
-		return "", errors.New("gitlab.base_url must be an HTTP or HTTPS URL")
+		return "", fmt.Errorf("%s must be an HTTP or HTTPS URL", field)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", errors.New("gitlab.base_url must not contain credentials, a query, or a fragment")
+		return "", fmt.Errorf("%s must not contain credentials, a query, or a fragment", field)
 	}
 
 	authority := parsed.Host
@@ -298,7 +310,7 @@ func canonicalGitLabURL(raw string) (string, error) {
 		if !strings.HasSuffix(authority, "]") {
 			host, authorityPort, err := net.SplitHostPort(authority)
 			if err != nil || authorityPort == "" {
-				return "", errors.New("gitlab.base_url has an invalid authority")
+				return "", fmt.Errorf("%s has an invalid authority", field)
 			}
 			address = host
 		}
@@ -306,12 +318,12 @@ func canonicalGitLabURL(raw string) (string, error) {
 			address = address[:index]
 		}
 		if net.ParseIP(address) == nil {
-			return "", errors.New("gitlab.base_url has an invalid authority")
+			return "", fmt.Errorf("%s has an invalid authority", field)
 		}
 	} else if strings.Contains(authority, ":") {
 		host, authorityPort, err := net.SplitHostPort(authority)
 		if err != nil || host == "" || authorityPort == "" {
-			return "", errors.New("gitlab.base_url has an invalid authority")
+			return "", fmt.Errorf("%s has an invalid authority", field)
 		}
 	}
 
@@ -319,7 +331,7 @@ func canonicalGitLabURL(raw string) (string, error) {
 	if port != "" {
 		portNumber, err := strconv.Atoi(port)
 		if err != nil || portNumber < 1 || portNumber > 65535 {
-			return "", errors.New("gitlab.base_url has an invalid port")
+			return "", fmt.Errorf("%s has an invalid port", field)
 		}
 		if (parsed.Scheme == "http" && portNumber == 80) || (parsed.Scheme == "https" && portNumber == 443) {
 			port = ""

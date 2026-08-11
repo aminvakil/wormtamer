@@ -52,6 +52,9 @@ func TestLoad(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
 	}
+	if cfg.Gemini.BaseURL != "" {
+		t.Fatalf("Gemini.BaseURL = %q, want empty", cfg.Gemini.BaseURL)
+	}
 	if cfg.Gemini.ThinkingLevel != "default" {
 		t.Fatalf("Gemini.ThinkingLevel = %q, want default", cfg.Gemini.ThinkingLevel)
 	}
@@ -60,6 +63,22 @@ func TestLoad(t *testing.T) {
 	}
 	if related := cfg.RepositorySharing["group/project"]; len(related) != 1 || related[0] != "parent/team/project" {
 		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
+	}
+}
+
+func TestLoadCanonicalizesGeminiBaseURL(t *testing.T) {
+	contents := strings.Replace(validConfiguration, `"model": "gemini-test"`, `"base_url": "https://GATEWAY.EXAMPLE:443/", "model": "gemini-test"`, 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Gemini.BaseURL != "https://gateway.example" {
+		t.Fatalf("Gemini.BaseURL = %q, want https://gateway.example", cfg.Gemini.BaseURL)
 	}
 }
 
@@ -248,6 +267,9 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "empty webhook secret", replace: `"secret"`, with: `""`, want: "webhook_secret is required"},
 		{name: "empty personal access token", replace: `"gitlab-token"`, with: `""`, want: "personal_access_token is required"},
 		{name: "empty Gemini API key", replace: `"gemini-key"`, with: `""`, want: "gemini.api_key is required"},
+		{name: "invalid Gemini base URL scheme", replace: `"api_key": "gemini-key",`, with: `"api_key": "gemini-key", "base_url": "ftp://gateway.example",`, want: "gemini.base_url must be an HTTP or HTTPS URL"},
+		{name: "Gemini base URL credentials", replace: `"api_key": "gemini-key",`, with: `"api_key": "gemini-key", "base_url": "https://user:pass@gateway.example",`, want: "gemini.base_url must not contain credentials"},
+		{name: "Gemini base URL query", replace: `"api_key": "gemini-key",`, with: `"api_key": "gemini-key", "base_url": "https://gateway.example?key=value",`, want: "gemini.base_url must not contain credentials"},
 		{name: "empty Gemini model", replace: `"gemini-test"`, with: `""`, want: "gemini.model is required"},
 		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
 		{name: "missing public domains", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `[]`, want: "public_sources.allowed_domains is required"},

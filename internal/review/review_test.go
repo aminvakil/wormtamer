@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -139,6 +141,36 @@ func TestGeminiReviewModelContract(t *testing.T) {
 	findingProperties := item["properties"].(map[string]any)
 	if !strings.Contains(findingProperties["path"].(map[string]any)["description"].(string), "Exact new_path") {
 		t.Fatalf("finding path schema = %+v", findingProperties["path"])
+	}
+}
+
+func TestGeminiReviewerPinsDeveloperAPIBaseURL(t *testing.T) {
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "https://ambient-endpoint.invalid")
+	if got := resolvedGeminiBaseURL(""); got != geminiDeveloperAPIBaseURL {
+		t.Fatalf("resolvedGeminiBaseURL(\"\") = %q, want %q", got, geminiDeveloperAPIBaseURL)
+	}
+}
+
+func TestGeminiReviewerUsesConfiguredBaseURL(t *testing.T) {
+	var gotPath, gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		gotPath = request.URL.Path
+		gotAPIKey = request.Header.Get("x-goog-api-key")
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"proxied\",\"findings\":[]}"}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-proxy"}`))
+	}))
+	defer server.Close()
+
+	reviewer, err := NewGeminiReviewer(context.Background(), "gateway-key", server.URL, "gemini-proxy", "default", nil, nil)
+	if err != nil {
+		t.Fatalf("NewGeminiReviewer() error = %v", err)
+	}
+	result, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+	if err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if result.Summary != "proxied" || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
+		t.Fatalf("result=%+v path=%q API key=%q", result, gotPath, gotAPIKey)
 	}
 }
 

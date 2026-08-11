@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +14,36 @@ import (
 	"github.com/aminvakil/wormtamer/internal/review"
 	"google.golang.org/genai"
 )
+
+func TestEvaluatorPinsDeveloperAPIBaseURL(t *testing.T) {
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "https://ambient-endpoint.invalid")
+	if got := resolvedGeminiBaseURL(""); got != geminiDeveloperAPIBaseURL {
+		t.Fatalf("resolvedGeminiBaseURL(\"\") = %q, want %q", got, geminiDeveloperAPIBaseURL)
+	}
+}
+
+func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
+	var gotPath, gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		gotPath = request.URL.Path
+		gotAPIKey = request.Header.Get("x-goog-api-key")
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"decisions\":[]}"}],"role":"model"},"finishReason":"STOP"}]}`))
+	}))
+	defer server.Close()
+
+	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil)
+	if err != nil {
+		t.Fatalf("NewEvaluator() error = %v", err)
+	}
+	result, err := evaluator.Evaluate(context.Background(), testInput("WT-F-"+strings.Repeat("A", 26)))
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if len(result.Decisions) != 0 || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
+		t.Fatalf("result=%+v path=%q API key=%q", result, gotPath, gotAPIKey)
+	}
+}
 
 func TestEvaluatorProducesBoundedActiveLesson(t *testing.T) {
 	findingID := "WT-F-" + strings.Repeat("A", 26)

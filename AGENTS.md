@@ -6,7 +6,7 @@ Build a minimal, self-hosted GitLab merge request reviewer. Each deployment serv
 
 ## Constraints
 
-- Use Go, the standard library HTTP server by default, SQLite, and the official Gemini Go SDK.
+- Use Go, the standard library HTTP server by default, SQLite, and the official Gemini Go SDK, either directly or through a configured Gemini Developer API-compatible endpoint.
 - Run webhook ingress, review work, and reconciliation in one process and one replica.
 - Keep the Gemini function-calling loop explicit; trusted application brokers validate and dispatch every tool call.
 - Keep deployments single-tenant. Do not add a control plane, provider abstraction, additional database, queue service, or agent framework without an approved need.

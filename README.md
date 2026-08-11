@@ -25,7 +25,7 @@ Cross-repository access requires an explicit directional sharing rule. Runtime m
 
 - A GitLab personal access token with `api` scope and at least the Reporter role on every authorized project
 - A GitLab webhook secret
-- A Gemini Developer API key and Gemini 3 or newer model name
+- A Gemini Developer API key, or a Gemini Developer API-compatible endpoint and API key, with a Gemini 3 or newer model name
 - Docker for the recommended deployment, or Go 1.26 with CGO and a C compiler for local builds
 
 ## Quick start

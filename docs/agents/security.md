@@ -18,15 +18,15 @@ A bot may see content unavailable to a merge request participant. A directional 
 
 Credentials belong only to trusted application code. Never place them in prompts, tool results, logs, command arguments, repository workspaces, shell history, or sandbox environments.
 
-Credentials are loaded as plaintext from the explicit deployment configuration file. The real configuration file must remain outside version control. Warn when its filesystem permissions allow group or other users to read it, but do not treat permissions as portable proof of secrecy. The always-enabled review worker requires the GitLab personal access token and Gemini API key at startup; startup validates only their presence and makes no external credential or scope checks.
+Credentials are loaded as plaintext from the explicit deployment configuration file. The real configuration file must remain outside version control. Warn when its filesystem permissions allow group or other users to read it, but do not treat permissions as portable proof of secrecy. The always-enabled review worker requires the GitLab personal access token and a model API key at startup; startup validates only their presence and makes no external credential or scope checks.
 
 Authenticate GitLab webhooks with the configured webhook secret before accepting their contents. GitLab calls go through a trusted broker outside repository workspaces. The broker builds API paths under the configured GitLab base URL, rejects every redirect to prevent PAT forwarding, and bounds request time and response size. Separate read and write capabilities in tool design even when they use one credential. Redact known secrets from errors and logs.
 
-Load the Gemini API key from the deployment configuration and pass it only to an explicitly configured Gemini Developer API client. The explicit function-calling loop declares only repository and runtime-memory read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
+Load the configured model API key from the deployment configuration and pass it only to the `google.golang.org/genai` client. The client uses the Gemini Developer API when no model base URL is configured and otherwise sends the key, prompts, tool results, and model requests to the exact operator-configured HTTP or HTTPS endpoint. Redirects are rejected. A configured endpoint is trusted with the same private review content as the direct Gemini API and must provide the required native Gemini Developer API behavior for the configured model. The explicit function-calling loop declares only repository and runtime-memory read tools; application code validates, authorizes, limits, and dispatches every returned function request itself.
 
 Do not enable automatic function execution, Gemini code execution, URL retrieval, or search grounding. Public research uses constrained application tools. Before constructing a model prompt, reject review metadata, diffs, or transient feedback comments containing any configured secret; do not send, log, store, or identify the matching value. Response schemas improve structure but do not replace local validation.
 
-Plain HTTP is permitted for local self-hosted deployments, including communication with GitLab. It provides no transport confidentiality or server authentication; the operator is responsible for keeping that traffic on an appropriate local network.
+Plain HTTP is permitted for local self-hosted deployments, including communication with GitLab or an operator-configured model endpoint. It provides no transport confidentiality or server authentication; the operator is responsible for keeping that traffic on an appropriate local network.
 
 ## Tool Requirements
 
