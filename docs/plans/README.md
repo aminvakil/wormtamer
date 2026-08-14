@@ -2,10 +2,6 @@
 
 Use a plan for substantial work that changes architecture, security boundaries, persistent state, public contracts, or several components. Routine fixes, contained implementation work, and documentation cleanup do not need permanent plan files.
 
-## Proposed
-
-- [Automate dependency maintenance and vulnerability scanning](automate-dependency-maintenance.md): cover Go modules and Docker with Dependabot and run a reproducible `govulncheck` CI gate.
-
 ## Deferred
 
 - [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md): revisit after a deployed installation has accumulated enough meaningful structured feedback to define useful measures and sample sizes from evidence.
