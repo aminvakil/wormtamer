@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -42,11 +43,15 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) error {
-	configPath, err := parseConfigPath(args)
+	return runWithOutput(ctx, args, logger, os.Stdout)
+}
+
+func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, output io.Writer) error {
+	invocation, err := parseInvocation(args)
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(invocation.configPath)
 	if err != nil {
 		return err
 	}
@@ -63,6 +68,10 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	defer storage.Close()
+	if invocation.jobs != nil {
+		return executeJobsCommand(ctx, storage, *invocation.jobs, output)
+	}
+
 	workspaceManager, err := repository.NewManager(cfg.DatabasePath + ".workspaces")
 	if err != nil {
 		return err
@@ -208,20 +217,44 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	return processError
 }
 
-func parseConfigPath(args []string) (string, error) {
+type invocation struct {
+	configPath string
+	jobs       *jobsCommand
+}
+
+func parseInvocation(args []string) (invocation, error) {
 	flags := flag.NewFlagSet("wormtamer", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "path to JSON configuration")
 	if err := flags.Parse(args); err != nil {
-		return "", fmt.Errorf("parse command line: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return "", errors.New("unexpected positional arguments")
+		return invocation{}, fmt.Errorf("parse command line: %w", err)
 	}
 	if *configPath == "" {
-		return "", errors.New("-config is required")
+		return invocation{}, errors.New("-config is required")
 	}
-	return *configPath, nil
+
+	result := invocation{configPath: *configPath}
+	arguments := flags.Args()
+	if len(arguments) == 0 {
+		return result, nil
+	}
+	if arguments[0] != "jobs" {
+		return invocation{}, errors.New("unexpected positional arguments")
+	}
+	if len(arguments) == 2 && arguments[1] == jobsActionListFailed {
+		result.jobs = &jobsCommand{action: jobsActionListFailed}
+		return result, nil
+	}
+	if len(arguments) == 4 && arguments[1] == jobsActionRetry &&
+		(arguments[2] == store.FailedJobKindReview || arguments[2] == store.FailedJobKindFeedback) {
+		jobID, err := strconv.ParseInt(arguments[3], 10, 64)
+		if err != nil || jobID <= 0 {
+			return invocation{}, errors.New("job ID must be a positive integer")
+		}
+		result.jobs = &jobsCommand{action: jobsActionRetry, kind: arguments[2], jobID: jobID}
+		return result, nil
+	}
+	return invocation{}, errors.New("invalid jobs command")
 }
 
 func configuredLogLevel(level string) slog.Level {

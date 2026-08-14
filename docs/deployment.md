@@ -83,6 +83,18 @@ A successful response confirms that startup completed and the HTTP server is liv
 docker logs wormtamer
 ```
 
+Inspect terminal failures and, after correcting their cause, retry them through a short-lived command in the running container:
+
+```sh
+docker exec wormtamer wormtamer -config /etc/wormtamer/config.json jobs list-failed
+docker exec wormtamer wormtamer -config /etc/wormtamer/config.json jobs retry review 17
+docker exec wormtamer wormtamer -config /etc/wormtamer/config.json jobs retry feedback 23
+```
+
+`list-failed` writes bounded JSON for at most 100 newest failed jobs and reports whether more exist. A retry succeeds only while that exact job remains failed; it resets the five-attempt budget and makes the job immediately eligible. Correct credentials, authorization, configuration, or other permanent causes before retrying. A review that already has a validated result resumes publication without another Gemini review.
+
+These commands open the same SQLite volume briefly but do not start an HTTP listener, worker, reconciler, or external client. They are safe alongside the one running replica because retry is a conditional transaction; they are not a way to start a second service replica. Their output contains operational identifiers and error categories, not stored error messages, webhook payloads, review results, comments, or memory lessons.
+
 For model diagnostics, set `"log_level": "debug"` and restart the container. Debug events include the complete model system instruction and prompt, each requested tool and its arguments, each validated tool result, and the validated final model response. Review tool-call arguments show when Gemini chooses a directionally shared repository. These logs can contain private merge request data, repository content, comments, and secrets unknown to Wormtamer. Restrict access and retention, and restore `"log_level": "info"` after diagnosis. Wormtamer replaces any diagnostic value containing a configured GitLab or Gemini credential rather than logging it.
 
 Restarting the container with the same volume preserves all SQLite state, including feedback and runtime memory. Stop the existing container before starting a replacement so only one replica accesses SQLite.

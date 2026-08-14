@@ -3,25 +3,51 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aminvakil/wormtamer/internal/store"
 )
 
-func TestParseConfigPath(t *testing.T) {
-	if _, err := parseConfigPath(nil); err == nil || !strings.Contains(err.Error(), "-config is required") {
-		t.Fatalf("parseConfigPath(nil) error = %v", err)
+func TestParseInvocation(t *testing.T) {
+	if _, err := parseInvocation(nil); err == nil || !strings.Contains(err.Error(), "-config is required") {
+		t.Fatalf("parseInvocation(nil) error = %v", err)
 	}
-	if _, err := parseConfigPath([]string{"-config", "config.json", "extra"}); err == nil {
-		t.Fatal("parseConfigPath() accepted a positional argument")
+	if _, err := parseInvocation([]string{"-config", "config.json", "extra"}); err == nil {
+		t.Fatal("parseInvocation() accepted an unknown positional argument")
 	}
-	path, err := parseConfigPath([]string{"-config", "config.json"})
-	if err != nil || path != "config.json" {
-		t.Fatalf("parseConfigPath() = %q, %v", path, err)
+
+	service, err := parseInvocation([]string{"-config", "config.json"})
+	if err != nil || service.configPath != "config.json" || service.jobs != nil {
+		t.Fatalf("parseInvocation(service) = %+v, %v", service, err)
+	}
+	listed, err := parseInvocation([]string{"-config", "config.json", "jobs", "list-failed"})
+	if err != nil || listed.jobs == nil || listed.jobs.action != jobsActionListFailed {
+		t.Fatalf("parseInvocation(list) = %+v, %v", listed, err)
+	}
+	retried, err := parseInvocation([]string{"-config", "config.json", "jobs", "retry", "review", "42"})
+	if err != nil || retried.jobs == nil || retried.jobs.action != jobsActionRetry ||
+		retried.jobs.kind != store.FailedJobKindReview || retried.jobs.jobID != 42 {
+		t.Fatalf("parseInvocation(retry) = %+v, %v", retried, err)
+	}
+	for _, arguments := range [][]string{
+		{"-config", "config.json", "jobs"},
+		{"-config", "config.json", "jobs", "retry", "unknown", "1"},
+		{"-config", "config.json", "jobs", "retry", "feedback", "0"},
+		{"-config", "config.json", "jobs", "list-failed", "extra"},
+	} {
+		if _, err := parseInvocation(arguments); err == nil {
+			t.Fatalf("parseInvocation(%q) accepted invalid command", arguments)
+		}
 	}
 }
 
@@ -86,6 +112,100 @@ func TestRunFailsBeforeListeningWhenDatabaseIsUnavailable(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "HTTP server started") {
 		t.Fatalf("server started before database initialization failed: %s", logs.String())
+	}
+}
+
+func TestJobsCommandsDoNotStartServiceOrExposePrivateState(t *testing.T) {
+	directory := t.TempDir()
+	configPath := writeConfig(t, directory, "wormtamer.db")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	configuration, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration = []byte(strings.Replace(string(configuration), "127.0.0.1:0", listener.Addr().String(), 1))
+	if err := os.WriteFile(configPath, configuration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	databasePath := filepath.Join(directory, "wormtamer.db")
+	storage, err := store.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := storage.CreateReconciledJob(context.Background(), store.ReconciledReview{
+		GitLabInstance: "http://gitlab.internal", ProjectID: 42, MergeRequestIID: 7,
+		HeadSHA: "0123456789abcdef0123456789abcdef01234567",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(time.Hour)
+	job, err := storage.ClaimJob(context.Background(), "owner", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	if err := storage.FinishJob(context.Background(), created.JobID, "owner", store.JobFailed,
+		"gitlab_authorization_failed", "stored-private-error-message", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	if err := runWithOutput(context.Background(), []string{"-config", configPath, "jobs", "list-failed"}, logger, &output); err != nil {
+		t.Fatalf("list-failed error = %v", err)
+	}
+	var listed struct {
+		Jobs      []map[string]any `json:"jobs"`
+		Truncated bool             `json:"truncated"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list output: %v; output=%s", err, output.String())
+	}
+	if listed.Truncated || len(listed.Jobs) != 1 {
+		t.Fatalf("list output = %s", output.String())
+	}
+	wantKeys := []string{"kind", "job_id", "attempt_count", "last_error_category", "updated_at", "project_id", "merge_request_iid", "head_sha"}
+	if len(listed.Jobs[0]) != len(wantKeys) {
+		t.Fatalf("failed job fields = %+v", listed.Jobs[0])
+	}
+	for _, key := range wantKeys {
+		if _, exists := listed.Jobs[0][key]; !exists {
+			t.Fatalf("failed job lacks %q: %+v", key, listed.Jobs[0])
+		}
+	}
+	for _, private := range []string{"stored-private-error-message", "gitlab-token", "gemini-key", "secret"} {
+		if strings.Contains(output.String(), private) {
+			t.Fatalf("list output exposes %q: %s", private, output.String())
+		}
+	}
+	if strings.Contains(logs.String(), "HTTP server started") {
+		t.Fatalf("operational command started HTTP server: %s", logs.String())
+	}
+	if _, err := os.Stat(databasePath + ".workspaces"); !os.IsNotExist(err) {
+		t.Fatalf("operational command created workspace path: %v", err)
+	}
+
+	output.Reset()
+	jobID := strconv.FormatInt(created.JobID, 10)
+	if err := runWithOutput(context.Background(), []string{"-config", configPath, "jobs", "retry", "review", jobID}, logger, &output); err != nil {
+		t.Fatalf("retry error = %v", err)
+	}
+	wantRetry := `{"kind":"review","job_id":` + jobID + `,"retried":true}`
+	if strings.TrimSpace(output.String()) != wantRetry {
+		t.Fatalf("retry output = %s", output.String())
+	}
+	err = runWithOutput(context.Background(), []string{"-config", configPath, "jobs", "retry", "review", jobID}, logger, &output)
+	if !errors.Is(err, store.ErrJobNotFailed) {
+		t.Fatalf("repeated retry error = %v", err)
 	}
 }
 

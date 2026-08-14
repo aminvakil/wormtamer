@@ -4,7 +4,6 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 ## Proposed
 
-- [Inspect and retry failed jobs](inspect-and-retry-failed-jobs.md): add bounded local status and safe post-correction retry commands for review and feedback work.
 - [Automate dependency maintenance and vulnerability scanning](automate-dependency-maintenance.md): cover Go modules and Docker with Dependabot and run a reproducible `govulncheck` CI gate.
 
 ## Deferred

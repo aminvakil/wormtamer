@@ -64,7 +64,7 @@ Authorization by path intentionally fails after a project rename until configura
 
 `public_sources.allowed_domains` must include `github.com`; each canonical entry authorizes that domain and dot-boundary subdomains for bounded direct HTTPS retrieval. `public_sources.github_repositories` contains exact `<owner>/<repository>` slugs and authorizes snapshot tools only for those repositories. These installation-wide lists are disclosed to every review. Public GitHub access is unauthenticated.
 
-Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. Operational job visibility is through bounded logs rather than a status API.
+Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. Operational job visibility is through bounded logs and the local failed-job commands described in [Reliability](reliability.md#jobs-and-retries), not a status or administration HTTP API.
 
 ## Components
 

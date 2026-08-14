@@ -264,6 +264,44 @@ func TestWorkerReconcilesPostAfterLocalPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestWorkerOperatorRetryResumesPublicationWithoutReview(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+	ctx := context.Background()
+	now := time.Now().UTC().Add(time.Hour)
+	job, err := storage.ClaimJob(ctx, "checkpoint-owner", now, time.Minute, maxAttempts)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	resultJSON := []byte(`{"summary":"Already reviewed.","findings":[]}`)
+	if err := storage.SaveReviewResult(ctx, job.ID, "checkpoint-owner", resultJSON, nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.FinishJob(ctx, job.ID, "checkpoint-owner", store.JobFailed,
+		"gitlab_authorization_failed", "gitlab_authorization_failed", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	retriedAt := now.Add(2 * time.Second)
+	if err := storage.RetryFailedReviewJob(ctx, job.ID, retriedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	broker := &fakeGitLab{}
+	reviewer := &fakeReviewer{err: errors.New("review must not run")}
+	worker := newTestWorker(t, storage, broker, reviewer, nil)
+	worker.now = func() time.Time { return retriedAt }
+	processed, err := worker.ProcessOne(ctx)
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	assertJobState(t, db, store.JobCompleted)
+	if reviewer.calls != 0 || broker.loadCalls != 0 || broker.postCalls != 1 {
+		t.Fatalf("calls: review=%d load=%d post=%d", reviewer.calls, broker.loadCalls, broker.postCalls)
+	}
+}
+
 func TestWorkerReconcilesLostPostResponse(t *testing.T) {
 	storage, db := workerStore(t)
 	defer storage.Close()
