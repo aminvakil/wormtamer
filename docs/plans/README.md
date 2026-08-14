@@ -2,6 +2,11 @@
 
 Use a plan for substantial work that changes architecture, security boundaries, persistent state, public contracts, or several components. Routine fixes, contained implementation work, and documentation cleanup do not need permanent plan files.
 
+## Proposed
+
+- [Inspect and retry failed jobs](inspect-and-retry-failed-jobs.md): add bounded local status and safe post-correction retry commands for review and feedback work.
+- [Automate dependency maintenance and vulnerability scanning](automate-dependency-maintenance.md): cover Go modules and Docker with Dependabot and run a reproducible `govulncheck` CI gate.
+
 ## Deferred
 
 - [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md): revisit after a deployed installation has accumulated enough meaningful structured feedback to define useful measures and sample sizes from evidence.
