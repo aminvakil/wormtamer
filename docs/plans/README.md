@@ -2,6 +2,10 @@
 
 Use a plan for substantial work that changes architecture, security boundaries, persistent state, public contracts, or several components. Routine fixes, contained implementation work, and documentation cleanup do not need permanent plan files.
 
+## Proposed
+
+- [Define feedback classification and memory policy](define-feedback-policy.md): resolve outcome, confidence, target-selection, and active-memory rules before further feedback behavior changes.
+
 ## Deferred
 
 - [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md): revisit after a deployed installation has accumulated enough meaningful structured feedback to define useful measures and sample sizes from evidence.
