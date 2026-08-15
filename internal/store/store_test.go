@@ -289,6 +289,38 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 	assertCount(t, storage.db, "publications", 1)
 }
 
+func TestCompletePublicationWithoutLocalReviewResult(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	accepted, err := storage.AcceptEvent(ctx, readyEvent("existing-publication"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job, err := storage.ClaimJob(ctx, "publication-owner", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	if err := storage.CompletePublication(ctx, job.ID, "publication-owner", "<!-- existing -->", 73, now.Add(time.Second)); err != nil {
+		t.Fatalf("CompletePublication() error = %v", err)
+	}
+	var state, marker string
+	var noteID int64
+	if err := storage.db.QueryRow(`
+SELECT j.state, p.marker, p.gitlab_note_id
+FROM review_jobs j
+JOIN publications p ON p.job_id = j.id
+WHERE j.id = ?`, accepted.JobID).Scan(&state, &marker, &noteID); err != nil {
+		t.Fatal(err)
+	}
+	if state != JobCompleted || marker != "<!-- existing -->" || noteID != 73 {
+		t.Fatalf("recovered publication state=%q marker=%q note=%d", state, marker, noteID)
+	}
+	assertCount(t, storage.db, "review_results", 0)
+	assertCount(t, storage.db, "publications", 1)
+}
+
 func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "wormtamer.db")

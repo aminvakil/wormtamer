@@ -232,6 +232,69 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	}
 }
 
+func TestWorkerSkipsReviewForExistingPublication(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+
+	identity := gitlab.Identity{
+		GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		MergeRequestIID: 7, HeadSHA: workerHead,
+	}
+	broker := &fakeGitLab{noteID: 73, postedBody: publicationMarker(identity)}
+	reviewer := &fakeReviewer{err: errors.New("review must not run")}
+	var logs bytes.Buffer
+	worker := newTestWorker(t, storage, broker, reviewer, &logs)
+
+	processed, err := worker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	assertJobState(t, db, store.JobCompleted)
+	assertCount(t, db, "review_results", 0)
+	assertCount(t, db, "publications", 1)
+	if reviewer.calls != 0 || broker.loadCalls != 0 || broker.findCalls != 1 || broker.checkCalls != 1 || broker.postCalls != 0 {
+		t.Fatalf("broker=%+v reviewer calls=%d", broker, reviewer.calls)
+	}
+	var noteID int64
+	if err := db.QueryRow(`SELECT gitlab_note_id FROM publications`).Scan(&noteID); err != nil || noteID != 73 {
+		t.Fatalf("stored note ID = %d, error = %v", noteID, err)
+	}
+	if !strings.Contains(logs.String(), "review generation skipped") || !strings.Contains(logs.String(), "existing_publication") {
+		t.Fatalf("skip log missing: %s", logs.String())
+	}
+}
+
+func TestWorkerRejectsExistingPublicationForObsoleteRevision(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+
+	identity := gitlab.Identity{
+		GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		MergeRequestIID: 7, HeadSHA: workerHead,
+	}
+	broker := &fakeGitLab{
+		noteID: 73, postedBody: publicationMarker(identity),
+		checkError: failure.Obsolete("merge_request_head_changed"),
+	}
+	reviewer := &fakeReviewer{err: errors.New("review must not run")}
+	worker := newTestWorker(t, storage, broker, reviewer, nil)
+
+	processed, err := worker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	assertJobState(t, db, store.JobObsolete)
+	assertCount(t, db, "review_results", 0)
+	assertCount(t, db, "publications", 0)
+	if reviewer.calls != 0 || broker.loadCalls != 0 || broker.findCalls != 1 || broker.checkCalls != 1 || broker.postCalls != 0 {
+		t.Fatalf("broker=%+v reviewer calls=%d", broker, reviewer.calls)
+	}
+}
+
 func TestWorkerReconcilesPostAfterLocalPersistenceFailure(t *testing.T) {
 	storage, db := workerStore(t)
 	defer storage.Close()
@@ -259,7 +322,7 @@ func TestWorkerReconcilesPostAfterLocalPersistenceFailure(t *testing.T) {
 		t.Fatalf("second ProcessOne() = %t, %v", processed, err)
 	}
 	assertJobState(t, db, store.JobCompleted)
-	if broker.postCalls != 1 || reviewer.calls != 1 || broker.findCalls != 2 {
+	if broker.postCalls != 1 || reviewer.calls != 1 || broker.findCalls != 3 {
 		t.Fatalf("reconciled calls: post=%d review=%d find=%d", broker.postCalls, reviewer.calls, broker.findCalls)
 	}
 }

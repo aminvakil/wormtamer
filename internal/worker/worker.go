@@ -285,6 +285,28 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		GitLabInstance: job.GitLabInstance, ProjectID: job.ProjectID,
 		MergeRequestIID: job.MergeRequestIID, HeadSHA: job.HeadSHA,
 	}
+	marker := publicationMarker(identity)
+	if len(job.ValidatedResultJSON) == 0 {
+		noteID, found, err := w.gitlab.FindNote(ctx, identity, marker)
+		if err != nil {
+			return err
+		}
+		if found {
+			if err := w.gitlab.CheckCurrent(ctx, identity); err != nil {
+				return err
+			}
+			if err := w.store.CompletePublication(ctx, job.ID, w.owner, marker, noteID, w.now().UTC()); err != nil {
+				if errors.Is(err, store.ErrLeaseLost) {
+					return err
+				}
+				return failure.Retry("persistence_failed", 0)
+			}
+			w.logger.Info("review generation skipped",
+				append(jobLogFields(job), "outcome", "existing_publication")...)
+			return nil
+		}
+	}
+
 	var result review.Result
 	if len(job.ValidatedResultJSON) == 0 {
 		snapshot, err := w.gitlab.LoadReview(ctx, identity)
@@ -329,7 +351,6 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 	if err := w.gitlab.CheckCurrent(ctx, identity); err != nil {
 		return err
 	}
-	marker := publicationMarker(identity)
 	noteID, found, err := w.gitlab.FindNote(ctx, identity, marker)
 	if err != nil {
 		return err

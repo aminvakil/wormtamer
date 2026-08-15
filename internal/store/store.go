@@ -835,6 +835,8 @@ WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
 	return nil
 }
 
+// CompletePublication checkpoints either a generated result in publishing state or an
+// existing external publication recovered by a running job without a local result.
 func (s *Store) CompletePublication(ctx context.Context, jobID int64, owner, marker string, noteID int64, now time.Time) error {
 	if marker == "" || len(marker) > 256 || noteID <= 0 {
 		return errors.New("invalid publication record")
@@ -857,9 +859,13 @@ ON CONFLICT(job_id) DO UPDATE SET
 UPDATE review_jobs
 SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
     last_error_category = NULL, last_error_message = NULL, updated_at = ?
-WHERE id = ? AND state = ? AND lease_owner = ?
-  AND julianday(lease_expires_at) > julianday(?)`,
-		JobCompleted, formatTime(now), jobID, JobPublishing, owner, formatTime(now))
+WHERE id = ? AND lease_owner = ?
+  AND julianday(lease_expires_at) > julianday(?)
+  AND (
+      (state = ? AND EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id)) OR
+      (state = ? AND NOT EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id))
+  )`,
+		JobCompleted, formatTime(now), jobID, owner, formatTime(now), JobPublishing, JobRunning)
 	if err != nil {
 		return fmt.Errorf("complete published review job: %w", err)
 	}

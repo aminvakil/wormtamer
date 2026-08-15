@@ -229,6 +229,35 @@ func TestFeedbackEventWithoutPublishedReviewIsIgnored(t *testing.T) {
 	assertCount(t, storage.db, "feedback_jobs", 0)
 }
 
+func TestFeedbackIgnoresRecoveredPublicationWithoutReviewResult(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := storage.AcceptEvent(ctx, readyEvent("recovered-review")); err != nil {
+		t.Fatal(err)
+	}
+	job, err := storage.ClaimJob(ctx, "review-owner", now, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	if err := storage.CompletePublication(ctx, job.ID, "review-owner", "<!-- recovered -->", 73, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
+		DeliveryID: "recovered-feedback", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "create", SourceUpdatedAt: now.Add(2 * time.Second),
+	}, now.Add(2*time.Second))
+	if err != nil || result.Outcome != FeedbackOutcomeIgnoredReview || result.JobID != 0 {
+		t.Fatalf("AcceptFeedbackEvent() = %+v, %v", result, err)
+	}
+	assertCount(t, storage.db, "review_results", 0)
+	assertCount(t, storage.db, "publications", 1)
+	assertCount(t, storage.db, "feedback_jobs", 0)
+}
+
 func TestFeedbackBindsLatestPublishedReviewWithoutFallingBackToFindings(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()

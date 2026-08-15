@@ -22,7 +22,7 @@ Reject a missing or invalid webhook secret with `401`, an unlisted project names
 
 ## Feedback Ingestion
 
-An authenticated `Note Hook` create or update for an authorized, non-system, non-internal merge request comment is eligible when that merge request already has a durably published Wormtamer review. In one transaction, insert a delivery-deduplicated feedback event containing only bounded source identifiers and create or update one feedback job per GitLab note. A note's first eligible event binds the job to the exact latest published review; later updates retain that immutable target. Do not persist the note body. An event without a published review is retained as ignored. A newer source update requeues evaluation and immediately deactivates prior derived memory; a stale update is retained as ignored.
+An authenticated `Note Hook` create or update for an authorized, non-system, non-internal merge request comment is eligible when that merge request already has a durably published Wormtamer review backed by its locally validated structured result. An external publication recovered after local state loss is not eligible because Wormtamer cannot safely reconstruct that result from rendered Markdown. In one transaction, insert a delivery-deduplicated feedback event containing only bounded source identifiers and create or update one feedback job per GitLab note. A note's first eligible event binds the job to the exact latest published review; later updates retain that immutable target. Do not persist the note body. An event without an eligible locally backed review is retained as ignored. A newer source update requeues evaluation and immediately deactivates prior derived memory; a stale update is retained as ignored.
 
 Every eligible comment is evaluated, including comments bound to zero-finding reviews and ordinary discussion that may produce no structured decision. Feedback jobs fetch the current note after webhook commit, so processing intentionally evaluates the latest GitLab text rather than preserving comment revisions. Each job has at most five claims, a renewable three-minute lease, and the same retry categories and bounded exponential backoff used by review work. The structured current evaluation and active memory replace prior derived state transactionally. A crash may repeat GitLab reads and Gemini evaluation but cannot create duplicate current memory.
 
@@ -80,7 +80,9 @@ GitLab publication and its local record cannot be committed atomically. The curr
 <!-- wormtamer:review=<review-identity-hash> -->
 ```
 
-Before posting, search the newest notes first, examining at most 1,000 notes across ten pages for the exact marker on a note authored by the PAT's authenticated GitLab user, and fail closed if absence cannot be established. After posting, store the marker and GitLab note ID. On retry, reconcile GitLab and SQLite before creating another note. Limit the rendered note to 64 KiB and complete a job only after the marked note exists and its publication record is durable. Future separate finding discussions require their own stable finding identities.
+For a claimed job without a locally validated result, search the newest notes before loading review evidence or invoking Gemini, examining at most 1,000 notes across ten pages for the exact marker on a note authored by the PAT's authenticated GitLab user. Fail closed if absence cannot be established. When a matching note exists, confirm that the merge request remains open at the exact head SHA, then atomically store its marker and GitLab note ID and complete the job without fabricating or regenerating a structured result. This external-only recovery suppresses duplicate model work and publication but remains ineligible for feedback evaluation.
+
+When no matching note exists, perform the review normally. Before posting, search again to cover an existing publication or a lost response, and reconcile GitLab and SQLite before creating another note. After posting, store the marker and GitLab note ID. Limit the rendered note to 64 KiB and complete a job only after the marked note exists and its publication record is durable. Future separate finding discussions require their own stable finding identities.
 
 ## Reconciliation
 
@@ -97,7 +99,7 @@ SQLite stores the locally validated structured review result before publication 
 - Durable merge request webhook events and processing status
 - Bounded feedback delivery and source identifiers without comment bodies
 - Review and feedback job state, leases, attempts, scheduling, and errors
-- Publication markers and GitLab object IDs
+- Publication markers and GitLab object IDs; a publication may lack a local review result only when recovered from an existing exact marker before generation
 - Application-owned finding identifiers and their ordered positions under validated review results
 - Feedback jobs bound to immutable published reviews, plus current typed review- or finding-target decisions and repository-scoped active memories
 - Versioned identities of memory returned during each successfully checkpointed review, without queries or lesson copies

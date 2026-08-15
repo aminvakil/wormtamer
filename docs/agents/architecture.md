@@ -82,7 +82,7 @@ Validates and durably records merge request webhooks, and records bounded Note H
 
 ### Review worker
 
-Claims jobs with leases, retries recoverable failures, and completes work only after publication is reconciled.
+Claims jobs with leases, retries recoverable failures, and completes work only after publication is reconciled. For a job without a locally validated result, it checks the deterministic GitLab publication marker before loading review evidence or invoking Gemini; an existing current publication completes as external-only recovery without reconstructing structured review data.
 
 ### Review agent
 
@@ -115,7 +115,7 @@ Internal repository tools may list, read, and search these snapshots but cannot 
 
 ### Publication broker
 
-Validates findings, assigns each ordered finding a deterministic application-owned identifier under the immutable review identity, and posts one summary note per review identity using a stable hidden marker. Finding identifiers are persisted with the validated result and rendered for human reference. The broker reconciles an existing marked note before posting, owns GitLab write access, and remains outside repository workspaces.
+Validates findings, assigns each ordered finding a deterministic application-owned identifier under the immutable review identity, and posts one summary note per review identity using a stable hidden marker. Finding identifiers are persisted with the validated result and rendered for human reference. The broker reconciles an existing marked note before review generation and again before posting, owns GitLab write access, and remains outside repository workspaces.
 
 ### Feedback evaluator
 
@@ -135,7 +135,7 @@ SQLite stores webhook, job, publication, and merge request progress records. A r
 
 Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, typed review or finding target, GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
 
-For a successful review, SQLite records each unique memory identity and version returned to Gemini and its retrieval time in the same checkpoint as the validated result. This establishes which memory was exposed, not which memory affected model reasoning. The audit shares the review result's lifetime and stores no query, lesson copy, prompt, tool response, or failed-attempt history.
+For a newly generated successful review, SQLite records each unique memory identity and version returned to Gemini and its retrieval time in the same checkpoint as the validated result. This establishes which memory was exposed, not which memory affected model reasoning. The audit shares the review result's lifetime and stores no query, lesson copy, prompt, tool response, or failed-attempt history. An external-only publication recovered after local state loss stores its marker and GitLab note identity without a fabricated review result or memory audit and is therefore unavailable to feedback evaluation.
 
 Gemini may activate a repository-scoped lesson automatically after assessing the attributed comment and persisted finding context. Active means eligible for future bounded retrieval, not trusted policy: current code and explicit project policy override it. Comment edits replace current derived state. Periodic source checks deactivate memory after comment deletion or an update whose webhook was missed; GitLab emits Note Hooks for creation and updates but not deletion.
 
