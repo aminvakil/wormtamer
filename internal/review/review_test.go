@@ -794,6 +794,7 @@ func TestInvalidModelResultsAreRetryable(t *testing.T) {
 		{name: "line location field", output: `{"summary":"ok","findings":[{"severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"internal/example.go","line":1}]}`},
 		{name: "model-supplied finding ID", output: `{"summary":"ok","findings":[{"id":"WT-F-AAAAAAAAAAAAAAAAAAAAAAAAAA","severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"internal/example.go"}]}`},
 		{name: "sensitive output", output: `{"summary":"application-secret","findings":[]}`, secret: "application-secret"},
+		{name: "sensitive output split by inline code", output: "{\"summary\":\"application`-`secret\",\"findings\":[]}", secret: "application-secret"},
 		{name: "JSON-escaped sensitive output", output: `{"summary":"a\"b","findings":[]}`, secret: `a"b`},
 		{name: "multiple JSON values", output: `{"summary":"ok","findings":[]} {}`},
 	}
@@ -922,7 +923,7 @@ func TestRenderNoteKeepsQuotesReadableInEveryField(t *testing.T) {
 	for _, expected := range []string{
 		`variable 'windows\_public\_ip' to 'windows\_public\_ips' &amp; &lt;summary&gt;`,
 		`high: title's "quote" &amp; &lt;title&gt;`,
-		`Path: dir/path's "quote" &amp; &lt;path&gt;`,
+		"Path: `dir/path's \"quote\" & <path>`",
 		`explanation's "quote" &amp; &lt;explanation&gt;`,
 		`recommendation's "quote" &amp; &lt;recommendation&gt;`,
 	} {
@@ -933,6 +934,70 @@ func TestRenderNoteKeepsQuotesReadableInEveryField(t *testing.T) {
 	for _, broken := range []string{"&#34;", "&#39;", "&#x22;", "&#x27;", "&quot;", "&apos;"} {
 		if strings.Contains(body, broken) {
 			t.Fatalf("rendered note contains escaped quote %q: %s", broken, body)
+		}
+	}
+}
+
+func TestRenderNoteRendersInlineCodeAndStructuredPath(t *testing.T) {
+	result := Result{
+		Summary: "Run `openssl req` with `-subj`.",
+		Findings: []Finding{{
+			ID: testFindingID(1), Severity: "high", Title: "Restore `-subj`",
+			Path: "roles/nginx/tasks/ssl.yml", Explanation: "Run `openssl req -new -subj \"/CN=test\"`.",
+			Recommendation: "Keep `-subj` explicit.",
+		}},
+	}
+	body, err := RenderNote(result, "<!-- marker -->", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"> Run `openssl req` with `-subj`\\.", "high: Restore `-subj`",
+		"Path: `roles/nginx/tasks/ssl.yml`", "> Run `openssl req -new -subj \"/CN=test\"`\\.",
+		"> Keep `-subj` explicit\\.",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("rendered note does not contain %q: %s", expected, body)
+		}
+	}
+}
+
+func TestMarkdownInlineTextAllowsOnlyPairedSingleBackticks(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "Use `code` *now*.", want: "Use `code` \\*now\\*\\."},
+		{input: "`one` and `two`", want: "`one` and `two`"},
+		{input: "```fence```", want: "\\`\\`\\`fence\\`\\`\\`"},
+		{input: "``double``", want: "\\`\\`double\\`\\`"},
+		{input: "``code`", want: "\\`\\`code\\`"},
+		{input: "```code`", want: "\\`\\`\\`code\\`"},
+		{input: "`unclosed", want: "\\`unclosed"},
+		{input: "`[inert](https://example.invalid)`", want: "`[inert](https://example.invalid)`"},
+	}
+	for _, test := range tests {
+		if got := markdownInlineText(test.input); got != test.want {
+			t.Errorf("markdownInlineText(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
+func TestWriteCodeSpanUsesNonconflictingDelimiter(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{value: "plain", want: "`plain`"},
+		{value: "dir/`name`", want: "`` dir/`name` ``"},
+		{value: " dir ", want: "`  dir  `"},
+		{value: "   ", want: "`   `"},
+	}
+	for _, test := range tests {
+		var body strings.Builder
+		writeCodeSpan(&body, test.value)
+		if got := body.String(); got != test.want {
+			t.Errorf("writeCodeSpan(%q) = %q, want %q", test.value, got, test.want)
 		}
 	}
 }
@@ -952,7 +1017,7 @@ func TestRenderNoteNeutralizesUntrustedMarkdownAndHTML(t *testing.T) {
 	for _, expected := range []string{
 		"@\u200bteam", `&lt;script&gt;alert\("x"\)&lt;/script&gt;`, `&amp;lt;b&amp;gt;`,
 		`> \# heading`, `> &gt; quote`, `> \- list`, `\*emphasis\* \*\*strong\*\*`,
-		`Path: a\*b\.go`, "> \\`code\\`", `\[click\]\(https://example\.invalid\)`, `> /assign root`,
+		"Path: `a*b.go`", "> `code`", `\[click\]\(https://example\.invalid\)`, `> /assign root`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("rendered note does not contain inert text %q: %s", expected, body)
@@ -983,7 +1048,22 @@ func TestRenderNoteRejectsInvalidFindingIdentifiers(t *testing.T) {
 }
 
 func TestRenderNoteRejectsKnownSecret(t *testing.T) {
-	_, err := RenderNote(Result{Summary: "contains secret-value"}, "<!-- marker -->", []string{"secret-value"})
+	for _, summary := range []string{"contains secret-value", "contains secret`-`value"} {
+		_, err := RenderNote(Result{Summary: summary}, "<!-- marker -->", []string{"secret-value"})
+		var failureError *failure.Error
+		if !errors.As(err, &failureError) || failureError.Category != "sensitive_model_output" {
+			t.Fatalf("RenderNote() with summary %q error = %v", summary, err)
+		}
+	}
+	if _, err := RenderNote(Result{Summary: "contains secret``-``value"}, "<!-- marker -->", []string{"secret-value"}); err != nil {
+		t.Fatalf("RenderNote() rejected visible backtick text: %v", err)
+	}
+}
+
+func TestRenderNoteRejectsKnownSecretAddedByRenderer(t *testing.T) {
+	finding := boundedFinding("file.go", "title")
+	finding.ID = testFindingID(1)
+	_, err := RenderNote(Result{Summary: "ok", Findings: []Finding{finding}}, "<!-- marker -->", []string{"`file.go`"})
 	var failureError *failure.Error
 	if !errors.As(err, &failureError) || failureError.Category != "sensitive_model_output" {
 		t.Fatalf("RenderNote() error = %v", err)

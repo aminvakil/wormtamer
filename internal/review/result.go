@@ -162,11 +162,11 @@ func RenderNote(result Result, marker string, forbidden []string) (string, error
 			body.WriteString(". ")
 			body.WriteString(markdownText(finding.Severity))
 			body.WriteString(": ")
-			body.WriteString(markdownText(finding.Title))
+			body.WriteString(markdownInlineText(finding.Title))
 			body.WriteString("** · Finding ID: `")
 			body.WriteString(finding.ID)
 			body.WriteString("`\n\nPath: ")
-			body.WriteString(markdownText(finding.Path))
+			writeCodeSpan(&body, finding.Path)
 			body.WriteString("\n\nExplanation:\n")
 			writeBlockquote(&body, finding.Explanation)
 			body.WriteString("\n\nRecommendation:\n")
@@ -176,10 +176,14 @@ func RenderNote(result Result, marker string, forbidden []string) (string, error
 	}
 	body.WriteString("\n")
 	body.WriteString(marker)
-	if body.Len() > maxRenderedNoteBytes {
+	rendered := body.String()
+	if containsForbiddenText(rendered, forbidden) {
+		return "", failure.Failed("sensitive_model_output")
+	}
+	if len(rendered) > maxRenderedNoteBytes {
 		return "", failure.Failed("note_body_limit_exceeded")
 	}
-	return body.String(), nil
+	return rendered, nil
 }
 
 func containsForbidden(result Result, forbidden []string) bool {
@@ -187,14 +191,18 @@ func containsForbidden(result Result, forbidden []string) bool {
 	for _, finding := range result.Findings {
 		values = append(values, finding.Severity, finding.Title, finding.Explanation, finding.Recommendation, finding.Path)
 	}
-	for _, secret := range forbidden {
-		if secret == "" {
-			continue
+	for _, value := range values {
+		if containsForbiddenText(value, forbidden) || containsForbiddenText(inlineCodeVisibleText(value), forbidden) {
+			return true
 		}
-		for _, value := range values {
-			if strings.Contains(value, secret) {
-				return true
-			}
+	}
+	return false
+}
+
+func containsForbiddenText(value string, forbidden []string) bool {
+	for _, secret := range forbidden {
+		if secret != "" && strings.Contains(value, secret) {
+			return true
 		}
 	}
 	return false
@@ -222,8 +230,101 @@ func writeBlockquote(body *strings.Builder, value string) {
 			body.WriteByte('\n')
 		}
 		body.WriteString("> ")
-		body.WriteString(markdownText(line))
+		body.WriteString(markdownInlineText(line))
 	}
+}
+
+func markdownInlineText(value string) string {
+	var rendered strings.Builder
+	walkInlineCode(value,
+		func(text string) { rendered.WriteString(markdownText(text)) },
+		func(code string) { writeCodeSpan(&rendered, code) },
+	)
+	return rendered.String()
+}
+
+func inlineCodeVisibleText(value string) string {
+	var visible strings.Builder
+	for index, line := range strings.Split(value, "\n") {
+		if index > 0 {
+			visible.WriteByte('\n')
+		}
+		walkInlineCode(line,
+			func(text string) { visible.WriteString(text) },
+			func(code string) { visible.WriteString(code) },
+		)
+	}
+	return visible.String()
+}
+
+func walkInlineCode(value string, writeText, writeCode func(string)) {
+	for len(value) > 0 {
+		opening := strings.IndexByte(value, '`')
+		if opening < 0 {
+			writeText(value)
+			return
+		}
+		if !isolatedBacktick(value, opening) {
+			runEnd := backtickRunEnd(value, opening)
+			writeText(value[:runEnd])
+			value = value[runEnd:]
+			continue
+		}
+		closingOffset := strings.IndexByte(value[opening+1:], '`')
+		if closingOffset < 0 {
+			writeText(value)
+			return
+		}
+		closing := opening + 1 + closingOffset
+		if !isolatedBacktick(value, closing) {
+			runEnd := backtickRunEnd(value, closing)
+			writeText(value[:runEnd])
+			value = value[runEnd:]
+			continue
+		}
+		writeText(value[:opening])
+		writeCode(value[opening+1 : closing])
+		value = value[closing+1:]
+	}
+}
+
+func isolatedBacktick(value string, index int) bool {
+	return (index == 0 || value[index-1] != '`') &&
+		(index == len(value)-1 || value[index+1] != '`')
+}
+
+func backtickRunEnd(value string, index int) int {
+	for index < len(value) && value[index] == '`' {
+		index++
+	}
+	return index
+}
+
+func writeCodeSpan(body *strings.Builder, value string) {
+	longestRun := 0
+	currentRun := 0
+	for _, character := range value {
+		if character == '`' {
+			currentRun++
+			if currentRun > longestRun {
+				longestRun = currentRun
+			}
+			continue
+		}
+		currentRun = 0
+	}
+	delimiter := strings.Repeat("`", longestRun+1)
+	body.WriteString(delimiter)
+	if strings.Trim(value, " ") != "" &&
+		(strings.HasPrefix(value, " ") || strings.HasSuffix(value, " ") ||
+			strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`")) {
+		body.WriteByte(' ')
+		body.WriteString(value)
+		body.WriteByte(' ')
+	} else {
+		body.WriteString(value)
+	}
+	body.WriteString(delimiter)
 }
 
 func markdownText(value string) string {
