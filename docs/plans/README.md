@@ -4,6 +4,8 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 ## Proposed
 
+- [Finalize reviews after tool budgets are exhausted](finalize-after-tool-budget.md): dynamically remove exhausted tools and preserve collected evidence through a forced final response instead of restarting the review.
+- [Batch independent review tool calls](batch-independent-review-tools.md): reduce model round trips by requesting independent bounded tools together while keeping dependent exploration sequential.
 - [Define feedback classification and memory policy](define-feedback-policy.md): resolve outcome, confidence, target-selection, and active-memory rules before further feedback behavior changes.
 
 ## Deferred
