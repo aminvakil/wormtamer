@@ -1,0 +1,13 @@
+services:
+  wormtamer:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 20s
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.json:/etc/wormtamer/config.json:ro
+      - wormtamer-data:/var/lib/wormtamer
+
+volumes:
+  wormtamer-data:
