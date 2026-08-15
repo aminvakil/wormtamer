@@ -232,17 +232,24 @@ func TestLoadUsesCanonicalGitLabURL(t *testing.T) {
 }
 
 func TestLoadDetectsBroadReadPermission(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(validConfiguration), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o644} {
+		t.Run(mode.String(), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(validConfiguration), mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.ConfigFileBroadlyRead {
-		t.Fatal("ConfigFileBroadlyRead = false for a 0644 file")
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if !cfg.ConfigFileBroadlyRead {
+				t.Fatalf("ConfigFileBroadlyRead = false for a %#o file", mode)
+			}
+		})
 	}
 }
 

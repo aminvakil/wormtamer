@@ -84,7 +84,10 @@ func Load(path string) (Config, error) {
 		cfg.DatabasePath = filepath.Join(filepath.Dir(absolutePath), cfg.DatabasePath)
 	}
 	cfg.DatabasePath = filepath.Clean(cfg.DatabasePath)
-	cfg.ConfigFileBroadlyRead = info.Mode().Perm()&0o044 != 0
+	cfg.ConfigFileBroadlyRead, err = configFileBroadlyRead(file, info)
+	if err != nil {
+		return Config{}, fmt.Errorf("inspect configuration permissions: %w", err)
+	}
 	return cfg, nil
 }
 
