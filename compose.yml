@@ -1,6 +1,6 @@
 services:
   wormtamer:
-    build: .
+    image: ghcr.io/aminvakil/wormtamer:latest
     restart: unless-stopped
     stop_grace_period: 20s
     ports:
