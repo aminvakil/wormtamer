@@ -1,6 +1,6 @@
 # The simplest self-hosted AI reviewer for GitLab
 
-**Wormtamer** reviews GitLab merge requests with Gemini and publishes one concise summary with actionable findings. It runs as a single Go process, stores its state in SQLite, and needs no external database, queue, or agent framework.
+**Wormtamer** reviews GitLab merge requests with Gemini and publishes one concise summary with prioritized, actionable findings. It runs as a single Go process, stores its state in SQLite, and needs no external database, queue, or agent framework.
 
 > **Development status:** Wormtamer is under active development. Behavior, configuration, and persisted state may change between releases, including breaking changes.
 

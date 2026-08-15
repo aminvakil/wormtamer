@@ -198,7 +198,7 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	reviewer := &fakeReviewer{result: review.Result{
 		Summary: "Looks mostly good.",
 		Findings: []review.Finding{{
-			Severity: "medium", Title: "Check error", Explanation: "An error is ignored.",
+			Priority: "P2", Title: "Check error", Explanation: "An error is ignored.",
 			Recommendation: "Handle the error.", Path: "main.go",
 		}},
 	}}
@@ -537,7 +537,7 @@ func prepareActiveMemoryForWorker(t *testing.T, storage *store.Store, now time.T
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	findingID := "WT-F-" + strings.Repeat("A", 26)
-	result := []byte(`{"summary":"source","findings":[{"severity":"medium","title":"title","explanation":"why","recommendation":"fix","path":"main.go"}]}`)
+	result := []byte(`{"summary":"source","findings":[{"priority":"P2","title":"title","explanation":"why","recommendation":"fix","path":"main.go"}]}`)
 	if err := storage.SaveReviewResult(ctx, job.ID, "memory-source-review", result, []string{findingID}, nil, now); err != nil {
 		t.Fatal(err)
 	}

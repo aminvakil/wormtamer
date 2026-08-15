@@ -30,7 +30,7 @@ type Result struct {
 
 type Finding struct {
 	ID             string `json:"-"`
-	Severity       string `json:"severity"`
+	Priority       string `json:"priority"`
 	Title          string `json:"title"`
 	Explanation    string `json:"explanation"`
 	Recommendation string `json:"recommendation"`
@@ -111,14 +111,17 @@ func validateResult(result *Result, changedPaths map[string]struct{}) error {
 	}
 	for index := range result.Findings {
 		finding := &result.Findings[index]
-		finding.Severity = strings.TrimSpace(finding.Severity)
+		finding.Priority = strings.TrimSpace(finding.Priority)
 		finding.Title = strings.TrimSpace(finding.Title)
 		finding.Explanation = strings.TrimSpace(finding.Explanation)
 		finding.Recommendation = strings.TrimSpace(finding.Recommendation)
 		finding.Path = strings.TrimSpace(finding.Path)
-		switch finding.Severity {
-		case "low", "medium", "high", "critical":
+		switch finding.Priority {
+		case "P0", "P1", "P2", "P3":
 		default:
+			return failure.Retry("invalid_model_output", 0)
+		}
+		if index > 0 && finding.Priority < result.Findings[index-1].Priority {
 			return failure.Retry("invalid_model_output", 0)
 		}
 		if !validText(finding.Title, maxTitleCharacters, false) ||
@@ -160,7 +163,7 @@ func RenderNote(result Result, marker string, forbidden []string) (string, error
 			body.WriteString("\n**")
 			body.WriteString(strconv.Itoa(index + 1))
 			body.WriteString(". ")
-			body.WriteString(markdownText(finding.Severity))
+			body.WriteString(markdownText(finding.Priority))
 			body.WriteString(": ")
 			body.WriteString(markdownInlineText(finding.Title))
 			body.WriteString("** · Finding ID: `")
@@ -189,7 +192,7 @@ func RenderNote(result Result, marker string, forbidden []string) (string, error
 func containsForbidden(result Result, forbidden []string) bool {
 	values := []string{result.Summary}
 	for _, finding := range result.Findings {
-		values = append(values, finding.Severity, finding.Title, finding.Explanation, finding.Recommendation, finding.Path)
+		values = append(values, finding.Priority, finding.Title, finding.Explanation, finding.Recommendation, finding.Path)
 	}
 	for _, value := range values {
 		if containsForbiddenText(value, forbidden) || containsForbiddenText(inlineCodeVisibleText(value), forbidden) {

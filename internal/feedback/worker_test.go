@@ -236,7 +236,7 @@ func prepareReviewFinding(t *testing.T, storage *store.Store, now time.Time) str
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	findingID := "WT-F-" + strings.Repeat("A", 26)
-	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
+	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
 	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", result, []string{findingID}, nil, now); err != nil {
 		t.Fatal(err)
 	}

@@ -105,7 +105,7 @@ func activateReviewMemory(t *testing.T, storage *Store, fixture memoryFixture, n
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
+	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
 	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, []string{fixture.findingID}, nil, now); err != nil {
 		t.Fatal(err)
 	}

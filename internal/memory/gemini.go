@@ -243,7 +243,7 @@ func validateInput(input Input, forbidden []string) error {
 		if !review.ValidFindingID(finding.TargetID) {
 			return failure.Failed("feedback_input_invalid")
 		}
-		values = append(values, finding.TargetID, finding.Severity, finding.Title, finding.Explanation, finding.Recommendation, finding.Path)
+		values = append(values, finding.TargetID, finding.Priority, finding.Title, finding.Explanation, finding.Recommendation, finding.Path)
 	}
 	if containsForbidden(values, forbidden) {
 		return failure.Failed("sensitive_feedback_input")

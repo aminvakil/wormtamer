@@ -211,7 +211,7 @@ func testInput(findingID string) Input {
 		Findings: []Finding{{
 			TargetID: findingID,
 			Finding: review.Finding{
-				Severity: "medium", Title: "Generated file edited", Explanation: "The generated output changed.",
+				Priority: "P2", Title: "Generated file edited", Explanation: "The generated output changed.",
 				Recommendation: "Edit the source generator.", Path: "generated.go",
 			},
 		}},

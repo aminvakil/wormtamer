@@ -304,7 +304,7 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	resultJSON := []byte(`{"summary":"ok","findings":[{"severity":"high","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
+	resultJSON := []byte(`{"summary":"ok","findings":[{"priority":"P1","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
 	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
 	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, nil, now); err != nil {
 		t.Fatal(err)

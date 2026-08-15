@@ -248,7 +248,7 @@ func TestFeedbackBindsLatestPublishedReviewWithoutFallingBackToFindings(t *testi
 	}
 	newerFindingID := "WT-F-" + strings.Repeat("B", 26)
 	preparePublishedReview(t, storage, now.Add(30*time.Second), "newer-review", strings.Repeat("c", 40),
-		[]byte(`{"summary":"A newer review.","findings":[{"severity":"medium","title":"newer","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`), []string{newerFindingID})
+		[]byte(`{"summary":"A newer review.","findings":[{"priority":"P2","title":"newer","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`), []string{newerFindingID})
 	updated, err := storage.AcceptFeedbackEvent(context.Background(), FeedbackEvent{
 		DeliveryID: "natural-feedback-update", GitLabInstance: "http://gitlab.internal",
 		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
@@ -266,7 +266,7 @@ func TestFeedbackBindsLatestPublishedReviewWithoutFallingBackToFindings(t *testi
 func prepareFinding(t *testing.T, storage *Store, now time.Time) string {
 	t.Helper()
 	findingID := "WT-F-" + strings.Repeat("A", 26)
-	result := []byte(`{"summary":"summary","findings":[{"severity":"medium","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
+	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
 	preparePublishedReview(t, storage, now, "review-event", readyEvent("review-event").HeadSHA, result, []string{findingID})
 	return findingID
 }
