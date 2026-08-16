@@ -14,6 +14,7 @@
 - Lets Gemini retrieve bounded public text from approved domains and exact configured GitHub repositories
 - Validates model output before posting one idempotent review note for each merge request revision
 - Persists webhook, job, result, publication, feedback, and advisory-memory state in SQLite
+- Shows persisted review, feedback, and runtime-memory state in a built-in read-only web panel
 
 Wormtamer supports GitLab 17 and newer. Each deployment serves one team and runs as one process and one replica.
 
@@ -62,6 +63,10 @@ Configure each authorized GitLab project to send both merge request and comment 
     https://wormtamer.example/webhooks/gitlab
 
 Comment events let Wormtamer evaluate eligible new and edited merge request comments against published findings and retain concise advisory lessons for later reviews of the same repository.
+
+### 5. View the panel
+
+Open `https://wormtamer.example/` to inspect persisted review activity, findings, feedback processing, runtime memory, and non-secret effective configuration. The panel is read-only and does not probe external services while rendering. Panel access and request limiting are deployment concerns described in [Container deployment](docs/deployment.md).
 
 See [Container deployment](docs/deployment.md) for complete configuration, webhook, permissions, TLS termination, health checking, shutdown, persistence, backup, and restore guidance.
 

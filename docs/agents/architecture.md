@@ -64,7 +64,7 @@ Authorization by path intentionally fails after a project rename until configura
 
 `public_sources.allowed_domains` must include `github.com`; each canonical entry authorizes that domain and dot-boundary subdomains for bounded direct HTTPS retrieval. `public_sources.github_repositories` contains exact `<owner>/<repository>` slugs and authorizes snapshot tools only for those repositories. These installation-wide lists are disclosed to every review. Public GitHub access is unauthenticated.
 
-Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. Operational job visibility is through bounded logs and the local failed-job commands described in [Reliability](reliability.md#jobs-and-retries), not a status or administration HTTP API.
+Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. The same listener serves the [read-only web panel](#read-only-web-panel). Failed-job mutation remains limited to the local commands described in [Reliability](reliability.md#jobs-and-retries).
 
 ## Components
 
@@ -74,6 +74,7 @@ GitLab -> webhook ingress -> SQLite review jobs -> review worker -> review agent
                          |                            -> publication broker -> GitLab
                          +-> SQLite feedback jobs -> feedback evaluator -> runtime memory
 Periodic reconciler -----+
+Read-only web panel ---------------------------------------> SQLite
 ```
 
 ### Webhook ingress
@@ -126,6 +127,12 @@ Comments, summaries, findings, and active memory remain untrusted evidence. Main
 ### Reconciler
 
 The GitLab integration supports GitLab 17 and newer. The reconciler scans each authorized project immediately after startup and five minutes after each completed cycle. It lists bounded pages of open merge requests, skips drafts and work-in-progress entries as observed, and idempotently enqueues missing review identities. Scans have no durable cursor or schedule; restart repeats the scan safely.
+
+### Read-only web panel
+
+The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, and `GET /memory`. It shows committed review and feedback job state, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, and an explicit non-secret configuration summary. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
+
+Panel handlers query SQLite through fixed-size cursor pagination and do not make GitLab, Gemini, repository, or public-source requests. They expose no state-changing methods and cannot retry work, create reviews, or edit configuration or memory. The panel does not require presentation-only persistent state. Panel access and traffic controls deliberately remain at the deployment boundary described in [Security](security.md#read-only-web-panel).
 
 ## Context and State
 

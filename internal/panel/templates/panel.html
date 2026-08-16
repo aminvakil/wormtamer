@@ -1,0 +1,146 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wormtamer panel</title>
+  <link rel="stylesheet" href="/assets/panel.css">
+</head>
+<body>
+<header class="site-header">
+  <a class="brand" href="/">Wormtamer</a>
+  <nav aria-label="Panel navigation">
+    <a class="nav-link {{if eq .Page "overview"}}current{{end}}" href="/">Overview</a>
+    <a class="nav-link {{if eq .Page "reviews"}}current{{end}}" href="/reviews">Reviews</a>
+    <a class="nav-link {{if eq .Page "feedback"}}current{{end}}" href="/feedback">Feedback</a>
+    <a class="nav-link {{if eq .Page "memory"}}current{{end}}" href="/memory">Memory</a>
+  </nav>
+</header>
+<main>{{end}}
+
+{{define "foot"}}</main>
+<footer>Durable local state · read-only view</footer>
+</body>
+</html>{{end}}
+
+{{define "state-cards"}}<div class="state-grid">
+  {{range .}}<div class="state-card" data-state="{{.State}}">
+    <span class="state-name">{{.State}}</span>
+    <strong>{{.Count}}</strong>
+  </div>{{end}}
+</div>{{end}}
+
+{{define "review-table"}}<div class="table-wrap">
+<table>
+  <thead><tr><th>Review</th><th>Project / MR</th><th>State</th><th>Source</th><th>Attempts</th><th>Findings</th><th>Publication</th><th>Failure</th><th>Timeline</th></tr></thead>
+  <tbody>{{range .}}
+    <tr>
+      <td><a href="/reviews/{{.Record.ID}}">#{{.Record.ID}}</a><br><code>{{shortSHA .Record.HeadSHA}}</code></td>
+      <td><span class="primary">{{.Project}}</span><br>{{if .MergeRequestURL}}<a href="{{.MergeRequestURL}}">MR !{{.Record.MergeRequestIID}}</a>{{else}}MR !{{.Record.MergeRequestIID}}{{end}}</td>
+      <td><span class="status" data-state="{{.Record.State}}">{{.Record.State}}</span></td>
+      <td>{{.Record.Source}}</td>
+      <td>{{.Record.AttemptCount}}</td>
+      <td>{{.Record.FindingCount}}</td>
+      <td>{{if .Record.Published}}published{{if .Record.ExternalOnly}}<br><span class="muted">external-only</span>{{end}}{{else}}<span class="muted">not published</span>{{end}}</td>
+      <td>{{if .Record.LastErrorCategory}}<code>{{.Record.LastErrorCategory}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+      <td><span class="muted">Created</span><br>{{formatTime .Record.CreatedAt}}<br><span class="muted">Updated</span><br>{{formatOptionalTime .Record.UpdatedAt}}</td>
+    </tr>
+  {{else}}<tr><td colspan="9" class="empty">No reviews found.</td></tr>{{end}}</tbody>
+</table>
+</div>{{end}}
+
+{{define "feedback-table"}}<div class="table-wrap">
+<table>
+  <thead><tr><th>Feedback</th><th>Project / MR</th><th>Note</th><th>State</th><th>Attempts</th><th>Decisions</th><th>Active lessons</th><th>Failure</th><th>Timeline</th></tr></thead>
+  <tbody>{{range .}}
+    <tr>
+      <td>#{{.Record.ID}}{{if .Record.ReviewJobID}}<br><a href="/reviews/{{.Record.ReviewJobID}}">Review #{{.Record.ReviewJobID}}</a>{{end}}{{if .Record.ReviewID}}<br><code>{{.Record.ReviewID}}</code>{{end}}</td>
+      <td><span class="primary">{{.Project}}</span><br>{{if .MergeRequestURL}}<a href="{{.MergeRequestURL}}">MR !{{.Record.MergeRequestIID}}</a>{{else}}MR !{{.Record.MergeRequestIID}}{{end}}</td>
+      <td>#{{.Record.NoteID}}</td>
+      <td><span class="status" data-state="{{.Record.State}}">{{.Record.State}}</span></td>
+      <td>{{.Record.AttemptCount}}</td>
+      <td>{{.Record.DecisionCount}}</td>
+      <td>{{.Record.ActiveLessonCount}}</td>
+      <td>{{if .Record.LastErrorCategory}}<code>{{.Record.LastErrorCategory}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+      <td><span class="muted">Received</span><br>{{formatTime .Record.ReceivedAt}}<br><span class="muted">Updated</span><br>{{formatTime .Record.UpdatedAt}}</td>
+    </tr>
+  {{else}}<tr><td colspan="9" class="empty">No feedback jobs found.</td></tr>{{end}}</tbody>
+</table>
+</div>{{end}}
+
+{{define "overview"}}{{template "head" .}}
+<section class="hero">
+  <div><p class="eyebrow">Installation overview</p><h1>Review activity</h1></div>
+  <div class="memory-total"><span>Active lessons</span><strong>{{.ActiveMemories}}</strong></div>
+</section>
+
+<section><div class="section-heading"><h2>Review jobs</h2><span>Oldest queued: {{formatOptionalTime .OldestReview}}</span></div>{{template "state-cards" .ReviewStates}}</section>
+<section><div class="section-heading"><h2>Feedback jobs</h2><span>Oldest queued: {{formatOptionalTime .OldestFeedback}}</span></div>{{template "state-cards" .FeedbackStates}}</section>
+
+<section><div class="section-heading"><h2>Recent reviews</h2><a href="/reviews">View all</a></div>{{template "review-table" .RecentReviews}}</section>
+<section><div class="section-heading"><h2>Recent feedback</h2><a href="/feedback">View all</a></div>{{template "feedback-table" .RecentFeedback}}</section>
+
+<section>
+  <div class="section-heading"><h2>Effective configuration</h2><span>Non-secret fields</span></div>
+  <div class="config-grid">
+    <article class="panel-card"><h3>Services</h3><dl>
+      <dt>GitLab</dt><dd>{{.Config.GitLabBaseURL}}</dd>
+      <dt>Gemini endpoint</dt><dd>{{.Config.GeminiEndpoint}}</dd>
+      <dt>Model</dt><dd>{{.Config.GeminiModel}}</dd>
+      <dt>Thinking level</dt><dd>{{.Config.GeminiThinkingLevel}}</dd>
+      <dt>Log level</dt><dd>{{.Config.LogLevel}}</dd>
+    </dl></article>
+    <article class="panel-card"><h3>Authorized repositories</h3><ul class="plain-list">{{range .Config.AuthorizedRepositories}}<li><code>{{.}}</code></li>{{else}}<li class="muted">None</li>{{end}}</ul></article>
+    <article class="panel-card"><h3>Repository sharing</h3><p>{{.Config.SharingMode}}</p>
+      {{range .Config.RepositorySharing}}<div class="sharing-rule"><code>{{.Repository}}</code><span>may inspect</span>{{range .Related}}<code>{{.}}</code>{{end}}</div>{{else}}{{if eq .Config.SharingMode "Directional rules"}}<p class="muted">No cross-repository rules.</p>{{end}}{{end}}
+    </article>
+    <article class="panel-card"><h3>Public sources</h3><h4>Domains</h4><ul class="plain-list">{{range .Config.AllowedPublicDomains}}<li><code>{{.}}</code></li>{{end}}</ul><h4>GitHub repositories</h4><ul class="plain-list">{{range .Config.PublicGitHubRepositories}}<li><code>{{.}}</code></li>{{else}}<li class="muted">None</li>{{end}}</ul></article>
+  </div>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "reviews"}}{{template "head" .}}
+<section class="hero compact"><div><p class="eyebrow">Durable history</p><h1>Reviews</h1></div></section>
+<nav class="filters" aria-label="Review state filters">{{range .StateLinks}}<a class="filter {{if .Current}}current{{end}}" href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
+{{template "review-table" .Records}}
+{{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older reviews →</a></div>{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "review-detail"}}{{template "head" .}}
+<section class="hero compact">
+  <div><p class="eyebrow">Review #{{.Detail.ID}}</p><h1>{{.Project}} · MR !{{.Detail.MergeRequestIID}}</h1><p><code>{{.Detail.HeadSHA}}</code></p></div>
+  <div>{{if .MergeRequestURL}}<a class="button" href="{{.MergeRequestURL}}">Open merge request</a>{{end}}</div>
+</section>
+<div class="detail-grid">
+  <article class="panel-card"><h2>Identity</h2><dl>
+    <dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd><dt>Source</dt><dd>{{.Detail.Source}}</dd><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd>{{.Detail.AttemptCount}}</dd>
+  </dl></article>
+  <article class="panel-card"><h2>Timeline</h2><dl><dt>Created</dt><dd>{{formatTime .Detail.CreatedAt}}</dd><dt>Started</dt><dd>{{formatOptionalTime .Detail.StartedAt}}</dd><dt>Updated</dt><dd>{{formatOptionalTime .Detail.UpdatedAt}}</dd></dl></article>
+  <article class="panel-card"><h2>Publication</h2>{{if .Detail.Published}}<p>Published as GitLab note #{{.Detail.GitLabNoteID}}.</p>{{if .PublicationURL}}<p><a href="{{.PublicationURL}}">Open published note</a></p>{{end}}{{else}}<p class="muted">No durable publication record.</p>{{end}}{{if .Detail.ExternalOnly}}<p class="notice">External-only recovery from an existing publication. No local structured result is available.</p>{{end}}</article>
+  <article class="panel-card"><h2>Failure</h2>{{if .Detail.LastErrorCategory}}<code>{{.Detail.LastErrorCategory}}</code>{{else}}<p class="muted">No failure category.</p>{{end}}</article>
+</div>
+
+{{if .Detail.Result}}<section><div class="section-heading"><h2>Summary</h2><span>{{len .Detail.Result.Findings}} findings</span></div><div class="narrative">{{.Detail.Result.Summary}}</div></section>
+<section><h2>Findings</h2><div class="finding-list">{{range .Detail.Result.Findings}}<article class="finding" data-priority="{{.Priority}}"><div class="finding-heading"><span class="priority">{{.Priority}}</span><h3>{{.Title}}</h3></div><p><code>{{.ID}}</code></p><dl><dt>Path</dt><dd><code>{{.Path}}</code></dd><dt>Explanation</dt><dd class="narrative">{{.Explanation}}</dd><dt>Recommendation</dt><dd class="narrative">{{.Recommendation}}</dd></dl></article>{{else}}<p class="empty">No actionable findings.</p>{{end}}</div></section>{{else if not .Detail.ExternalOnly}}<section><p class="empty">No locally validated result has been checkpointed.</p></section>{{end}}
+
+<section><div class="section-heading"><h2>Retrieved memory</h2><span>{{len .Detail.Retrievals}} records</span></div><div class="table-wrap"><table><thead><tr><th>Memory ID</th><th>Memory version</th><th>Retrieved</th></tr></thead><tbody>{{range .Detail.Retrievals}}<tr><td><code>{{.MemoryID}}</code></td><td>{{formatTime .MemoryUpdatedAt}}</td><td>{{formatTime .RetrievedAt}}</td></tr>{{else}}<tr><td colspan="3" class="empty">No memory retrievals recorded.</td></tr>{{end}}</tbody></table></div></section>
+{{template "foot" .}}{{end}}
+
+{{define "feedback"}}{{template "head" .}}
+<section class="hero compact"><div><p class="eyebrow">Comment evaluation</p><h1>Feedback jobs</h1></div></section>
+<nav class="filters" aria-label="Feedback state filters">{{range .StateLinks}}<a class="filter {{if .Current}}current{{end}}" href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
+{{template "feedback-table" .Records}}
+{{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older feedback →</a></div>{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "memory"}}{{template "head" .}}
+<section class="hero compact"><div><p class="eyebrow">Feedback-derived guidance</p><h1>Runtime memory</h1></div></section>
+<nav class="filters" aria-label="Memory state filters">{{range .FilterLinks}}<a class="filter {{if .Current}}current{{end}}" href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
+<div class="memory-list">{{range .Records}}<article class="memory-card">
+  <div class="memory-heading"><div><span class="status" data-state="{{if .Record.Active}}active{{else}}inactive{{end}}">{{if .Record.Active}}active{{else}}inactive{{end}}</span><h2>{{.Project}} · MR !{{.Record.MergeRequestIID}}</h2></div><code>{{.Record.MemoryID}}</code></div>
+  <div class="memory-meta"><span>{{.Record.TargetType}} <code>{{.Record.TargetID}}</code></span><span>{{.Record.Outcome}}</span><span>{{.Record.Confidence}} confidence</span><span>{{.Record.SourceRole}}</span><span>Updated {{formatTime .Record.UpdatedAt}}</span></div>
+  {{if .Record.Lesson}}<div class="narrative lesson">{{.Record.Lesson}}</div>{{else}}<p class="muted">This decision has no reusable lesson.</p>{{end}}
+  <p class="source">Source note #{{.Record.NoteID}}: {{if .SourceLink}}<a href="{{.SourceLink}}">{{.Record.SourceURL}}</a>{{else}}{{.Record.SourceURL}}{{end}}</p>
+</article>{{else}}<p class="empty">No memory records found.</p>{{end}}</div>
+{{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older memory →</a></div>{{end}}
+{{template "foot" .}}{{end}}

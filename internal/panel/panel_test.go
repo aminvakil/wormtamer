@@ -1,0 +1,316 @@
+package panel
+
+import (
+	"context"
+	"errors"
+	"html/template"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aminvakil/wormtamer/internal/review"
+	"github.com/aminvakil/wormtamer/internal/store"
+)
+
+func TestTimeFormattersRejectUnsupportedTemplateValues(t *testing.T) {
+	if formatTime(time.Time{}) != "—" || formatOptionalTime(nil) != "—" {
+		t.Fatal("zero or absent time did not render as missing")
+	}
+	for name, source := range map[string]string{
+		"required": `{{formatTime .}}`,
+		"optional": `{{formatOptionalTime .}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			view, err := template.New("time").Funcs(template.FuncMap{
+				"formatTime":         formatTime,
+				"formatOptionalTime": formatOptionalTime,
+			}).Parse(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := view.Execute(io.Discard, "not-a-time"); err == nil {
+				t.Fatal("template accepted an unsupported timestamp type")
+			}
+		})
+	}
+}
+
+func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	storage := &fakeStore{dashboard: store.Dashboard{
+		ReviewCounts:       []store.StateCount{{State: store.JobQueued, Count: 2}},
+		FeedbackCounts:     []store.StateCount{{State: store.FeedbackFailed, Count: 1}},
+		OldestQueuedReview: &now, ActiveMemoryCount: 3,
+		RecentReviews: []store.ReviewRecord{{
+			ID: 9, ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+			HeadSHA: strings.Repeat("a", 40), State: store.JobQueued, Source: "webhook", CreatedAt: now,
+		}},
+	}}
+	handler := newTestHandler(t, storage)
+	response := request(t, handler, http.MethodGet, "/")
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "Review activity") ||
+		!strings.Contains(body, ">2</strong>") || !strings.Contains(body, "group/project") ||
+		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "docs.example.com") ||
+		!strings.Contains(body, "group/shared") {
+		t.Fatalf("overview status=%d body=%s", response.Code, body)
+	}
+	for _, excluded := range []string{"gitlab-token", "gemini-key", "webhook-secret", "/private/wormtamer.db"} {
+		if strings.Contains(body, excluded) {
+			t.Fatalf("overview exposed %q: %s", excluded, body)
+		}
+	}
+	assertPanelHeaders(t, response)
+	if storage.dashboardLimit != dashboardRecent {
+		t.Fatalf("dashboard limit = %d", storage.dashboardLimit)
+	}
+}
+
+func TestReviewListValidatesFiltersAndPaginates(t *testing.T) {
+	storage := &fakeStore{reviewPage: store.ReviewRecordsPage{
+		Records: []store.ReviewRecord{{
+			ID: 8, ProjectID: 55, MergeRequestIID: 9, HeadSHA: strings.Repeat("b", 40),
+			State: store.JobFailed, Source: "reconciled", AttemptCount: 5, FindingCount: 2,
+		}},
+		NextBefore: 8,
+	}}
+	handler := newTestHandler(t, storage)
+	response := request(t, handler, http.MethodGet, "/reviews?state=failed&before=10")
+	body := response.Body.String()
+	if response.Code != http.StatusOK || storage.reviewState != store.JobFailed || storage.reviewBefore != 10 ||
+		storage.reviewLimit != pageSize || !strings.Contains(body, "Project #55") ||
+		!strings.Contains(body, "Older reviews") || !strings.Contains(body, "before=8") ||
+		!strings.Contains(body, "state=failed") {
+		t.Fatalf("reviews status=%d calls=%+v body=%s", response.Code, storage, body)
+	}
+	for _, path := range []string{
+		"/reviews?state=unknown", "/reviews?before=0", "/reviews?before=text",
+		"/reviews?state=failed&state=queued", "/reviews?unknown=value",
+	} {
+		response := request(t, handler, http.MethodGet, path)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	response = request(t, handler, http.MethodPost, "/reviews")
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /reviews status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertPanelHeaders(t, response)
+}
+
+func TestReviewDetailEscapesUntrustedContentAndDistinguishesPublication(t *testing.T) {
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	result := review.Result{
+		Summary: "summary <script>alert(1)</script> **markdown**",
+		Findings: []review.Finding{{
+			ID: "WT-F-" + strings.Repeat("A", 26), Priority: "P1", Title: "bad <img src=x>",
+			Explanation: "line one\n<iframe>", Recommendation: "use `safe`", Path: "file<script>.go",
+		}},
+	}
+	storage := &fakeStore{detail: store.ReviewRecordDetail{
+		ReviewRecord: store.ReviewRecord{
+			ID: 9, ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+			HeadSHA: strings.Repeat("a", 40), Source: "webhook", State: store.JobCompleted,
+			CreatedAt: now, UpdatedAt: &now, LastErrorCategory: "safe_failure_category",
+			HasResult: true, Published: true,
+		},
+		ReviewID: "WT-R-" + strings.Repeat("B", 26), Result: &result,
+		GitLabNoteID: 81,
+		Retrievals: []store.ReviewMemoryRetrievalRecord{{
+			MemoryID: "WT-M-" + strings.Repeat("C", 26), MemoryUpdatedAt: now, RetrievedAt: now,
+		}},
+	}}
+	handler := newTestHandler(t, storage)
+	response := request(t, handler, http.MethodGet, "/reviews/9")
+	body := response.Body.String()
+	if response.Code != http.StatusOK || storage.detailID != 9 ||
+		!strings.Contains(body, "summary &lt;script&gt;alert(1)&lt;/script&gt; **markdown**") ||
+		!strings.Contains(body, "file&lt;script&gt;.go") || strings.Contains(body, "<script>") ||
+		strings.Contains(body, "<img src=x>") || strings.Contains(body, "<iframe>") ||
+		!strings.Contains(body, "#note_81") || !strings.Contains(body, "safe_failure_category") {
+		t.Fatalf("review detail status=%d body=%s", response.Code, body)
+	}
+	storage.detail = store.ReviewRecordDetail{
+		ReviewRecord: store.ReviewRecord{
+			ID: 10, ProjectID: 55, MergeRequestIID: 9, HeadSHA: strings.Repeat("b", 40),
+			Source: "reconciled", State: store.JobCompleted, CreatedAt: now,
+			Published: true, ExternalOnly: true,
+		},
+		ReviewID: "WT-R-" + strings.Repeat("E", 26), GitLabNoteID: 82,
+	}
+	response = request(t, handler, http.MethodGet, "/reviews/10")
+	if response.Code != http.StatusOK || !strings.Contains(strings.ToLower(response.Body.String()), "external-only") ||
+		!strings.Contains(response.Body.String(), "No local structured result is available") {
+		t.Fatalf("external-only detail status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = request(t, handler, http.MethodGet, "/reviews/not-a-number")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid detail status=%d", response.Code)
+	}
+	storage.detailErr = store.ErrReviewRecordNotFound
+	response = request(t, handler, http.MethodGet, "/reviews/100")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing detail status=%d", response.Code)
+	}
+}
+
+func TestFeedbackAndMemoryViewsUseBoundedReadQueries(t *testing.T) {
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	storage := &fakeStore{
+		feedbackPage: store.FeedbackRecordsPage{Records: []store.FeedbackRecord{{
+			ID: 3, ReviewJobID: 9, ProjectID: 42, ProjectPath: "group/project",
+			MergeRequestIID: 7, NoteID: 91, State: store.FeedbackCompleted,
+			ReceivedAt: now, UpdatedAt: now, DecisionCount: 1, ActiveLessonCount: 1,
+		}}, NextBefore: 3},
+		memoryPage: store.MemoryRecordsPage{Records: []store.MemoryRecord{{
+			RowID: 4, MemoryID: "WT-M-" + strings.Repeat("A", 26), ProjectID: 42,
+			ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91,
+			TargetType: "review", TargetID: "WT-R-" + strings.Repeat("B", 26),
+			Outcome: "supports_review", Confidence: "high", Lesson: "lesson <b>not html</b>",
+			Active: true, SourceRole: "maintainer",
+			SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91", UpdatedAt: now,
+		}, {
+			RowID: 2, MemoryID: "WT-M-" + strings.Repeat("C", 26), ProjectID: 42,
+			ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 92,
+			TargetType: "finding", TargetID: "WT-F-" + strings.Repeat("D", 26),
+			Outcome: "rejects_finding", Confidence: "low", Active: false,
+			SourceRole: "developer", SourceURL: "javascript:alert(1)", UpdatedAt: now,
+		}}, NextBefore: 2},
+	}
+	handler := newTestHandler(t, storage)
+	feedback := request(t, handler, http.MethodGet, "/feedback?state=completed")
+	if feedback.Code != http.StatusOK || storage.feedbackState != store.FeedbackCompleted ||
+		storage.feedbackLimit != pageSize || !strings.Contains(feedback.Body.String(), "Review #9") ||
+		!strings.Contains(feedback.Body.String(), "Older feedback") {
+		t.Fatalf("feedback status=%d body=%s", feedback.Code, feedback.Body.String())
+	}
+	memory := request(t, handler, http.MethodGet, "/memory?active=true")
+	body := memory.Body.String()
+	if memory.Code != http.StatusOK || storage.memoryActive == nil || !*storage.memoryActive ||
+		storage.memoryLimit != pageSize || !strings.Contains(body, "lesson &lt;b&gt;not html&lt;/b&gt;") ||
+		!strings.Contains(body, "http://gitlab.internal/group/project") ||
+		strings.Contains(body, `href="javascript:alert(1)"`) || !strings.Contains(body, "Older memory") {
+		t.Fatalf("memory status=%d calls=%+v body=%s", memory.Code, storage, body)
+	}
+	for _, path := range []string{"/memory?active=yes", "/memory?before=-1", "/memory?active=true&active=false"} {
+		response := request(t, handler, http.MethodGet, path)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status=%d", path, response.Code)
+		}
+	}
+}
+
+func TestPanelErrorsAreGenericAndStylesheetIsEmbedded(t *testing.T) {
+	storage := &fakeStore{dashboardErr: errors.New("private database error with gitlab-token")}
+	handler := newTestHandler(t, storage)
+	response := request(t, handler, http.MethodGet, "/")
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "private") ||
+		strings.Contains(response.Body.String(), "gitlab-token") {
+		t.Fatalf("internal error status=%d body=%s", response.Code, response.Body.String())
+	}
+	css := request(t, handler, http.MethodGet, "/assets/panel.css")
+	if css.Code != http.StatusOK || !strings.HasPrefix(css.Header().Get("Content-Type"), "text/css") ||
+		!strings.Contains(css.Body.String(), "--background") {
+		t.Fatalf("stylesheet status=%d body=%s", css.Code, css.Body.String())
+	}
+	if css.Header().Get("Cache-Control") != "public, max-age=3600" {
+		t.Fatalf("stylesheet cache control = %q", css.Header().Get("Cache-Control"))
+	}
+}
+
+func newTestHandler(t *testing.T, storage Store) http.Handler {
+	t.Helper()
+	handler, err := New(storage, Config{
+		GitLabBaseURL:  "http://gitlab.internal",
+		GeminiEndpoint: "http://gemini.internal",
+		GeminiModel:    "gemini-test", GeminiThinkingLevel: "high", LogLevel: "info",
+		AuthorizedRepositories:   []string{"group/project", "group/shared"},
+		RepositorySharing:        map[string][]string{"group/project": {"group/shared"}},
+		AllowedPublicDomains:     []string{"github.com", "docs.example.com"},
+		PublicGitHubRepositories: []string{"owner/repository"},
+	}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler.Routes()
+}
+
+func request(t *testing.T, handler http.Handler, method, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(method, target, nil))
+	return response
+}
+
+func assertPanelHeaders(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	for _, header := range []string{"Content-Security-Policy", "Referrer-Policy", "X-Content-Type-Options", "X-Frame-Options"} {
+		if response.Header().Get(header) == "" {
+			t.Fatalf("response lacks %s", header)
+		}
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("cache control = %q", response.Header().Get("Cache-Control"))
+	}
+}
+
+type fakeStore struct {
+	dashboard      store.Dashboard
+	dashboardErr   error
+	dashboardLimit int
+
+	reviewPage   store.ReviewRecordsPage
+	reviewState  string
+	reviewBefore int64
+	reviewLimit  int
+
+	detail    store.ReviewRecordDetail
+	detailID  int64
+	detailErr error
+
+	feedbackPage   store.FeedbackRecordsPage
+	feedbackState  string
+	feedbackBefore int64
+	feedbackLimit  int
+
+	memoryPage   store.MemoryRecordsPage
+	memoryActive *bool
+	memoryBefore int64
+	memoryLimit  int
+}
+
+func (s *fakeStore) ReadDashboard(_ context.Context, limit int) (store.Dashboard, error) {
+	s.dashboardLimit = limit
+	return s.dashboard, s.dashboardErr
+}
+
+func (s *fakeStore) ListReviewRecords(_ context.Context, state string, before int64, limit int) (store.ReviewRecordsPage, error) {
+	s.reviewState, s.reviewBefore, s.reviewLimit = state, before, limit
+	return s.reviewPage, nil
+}
+
+func (s *fakeStore) GetReviewRecord(_ context.Context, jobID int64) (store.ReviewRecordDetail, error) {
+	s.detailID = jobID
+	return s.detail, s.detailErr
+}
+
+func (s *fakeStore) ListFeedbackRecords(_ context.Context, state string, before int64, limit int) (store.FeedbackRecordsPage, error) {
+	s.feedbackState, s.feedbackBefore, s.feedbackLimit = state, before, limit
+	return s.feedbackPage, nil
+}
+
+func (s *fakeStore) ListMemoryRecords(_ context.Context, active *bool, before int64, limit int) (store.MemoryRecordsPage, error) {
+	if active == nil {
+		s.memoryActive = nil
+	} else {
+		value := *active
+		s.memoryActive = &value
+	}
+	s.memoryBefore, s.memoryLimit = before, limit
+	return s.memoryPage, nil
+}

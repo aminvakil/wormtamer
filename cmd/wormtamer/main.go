@@ -20,6 +20,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/feedback"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
+	"github.com/aminvakil/wormtamer/internal/panel"
 	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/reconcile"
 	"github.com/aminvakil/wormtamer/internal/repository"
@@ -72,6 +73,22 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		return executeJobsCommand(ctx, storage, *invocation.jobs, output)
 	}
 
+	webPanel, err := panel.New(storage, panel.Config{
+		GitLabBaseURL:                  cfg.GitLab.BaseURL,
+		GeminiEndpoint:                 cfg.Gemini.BaseURL,
+		GeminiModel:                    cfg.Gemini.Model,
+		GeminiThinkingLevel:            cfg.Gemini.ThinkingLevel,
+		LogLevel:                       cfg.LogLevel,
+		AuthorizedRepositories:         cfg.AuthorizedRepositories,
+		ShareAllAuthorizedRepositories: cfg.ShareAllAuthorizedRepositories,
+		RepositorySharing:              cfg.RepositorySharing,
+		AllowedPublicDomains:           cfg.PublicSources.AllowedDomains,
+		PublicGitHubRepositories:       cfg.PublicSources.GitHubRepositories,
+	}, logger)
+	if err != nil {
+		return err
+	}
+
 	workspaceManager, err := repository.NewManager(cfg.DatabasePath + ".workspaces")
 	if err != nil {
 		return err
@@ -107,14 +124,14 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	}
 	reconciler := reconcile.New(storage, gitLabClient, cfg.GitLab.BaseURL, cfg.AuthorizedRepositories, logger)
 
-	handler := webhook.New(webhook.Config{
+	ingressHandler := webhook.New(webhook.Config{
 		GitLabInstance:         cfg.GitLab.BaseURL,
 		WebhookSecret:          cfg.GitLab.WebhookSecret,
 		AuthorizedRepositories: cfg.AuthorizedRepositories,
 	}, storage, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
-		Handler:           handler.Routes(),
+		Handler:           serviceRoutes(ingressHandler.Routes(), webPanel.Routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -215,6 +232,14 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	}
 	logger.Info("HTTP server stopped")
 	return processError
+}
+
+func serviceRoutes(ingress, panel http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/healthcheck", ingress)
+	mux.Handle("/webhooks/gitlab", ingress)
+	mux.Handle("/", panel)
+	return mux
 }
 
 type invocation struct {

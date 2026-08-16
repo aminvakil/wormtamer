@@ -67,6 +67,8 @@ docker run --detach \
 
 Replace the configuration source with its absolute host path. Publishing `8080:8080` accepts webhook traffic on the host's network interfaces. Wormtamer itself serves HTTP, so expose it only on a trusted network or place it behind an operator-managed TLS reverse proxy. A reverse proxy running on the same host may instead publish Wormtamer on loopback.
 
+The minimal panel does not authenticate requests or impose panel-specific request and concurrency limits. Configure the reverse proxy to restrict and limit the panel routes as required for the deployment. The webhook endpoint retains its separate application-owned secret verification and ingress limit; see the [panel security boundary](agents/security.md#read-only-web-panel).
+
 The executable is the image entrypoint, so `SIGTERM` reaches it directly. Keep the stop timeout at 20 seconds or longer; the process uses a bounded ten-second graceful-shutdown period.
 
 ## Operate
@@ -77,7 +79,11 @@ Probe liveness from outside the container:
 curl --fail --silent --show-error http://127.0.0.1:8080/healthcheck
 ```
 
-A successful response confirms that startup completed and the HTTP server is live. It does not check GitLab, Gemini, or queued jobs. Use container logs for operational failures:
+A successful response confirms that startup completed and the HTTP server is live. It does not check GitLab, Gemini, or queued jobs.
+
+Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, feedback processing, active and inactive runtime memory, and non-secret effective configuration. Review, feedback, and memory history use bounded pagination. The panel reflects local SQLite state and does not probe GitLab, Gemini, repositories, or public sources while rendering.
+
+The panel also exposes `/reviews`, `/feedback`, and `/memory`; it has no controls or request methods for changing application state. Review summaries and memory lessons may contain private project information. Use container logs for operational failures:
 
 ```sh
 docker logs wormtamer

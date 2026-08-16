@@ -76,6 +76,16 @@ During review, the memory broker derives scope from the trusted review identity 
 
 Runtime memory is separate from contributor documentation under `docs/agents/`.
 
+## Read-only Web Panel
+
+The minimal panel intentionally implements neither application-level authentication nor panel-specific admission or concurrency control. The deployment boundary is responsible for restricting panel access and applying any desired request or concurrency limits, typically through the reverse proxy in front of Wormtamer. Webhook secret verification and webhook ingress admission protect only `POST /webhooks/gitlab`; they do not protect or limit panel routes.
+
+Treat every persisted value rendered by the panel as untrusted, including review summaries, findings, paths, repository names, failure categories, feedback decisions, memory lessons, roles, and source URLs. Render these values as escaped plain text through `html/template`; never interpret them as HTML or Markdown. Only create external links from application-constructed merge request URLs or source URLs validated against the configured GitLab origin and base path.
+
+Panel responses use no third-party assets or JavaScript and set a restrictive content security policy, framing denial, no-referrer policy, content-type sniffing denial, and `Cache-Control: no-store` for state pages. Collection queries have fixed page limits and validated state, active, and cursor filters.
+
+Build the displayed configuration from an explicit type containing only the GitLab base URL, configured Gemini endpoint and model, thinking level, log level, authorized repositories, effective sharing rules, and approved public sources. Workflow and memory views must not select raw webhook payloads, source comment bodies, stored error messages, publication markers, prompts, model conversations, tool traces, repository content, logs, credentials, or filesystem paths. The panel has no mutation routes and performs no external requests.
+
 ## Publication and Logging
 
 Treat any change that permits previously escaped model-controlled formatting as a publication security-boundary change. The current summary renderer recognizes only paired single-backtick inline code spans in model-controlled narrative text and renders validated paths as code. Application-selected code delimiters keep their contents inert; malformed delimiters and code fences remain escaped text. Outside code spans, the renderer escapes model-controlled Markdown syntax, ampersands, and HTML angle brackets and neutralizes mentions. It rejects output when model fields, rendered user-visible text, or the complete rendered Markdown contains known configured secrets. Rendering and user-visible secret validation must share delimiter parsing. Tests for renderer changes must cover malformed delimiters and forbidden values formed when syntax is removed or added by the application. Apostrophes and quotation marks remain literal because they are safe in HTML text content. Publication reconciliation accepts a hidden marker only when the note author matches the PAT's authenticated GitLab user; untrusted contributors cannot suppress a review by copying the marker. These controls supplement, rather than replace, structured result validation.

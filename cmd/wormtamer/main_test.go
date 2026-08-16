@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -66,6 +68,34 @@ func TestConfiguredLogLevel(t *testing.T) {
 	logger.Debug("visible debug message")
 	if !strings.Contains(logs.String(), "visible debug message") {
 		t.Fatalf("debug log filtering failed: %s", logs.String())
+	}
+}
+
+func TestServiceRoutesKeepsIngressSeparateFromPanel(t *testing.T) {
+	ingress := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Test-Handler", "ingress")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	panelHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Test-Handler", "panel")
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := serviceRoutes(ingress, panelHandler)
+	for _, test := range []struct {
+		method, path, wantHandler string
+		wantStatus                int
+	}{
+		{http.MethodGet, "/healthcheck", "ingress", http.StatusNoContent},
+		{http.MethodPost, "/webhooks/gitlab", "ingress", http.StatusNoContent},
+		{http.MethodGet, "/", "panel", http.StatusOK},
+		{http.MethodGet, "/reviews", "panel", http.StatusOK},
+		{http.MethodGet, "/healthcheck/other", "panel", http.StatusOK},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != test.wantStatus || response.Header().Get("X-Test-Handler") != test.wantHandler {
+			t.Fatalf("%s %s status=%d handler=%q", test.method, test.path, response.Code, response.Header().Get("X-Test-Handler"))
+		}
 	}
 }
 
