@@ -39,6 +39,15 @@ func TestLoadReviewAndPublication(t *testing.T) {
 				t.Errorf("diff query = %q", r.URL.RawQuery)
 			}
 			writeJSON(t, w, []diffResponse{{OldPath: "old.go", NewPath: "new.go", Diff: "@@ -1 +1 @@\n-old\n+new"}})
+		case "/gitlab/api/v4/projects/42/merge_requests/7/versions":
+			if r.URL.Query().Get("page") != "1" || r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("diff version query = %q", r.URL.RawQuery)
+			}
+			patchID := strings.ToUpper(strings.Repeat("a", 40))
+			writeJSON(t, w, []diffVersionResponse{{
+				ID: 9, HeadCommitSHA: testHead, MergeRequestID: 8,
+				State: "collected", PatchIDSHA: &patchID,
+			}})
 		case "/gitlab/api/v4/projects/42/repository/archive.tar.gz":
 			if r.URL.Query().Get("sha") != testHead || r.Header.Get("Accept") != "application/octet-stream" {
 				t.Errorf("archive request query=%q accept=%q", r.URL.RawQuery, r.Header.Get("Accept"))
@@ -78,7 +87,7 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadReview() error = %v", err)
 	}
-	if snapshot.ProjectPath != "group/project" || len(snapshot.RelatedRepositories) != 1 || snapshot.RelatedRepositories[0] != "group/related" || snapshot.Title != "Review title" || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
+	if snapshot.ProjectPath != "group/project" || len(snapshot.RelatedRepositories) != 1 || snapshot.RelatedRepositories[0] != "group/related" || snapshot.Title != "Review title" || snapshot.PatchIDStatus != PatchIDAvailable || snapshot.PatchIDSHA != strings.Repeat("a", 40) || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	archive, err := client.LoadRepositoryArchive(context.Background(), identity)
@@ -95,6 +104,58 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	noteID, err = client.PostNote(context.Background(), identity, "summary\n"+marker)
 	if err != nil || noteID != 13 || posted != "summary\n"+marker {
 		t.Fatalf("PostNote() = %d, %v; body %q", noteID, err, posted)
+	}
+}
+
+func TestLoadReviewClassifiesPatchID(t *testing.T) {
+	valid40 := strings.Repeat("a", 40)
+	valid64 := strings.Repeat("B", 64)
+	tests := []struct {
+		name       string
+		versions   []diffVersionResponse
+		wantStatus string
+		wantSHA    string
+		category   string
+	}{
+		{name: "matching SHA-1", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected", PatchIDSHA: &valid40}}, wantStatus: PatchIDAvailable, wantSHA: valid40},
+		{name: "matching SHA-256", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "overflow", PatchIDSHA: &valid64}}, wantStatus: PatchIDAvailable, wantSHA: strings.ToLower(valid64)},
+		{name: "version not exposed", versions: nil, wantStatus: PatchIDPending},
+		{name: "current version not exposed", versions: []diffVersionResponse{{ID: 1, HeadCommitSHA: strings.Repeat("c", 40), MergeRequestID: 8, State: "collected", PatchIDSHA: &valid40}}, wantStatus: PatchIDPending},
+		{name: "collected null", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected"}}, wantStatus: PatchIDPending},
+		{name: "empty", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "empty"}}, wantStatus: PatchIDUnavailable},
+		{name: "without files", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "without_files"}}, wantStatus: PatchIDUnavailable},
+		{name: "terminal overflow", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "overflow"}}, wantStatus: PatchIDUnavailable},
+		{name: "unknown state", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collecting"}}, category: "unknown_merge_request_diff_state"},
+		{name: "malformed patch ID", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected", PatchIDSHA: stringPointer("not-a-patch-id")}}, category: "malformed_gitlab_response"},
+		{name: "merge request mismatch", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 9, State: "collected", PatchIDSHA: &valid40}}, category: "malformed_gitlab_response"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v4/projects/42":
+					writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+				case "/api/v4/projects/42/merge_requests/7":
+					writeMergeRequest(t, w, "opened", testHead)
+				case "/api/v4/projects/42/merge_requests/7/diffs":
+					writeJSON(t, w, []diffResponse{{OldPath: "old.go", NewPath: "new.go", Diff: "+new"}})
+				case "/api/v4/projects/42/merge_requests/7/versions":
+					writeJSON(t, w, test.versions)
+				default:
+					t.Fatal("unexpected request: " + r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, "token", server.Client())
+			snapshot, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+			if test.category != "" {
+				assertFailure(t, err, test.category, false, false)
+				return
+			}
+			if err != nil || snapshot.PatchIDStatus != test.wantStatus || snapshot.PatchIDSHA != test.wantSHA {
+				t.Fatalf("LoadReview() patch status=%q SHA=%q error=%v", snapshot.PatchIDStatus, snapshot.PatchIDSHA, err)
+			}
+		})
 	}
 }
 
@@ -635,6 +696,10 @@ func newTestClient(t *testing.T, baseURL, token string, httpClient *http.Client)
 
 func testIdentity(baseURL string) Identity {
 	return Identity{GitLabInstance: baseURL, ProjectID: 42, MergeRequestIID: 7, HeadSHA: testHead}
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func testNote(id int64, body string, authorID int64) noteResponse {

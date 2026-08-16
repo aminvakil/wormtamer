@@ -27,6 +27,7 @@ const (
 	noteResponseLimit           = 2 << 20
 	maxDiffPages                = 5
 	diffsPerPage                = 20
+	maxDiffVersions             = 100
 	maxChangedFiles             = 100
 	maxDiffContentBytes         = 512 << 10
 	maxNotePages                = 10
@@ -39,7 +40,16 @@ const (
 	missingRateLimitDelay       = 5 * time.Minute
 )
 
-var headSHAPattern = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+var (
+	headSHAPattern = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+	patchIDPattern = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+)
+
+const (
+	PatchIDAvailable   = "available"
+	PatchIDPending     = "pending"
+	PatchIDUnavailable = "unavailable"
+)
 
 type Identity struct {
 	GitLabInstance  string
@@ -58,6 +68,8 @@ type Snapshot struct {
 	Description              string
 	SourceBranch             string
 	TargetBranch             string
+	PatchIDStatus            string
+	PatchIDSHA               string
 	Files                    []ChangedFile
 }
 
@@ -143,6 +155,14 @@ type mergeRequestResponse struct {
 	DiffRefs     struct {
 		HeadSHA string `json:"head_sha"`
 	} `json:"diff_refs"`
+}
+
+type diffVersionResponse struct {
+	ID             int64   `json:"id"`
+	HeadCommitSHA  string  `json:"head_commit_sha"`
+	MergeRequestID int64   `json:"merge_request_id"`
+	State          string  `json:"state"`
+	PatchIDSHA     *string `json:"patch_id_sha"`
 }
 
 type diffResponse struct {
@@ -297,6 +317,10 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
+	patchIDStatus, patchIDSHA, err := c.getPatchID(ctx, identity, mergeRequest.ID)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	relatedRepositories := make([]string, 0, len(c.sharing[projectPath]))
 	for repository := range c.sharing[projectPath] {
 		relatedRepositories = append(relatedRepositories, repository)
@@ -310,6 +334,8 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 		Description:         mergeRequest.Description,
 		SourceBranch:        mergeRequest.SourceBranch,
 		TargetBranch:        mergeRequest.TargetBranch,
+		PatchIDStatus:       patchIDStatus,
+		PatchIDSHA:          patchIDSHA,
 		Files:               files,
 	}, nil
 }
@@ -618,6 +644,61 @@ func validateMergeRequest(identity Identity, mergeRequest mergeRequestResponse) 
 		return failure.Obsolete("merge_request_head_changed")
 	}
 	return nil
+}
+
+func (c *Client) getPatchID(ctx context.Context, identity Identity, mergeRequestID int64) (string, string, error) {
+	query := url.Values{
+		"page":     {"1"},
+		"per_page": {strconv.Itoa(maxDiffVersions)},
+	}
+	var versions []diffVersionResponse
+	header, err := c.get(ctx, c.mergeRequestPath(identity)+"/versions", query, metadataResponseLimit, &versions)
+	if err != nil {
+		return "", "", err
+	}
+	if len(versions) > maxDiffVersions {
+		return "", "", failure.Failed("merge_request_diff_version_limit_exceeded")
+	}
+	if _, err := nextPage(header, 1); err != nil {
+		return "", "", err
+	}
+	for _, version := range versions {
+		if version.ID <= 0 || version.MergeRequestID != mergeRequestID || !headSHAPattern.MatchString(version.HeadCommitSHA) {
+			return "", "", failure.Failed("malformed_gitlab_response")
+		}
+		if !strings.EqualFold(version.HeadCommitSHA, identity.HeadSHA) {
+			continue
+		}
+		if version.PatchIDSHA != nil {
+			if !patchIDPattern.MatchString(*version.PatchIDSHA) {
+				return "", "", failure.Failed("malformed_gitlab_response")
+			}
+			if !finalizedDiffVersionState(version.State) {
+				return "", "", failure.Failed("unknown_merge_request_diff_state")
+			}
+			return PatchIDAvailable, strings.ToLower(*version.PatchIDSHA), nil
+		}
+		switch version.State {
+		case "collected":
+			return PatchIDPending, "", nil
+		case "empty", "overflow", "without_files",
+			"timeout", "overflow_commits_safe_size", "overflow_diff_files_limit", "overflow_diff_lines_limit":
+			return PatchIDUnavailable, "", nil
+		default:
+			return "", "", failure.Failed("unknown_merge_request_diff_state")
+		}
+	}
+	return PatchIDPending, "", nil
+}
+
+func finalizedDiffVersionState(state string) bool {
+	switch state {
+	case "collected", "empty", "overflow", "without_files",
+		"timeout", "overflow_commits_safe_size", "overflow_diff_files_limit", "overflow_diff_lines_limit":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) getDiffs(ctx context.Context, identity Identity) ([]ChangedFile, error) {

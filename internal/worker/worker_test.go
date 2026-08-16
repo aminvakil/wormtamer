@@ -232,6 +232,175 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	}
 }
 
+func TestWorkerCompletesEquivalentPatchWithoutReviewOrPublication(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	storage, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueJob(t, storage)
+	broker := &fakeGitLab{}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "No problems.", Findings: []review.Finding{}}}
+	worker := newTestWorker(t, storage, broker, reviewer, nil)
+	now := time.Now().UTC().Add(time.Hour)
+	worker.now = func() time.Time { return now }
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("canonical ProcessOne() = %t, %v", processed, err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err = store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	queueNewWorkerRevision(t, storage, "equivalent-revision", strings.Repeat("b", 40))
+	now = now.Add(time.Minute)
+	worker = newTestWorker(t, storage, broker, reviewer, nil)
+	worker.now = func() time.Time { return now }
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("equivalent ProcessOne() = %t, %v", processed, err)
+	}
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var canonicalID, equivalentID, equivalentTo int64
+	rows, err := db.Query(`SELECT id, COALESCE(equivalent_to_job_id, 0) FROM review_jobs ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("missing canonical review job")
+	}
+	if err := rows.Scan(&canonicalID, &equivalentTo); err != nil || equivalentTo != 0 {
+		t.Fatalf("canonical review job = %d, %d, %v", canonicalID, equivalentTo, err)
+	}
+	if !rows.Next() {
+		t.Fatal("missing equivalent review job")
+	}
+	if err := rows.Scan(&equivalentID, &equivalentTo); err != nil || equivalentID <= canonicalID || equivalentTo != canonicalID {
+		t.Fatalf("equivalent job canonical = %d, want %d, error = %v", equivalentTo, canonicalID, err)
+	}
+	if rows.Next() {
+		t.Fatal("unexpected extra review job")
+	}
+	if reviewer.calls != 1 || broker.loadCalls != 2 || broker.archiveCalls != 0 || broker.postCalls != 1 {
+		t.Fatalf("broker=%+v reviewer calls=%d", broker, reviewer.calls)
+	}
+	assertCount(t, db, "review_results", 1)
+	assertCount(t, db, "publications", 1)
+}
+
+func TestWorkerDoesNotCompleteEquivalentReviewAfterHeadChange(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+	broker := &fakeGitLab{}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "Canonical.", Findings: []review.Finding{}}}
+	worker := newTestWorker(t, storage, broker, reviewer, nil)
+	now := time.Now().UTC().Add(time.Hour)
+	worker.now = func() time.Time { return now }
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("canonical ProcessOne() = %t, %v", processed, err)
+	}
+
+	queueNewWorkerRevision(t, storage, "changed-equivalent", strings.Repeat("b", 40))
+	now = now.Add(time.Minute)
+	broker.checkErrors = []error{nil, nil, failure.Obsolete("merge_request_head_changed")}
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("equivalent ProcessOne() = %t, %v", processed, err)
+	}
+	var state string
+	var equivalentTo sql.NullInt64
+	if err := db.QueryRow(`SELECT state, equivalent_to_job_id FROM review_jobs ORDER BY id DESC LIMIT 1`).Scan(&state, &equivalentTo); err != nil {
+		t.Fatal(err)
+	}
+	if state != store.JobObsolete || equivalentTo.Valid || reviewer.calls != 1 || broker.postCalls != 1 {
+		t.Fatalf("state=%q equivalent=%+v broker=%+v reviewer=%d", state, equivalentTo, broker, reviewer.calls)
+	}
+}
+
+func TestWorkerDefersPendingPatchIDOnlyOnce(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+	broker := &fakeGitLab{patchIDStatus: gitlab.PatchIDPending}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "Reviewed without patch identity.", Findings: []review.Finding{}}}
+	worker := newTestWorker(t, storage, broker, reviewer, nil)
+	now := time.Now().UTC().Add(time.Hour)
+	worker.now = func() time.Time { return now }
+
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("pending ProcessOne() = %t, %v", processed, err)
+	}
+	assertJobState(t, db, store.JobQueued)
+	var status, category string
+	if err := db.QueryRow(`SELECT patch_id_status, last_error_category FROM review_jobs`).Scan(&status, &category); err != nil {
+		t.Fatal(err)
+	}
+	if status != store.PatchIDPending || category != "merge_request_patch_id_pending" || reviewer.calls != 0 || broker.postCalls != 0 {
+		t.Fatalf("pending status=%q category=%q broker=%+v reviewer=%d", status, category, broker, reviewer.calls)
+	}
+
+	now = now.Add(initialBackoff + time.Second)
+	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("unavailable ProcessOne() = %t, %v", processed, err)
+	}
+	assertJobState(t, db, store.JobCompleted)
+	var attempts int
+	if err := db.QueryRow(`SELECT patch_id_status, attempt_count FROM review_jobs`).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != store.PatchIDUnavailable || attempts != 2 || reviewer.calls != 1 || broker.postCalls != 1 {
+		t.Fatalf("final status=%q attempts=%d broker=%+v reviewer=%d", status, attempts, broker, reviewer.calls)
+	}
+}
+
+func TestWorkerDoesNotDeferPendingPatchIDWithoutThreeReviewClaimsRemaining(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+	ctx := context.Background()
+	now := time.Now().UTC().Add(time.Hour)
+	for attempt := 1; attempt <= 2; attempt++ {
+		job, err := storage.ClaimJob(ctx, "pre-patch-owner", now, time.Minute, maxAttempts)
+		if err != nil || job == nil {
+			t.Fatalf("pre-patch ClaimJob(%d) = %+v, %v", attempt, job, err)
+		}
+		if _, err := storage.RetryJob(ctx, job.ID, "pre-patch-owner", now, now.Add(time.Second), maxAttempts,
+			"gitlab_network_failure", "gitlab_network_failure"); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(2 * time.Second)
+	}
+
+	broker := &fakeGitLab{patchIDStatus: gitlab.PatchIDPending}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "Reviewed with reserved claims.", Findings: []review.Finding{}}}
+	worker := newTestWorker(t, storage, broker, reviewer, nil)
+	worker.now = func() time.Time { return now }
+	if processed, err := worker.ProcessOne(ctx); err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	assertJobState(t, db, store.JobCompleted)
+	var status string
+	var attempts int
+	if err := db.QueryRow(`SELECT patch_id_status, attempt_count FROM review_jobs`).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != store.PatchIDUnavailable || attempts != 3 || reviewer.calls != 1 || broker.postCalls != 1 {
+		t.Fatalf("status=%q attempts=%d broker=%+v reviewer=%d", status, attempts, broker, reviewer.calls)
+	}
+}
+
 func TestWorkerSkipsReviewForExistingPublication(t *testing.T) {
 	storage, db := workerStore(t)
 	defer storage.Close()
@@ -339,7 +508,7 @@ func TestWorkerOperatorRetryResumesPublicationWithoutReview(t *testing.T) {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"Already reviewed.","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "checkpoint-owner", resultJSON, nil, nil, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "checkpoint-owner", resultJSON, nil, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.FinishJob(ctx, job.ID, "checkpoint-owner", store.JobFailed,
@@ -601,7 +770,7 @@ func prepareActiveMemoryForWorker(t *testing.T, storage *store.Store, now time.T
 	}
 	findingID := "WT-F-" + strings.Repeat("A", 26)
 	result := []byte(`{"summary":"source","findings":[{"priority":"P2","title":"title","explanation":"why","recommendation":"fix","path":"main.go"}]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "memory-source-review", result, []string{findingID}, nil, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "memory-source-review", result, []string{findingID}, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(ctx, job.ID, "memory-source-review", "<!-- memory-source-review -->", 99, now.Add(time.Second)); err != nil {
@@ -653,6 +822,8 @@ func assertCount(t *testing.T, db *sql.DB, table string, want int) {
 
 type fakeGitLab struct {
 	loadError        error
+	patchIDStatus    string
+	patchIDSHA       string
 	checkError       error
 	checkErrors      []error
 	loadCalls        int
@@ -670,9 +841,16 @@ func (g *fakeGitLab) LoadReview(_ context.Context, identity gitlab.Identity) (gi
 	if g.loadError != nil {
 		return gitlab.Snapshot{}, g.loadError
 	}
+	patchIDStatus := g.patchIDStatus
+	patchIDSHA := g.patchIDSHA
+	if patchIDStatus == "" {
+		patchIDStatus = gitlab.PatchIDAvailable
+		patchIDSHA = strings.Repeat("a", 40)
+	}
 	return gitlab.Snapshot{
 		Identity: identity, ProjectPath: "group/project", RelatedRepositories: []string{"group/related"},
 		Title: "MR", Description: "description", SourceBranch: "feature", TargetBranch: "main",
+		PatchIDStatus: patchIDStatus, PatchIDSHA: patchIDSHA,
 		Files: []gitlab.ChangedFile{{OldPath: "main.go", NewPath: "main.go", Diff: "+private-diff"}},
 	}, nil
 }

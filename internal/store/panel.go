@@ -44,10 +44,14 @@ type ReviewRecord struct {
 	StartedAt         *time.Time
 	UpdatedAt         *time.Time
 	LastErrorCategory string
+	PatchIDStatus     string
+	PatchIDSHA        string
+	EquivalentToJobID int64
 	FindingCount      int
 	HasResult         bool
 	Published         bool
 	ExternalOnly      bool
+	Equivalent        bool
 }
 
 type ReviewRecordsPage struct {
@@ -201,7 +205,8 @@ func (s *Store) ListReviewRecords(ctx context.Context, state string, beforeID in
 SELECT j.id, j.gitlab_instance, j.project_id, COALESCE(e.project_path, ''), j.merge_request_iid,
        j.head_sha, CASE WHEN j.source_event_id IS NULL THEN 'reconciled' ELSE 'webhook' END,
        j.state, j.attempt_count, j.created_at, j.started_at, j.updated_at,
-       COALESCE(j.last_error_category, ''),
+       COALESCE(j.last_error_category, ''), j.patch_id_status,
+       COALESCE(j.patch_id_sha, ''), COALESCE(j.equivalent_to_job_id, 0),
        (SELECT count(*) FROM review_findings f WHERE f.job_id = j.id),
        EXISTS(SELECT 1 FROM review_results r WHERE r.job_id = j.id),
        EXISTS(SELECT 1 FROM publications p WHERE p.job_id = j.id)
@@ -253,7 +258,8 @@ func (s *Store) GetReviewRecord(ctx context.Context, jobID int64) (ReviewRecordD
 SELECT j.id, j.gitlab_instance, j.project_id, COALESCE(e.project_path, ''), j.merge_request_iid,
        j.head_sha, CASE WHEN j.source_event_id IS NULL THEN 'reconciled' ELSE 'webhook' END,
        j.state, j.attempt_count, j.created_at, j.started_at, j.updated_at,
-       COALESCE(j.last_error_category, ''),
+       COALESCE(j.last_error_category, ''), j.patch_id_status,
+       COALESCE(j.patch_id_sha, ''), COALESCE(j.equivalent_to_job_id, 0),
        (SELECT count(*) FROM review_findings f WHERE f.job_id = j.id),
        EXISTS(SELECT 1 FROM review_results r WHERE r.job_id = j.id),
        EXISTS(SELECT 1 FROM publications p WHERE p.job_id = j.id)
@@ -356,7 +362,8 @@ func scanReviewRecord(row rowScanner) (ReviewRecord, error) {
 	var hasResult, published int
 	if err := row.Scan(&record.ID, &record.GitLabInstance, &record.ProjectID, &record.ProjectPath, &record.MergeRequestIID,
 		&record.HeadSHA, &record.Source, &record.State, &record.AttemptCount, &created, &started,
-		&updated, &record.LastErrorCategory, &record.FindingCount, &hasResult, &published); err != nil {
+		&updated, &record.LastErrorCategory, &record.PatchIDStatus, &record.PatchIDSHA,
+		&record.EquivalentToJobID, &record.FindingCount, &hasResult, &published); err != nil {
 		return ReviewRecord{}, err
 	}
 	var err error
@@ -375,6 +382,7 @@ func scanReviewRecord(row rowScanner) (ReviewRecord, error) {
 	record.HasResult = hasResult == 1
 	record.Published = published == 1
 	record.ExternalOnly = record.Published && !record.HasResult
+	record.Equivalent = record.EquivalentToJobID > 0
 	return record, nil
 }
 

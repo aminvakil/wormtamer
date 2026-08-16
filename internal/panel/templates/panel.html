@@ -32,7 +32,7 @@
 
 {{define "review-table"}}<div class="table-wrap">
 <table>
-  <thead><tr><th>Review</th><th>Project / MR</th><th>State</th><th>Source</th><th>Attempts</th><th>Findings</th><th>Publication</th><th>Failure</th><th>Timeline</th></tr></thead>
+  <thead><tr><th>Review</th><th>Project / MR</th><th>State</th><th>Source</th><th>Attempts</th><th>Findings</th><th>Patch</th><th>Publication</th><th>Failure</th><th>Timeline</th></tr></thead>
   <tbody>{{range .}}
     <tr>
       <td><a href="/reviews/{{.Record.ID}}">#{{.Record.ID}}</a><br><code>{{shortSHA .Record.HeadSHA}}</code></td>
@@ -41,11 +41,12 @@
       <td>{{.Record.Source}}</td>
       <td>{{.Record.AttemptCount}}</td>
       <td>{{.Record.FindingCount}}</td>
-      <td>{{if .Record.Published}}published{{if .Record.ExternalOnly}}<br><span class="muted">external-only</span>{{end}}{{else}}<span class="muted">not published</span>{{end}}</td>
+      <td>{{if eq .Record.PatchIDStatus "available"}}<code>{{.Record.PatchIDSHA}}</code>{{else if eq .Record.PatchIDStatus "pending"}}pending{{else if eq .Record.PatchIDStatus "unavailable"}}<span class="muted">unavailable</span>{{else}}<span class="muted">not fetched</span>{{end}}</td>
+      <td>{{if .Record.Equivalent}}equivalent to <a href="/reviews/{{.Record.EquivalentToJobID}}">review #{{.Record.EquivalentToJobID}}</a>{{else if .Record.Published}}published{{if .Record.ExternalOnly}}<br><span class="muted">external-only</span>{{end}}{{else}}<span class="muted">not published</span>{{end}}</td>
       <td>{{if .Record.LastErrorCategory}}<code>{{.Record.LastErrorCategory}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
       <td><span class="muted">Created</span><br>{{formatTime .Record.CreatedAt}}<br><span class="muted">Updated</span><br>{{formatOptionalTime .Record.UpdatedAt}}</td>
     </tr>
-  {{else}}<tr><td colspan="9" class="empty">No reviews found.</td></tr>{{end}}</tbody>
+  {{else}}<tr><td colspan="10" class="empty">No reviews found.</td></tr>{{end}}</tbody>
 </table>
 </div>{{end}}
 
@@ -113,15 +114,15 @@
 </section>
 <div class="detail-grid">
   <article class="panel-card"><h2>Identity</h2><dl>
-    <dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd><dt>Source</dt><dd>{{.Detail.Source}}</dd><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd>{{.Detail.AttemptCount}}</dd>
+    <dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd><dt>Source</dt><dd>{{.Detail.Source}}</dd><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd>{{.Detail.AttemptCount}}</dd><dt>Patch ID</dt><dd>{{if eq .Detail.PatchIDStatus "available"}}<code>{{.Detail.PatchIDSHA}}</code>{{else if eq .Detail.PatchIDStatus "pending"}}pending{{else if eq .Detail.PatchIDStatus "unavailable"}}unavailable{{else}}not fetched{{end}}</dd>
   </dl></article>
   <article class="panel-card"><h2>Timeline</h2><dl><dt>Created</dt><dd>{{formatTime .Detail.CreatedAt}}</dd><dt>Started</dt><dd>{{formatOptionalTime .Detail.StartedAt}}</dd><dt>Updated</dt><dd>{{formatOptionalTime .Detail.UpdatedAt}}</dd></dl></article>
-  <article class="panel-card"><h2>Publication</h2>{{if .Detail.Published}}<p>Published as GitLab note #{{.Detail.GitLabNoteID}}.</p>{{if .PublicationURL}}<p><a href="{{.PublicationURL}}">Open published note</a></p>{{end}}{{else}}<p class="muted">No durable publication record.</p>{{end}}{{if .Detail.ExternalOnly}}<p class="notice">External-only recovery from an existing publication. No local structured result is available.</p>{{end}}</article>
+  <article class="panel-card"><h2>Publication</h2>{{if .Detail.Equivalent}}<p>Equivalent to canonical <a href="/reviews/{{.Detail.EquivalentToJobID}}">review #{{.Detail.EquivalentToJobID}}</a>.</p><p class="notice">This revision has no result, findings, memory audit, or publication of its own.</p>{{else if .Detail.Published}}<p>Published as GitLab note #{{.Detail.GitLabNoteID}}.</p>{{if .PublicationURL}}<p><a href="{{.PublicationURL}}">Open published note</a></p>{{end}}{{else}}<p class="muted">No durable publication record.</p>{{end}}{{if .Detail.ExternalOnly}}<p class="notice">External-only recovery from an existing publication. No local structured result is available.</p>{{end}}</article>
   <article class="panel-card"><h2>Failure</h2>{{if .Detail.LastErrorCategory}}<code>{{.Detail.LastErrorCategory}}</code>{{else}}<p class="muted">No failure category.</p>{{end}}</article>
 </div>
 
 {{if .Detail.Result}}<section><div class="section-heading"><h2>Summary</h2><span>{{len .Detail.Result.Findings}} findings</span></div><div class="narrative">{{.Detail.Result.Summary}}</div></section>
-<section><h2>Findings</h2><div class="finding-list">{{range .Detail.Result.Findings}}<article class="finding" data-priority="{{.Priority}}"><div class="finding-heading"><span class="priority">{{.Priority}}</span><h3>{{.Title}}</h3></div><p><code>{{.ID}}</code></p><dl><dt>Path</dt><dd><code>{{.Path}}</code></dd><dt>Explanation</dt><dd class="narrative">{{.Explanation}}</dd><dt>Recommendation</dt><dd class="narrative">{{.Recommendation}}</dd></dl></article>{{else}}<p class="empty">No actionable findings.</p>{{end}}</div></section>{{else if not .Detail.ExternalOnly}}<section><p class="empty">No locally validated result has been checkpointed.</p></section>{{end}}
+<section><h2>Findings</h2><div class="finding-list">{{range .Detail.Result.Findings}}<article class="finding" data-priority="{{.Priority}}"><div class="finding-heading"><span class="priority">{{.Priority}}</span><h3>{{.Title}}</h3></div><p><code>{{.ID}}</code></p><dl><dt>Path</dt><dd><code>{{.Path}}</code></dd><dt>Explanation</dt><dd class="narrative">{{.Explanation}}</dd><dt>Recommendation</dt><dd class="narrative">{{.Recommendation}}</dd></dl></article>{{else}}<p class="empty">No actionable findings.</p>{{end}}</div></section>{{else if and (not .Detail.ExternalOnly) (not .Detail.Equivalent)}}<section><p class="empty">No locally validated result has been checkpointed.</p></section>{{end}}
 
 <section><div class="section-heading"><h2>Retrieved memory</h2><span>{{len .Detail.Retrievals}} records</span></div><div class="table-wrap"><table><thead><tr><th>Memory ID</th><th>Memory version</th><th>Retrieved</th></tr></thead><tbody>{{range .Detail.Retrievals}}<tr><td><code>{{.MemoryID}}</code></td><td>{{formatTime .MemoryUpdatedAt}}</td><td>{{formatTime .RetrievedAt}}</td></tr>{{else}}<tr><td colspan="3" class="empty">No memory retrievals recorded.</td></tr>{{end}}</tbody></table></div></section>
 {{template "foot" .}}{{end}}

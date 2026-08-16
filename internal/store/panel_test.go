@@ -76,7 +76,7 @@ func TestReviewRecordsAndDetail(t *testing.T) {
 	retrieved := now.Add(time.Second)
 	if err := storage.SaveReviewResult(ctx, job.ID, "panel-owner", result, []string{findingID}, []ReviewMemoryRetrieval{{
 		MemoryID: memoryID, MemoryUpdatedAt: memoryUpdated, RetrievedAt: retrieved,
-	}}, now.Add(2*time.Second)); err != nil {
+	}}, PatchIDAvailable, strings.Repeat("d", 40), now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(ctx, job.ID, "panel-owner", "private-publication-marker", 81, now.Add(3*time.Second)); err != nil {
@@ -126,6 +126,7 @@ func TestReviewRecordsAndDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 	if detail.ReviewID != review.ReviewID(event.GitLabInstance, event.ProjectID, event.MergeRequestIID, event.HeadSHA) ||
+		detail.PatchIDStatus != PatchIDAvailable || detail.PatchIDSHA != strings.Repeat("d", 40) ||
 		detail.Result == nil || detail.Result.Summary != "summary <script>alert(1)</script>" ||
 		len(detail.Result.Findings) != 1 || detail.Result.Findings[0].ID != findingID ||
 		!detail.Published || detail.GitLabNoteID != 81 || len(detail.Retrievals) != 1 ||
@@ -133,7 +134,7 @@ func TestReviewRecordsAndDetail(t *testing.T) {
 		t.Fatalf("review detail = %+v", detail)
 	}
 	external, err := storage.GetReviewRecord(ctx, recovered.ID)
-	if err != nil || !external.ExternalOnly || external.Result != nil || external.GitLabNoteID != 82 {
+	if err != nil || !external.ExternalOnly || external.PatchIDStatus != PatchIDUnknown || external.Result != nil || external.GitLabNoteID != 82 {
 		t.Fatalf("external detail = %+v, %v", external, err)
 	}
 	if _, err := storage.GetReviewRecord(ctx, recovered.ID+1000); !errors.Is(err, ErrReviewRecordNotFound) {

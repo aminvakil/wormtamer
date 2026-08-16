@@ -83,7 +83,9 @@ Validates and durably records merge request webhooks, and records bounded Note H
 
 ### Review worker
 
-Claims jobs with leases, retries recoverable failures, and completes work only after publication is reconciled. For a job without a locally validated result, it checks the deterministic GitLab publication marker before loading review evidence or invoking Gemini; an existing current publication completes as external-only recovery without reconstructing structured review data.
+Claims jobs with leases, retries recoverable failures, and completes generated work only after publication is reconciled. For a job without a locally validated result, it checks the deterministic GitLab publication marker before loading review evidence or invoking Gemini; an existing current publication completes as external-only recovery without reconstructing structured review data.
+
+After that exact-head recovery check, the worker validates the GitLab diff version for the current head. Within retained SQLite state, a new head whose available `patch_id_sha` matches the newest completed canonical job for the same merge request completes as equivalent without invoking Gemini, loading a repository archive, or publishing another note. The canonical job must have both a local validated result and a durable publication and cannot itself be equivalent. Head SHA remains the revision, repository, review-target, finding, and publication identity; patch identity only suppresses redundant work.
 
 ### Review agent
 
@@ -130,7 +132,7 @@ The GitLab integration supports GitLab 17 and newer. The reconciler scans each a
 
 ### Read-only web panel
 
-The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, and `GET /memory`. It shows committed review and feedback job state, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, and an explicit non-secret configuration summary. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
+The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, and `GET /memory`. It shows committed review and feedback job state, patch-ID availability, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, and an explicit non-secret configuration summary. Equivalent jobs link to their canonical review instead of presenting its result, findings, publication, or feedback targets as their own. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
 
 Panel handlers query SQLite through fixed-size cursor pagination and do not make GitLab, Gemini, repository, or public-source requests. They expose no state-changing methods and cannot retry work, create reviews, or edit configuration or memory. The panel does not require presentation-only persistent state. Panel access and traffic controls deliberately remain at the deployment boundary described in [Security](security.md#read-only-web-panel).
 
@@ -138,7 +140,9 @@ Panel handlers query SQLite through fixed-size cursor pagination and do not make
 
 The model conversation begins with bounded changed-file diffs, relevant metadata, the exact current and sharing-eligible repository paths, approved public domains and exact GitHub repository slugs, the structured response schema, declared tools, and application-owned limits. Model-facing guidance prefers a direct read when an exact file path is known and path-scoped recursive listing or search when a relevant directory is known; root operations remain valid when no narrower context is available. It requests independent calls together when their complete arguments are already known and keeps calls whose arguments depend on earlier results sequential. Only validated, attributed tool results are added on later turns; conversations and retrieved public content are not persisted. Authorization and limits remain deterministic regardless of model intent.
 
-SQLite stores webhook, job, publication, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. GitLab remains the source of truth for merge requests and published discussions.
+SQLite stores webhook, job, publication, patch-equivalence, and merge request progress records. A review job may originate from a webhook event or from reconciliation without an event. Each newly generated result records either its validated GitLab patch ID or an explicit unavailable outcome. An equivalent job records the same patch ID and its canonical job ID but owns no result, findings, memory-retrieval audit, or publication. Existing and externally recovered rows without locally validated results retain unknown patch identity. GitLab remains the source of truth for merge requests and published discussions.
+
+Git patch IDs intentionally ignore whitespace and can remain equal after a target-branch update changes surrounding repository context. Wormtamer accepts both consequences when suppressing equivalent reviews. Equivalence is installation-local and is not reconstructed from GitLab notes: after SQLite state loss, exact-head markers still recover unchanged revisions, but a rebased head is reviewed and published normally.
 
 Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, typed review or finding target, GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
 

@@ -78,7 +78,7 @@ func TestExecuteJobsCommandRetriesFeedback(t *testing.T) {
 	if err != nil || reviewJob == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", reviewJob, err)
 	}
-	if err := storage.SaveReviewResult(ctx, accepted.JobID, "review-owner", []byte(`{"summary":"done","findings":[]}`), nil, nil, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, accepted.JobID, "review-owner", []byte(`{"summary":"done","findings":[]}`), nil, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(ctx, accepted.JobID, "review-owner", "<!-- review -->", 99, now.Add(time.Second)); err != nil {

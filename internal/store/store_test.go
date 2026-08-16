@@ -205,6 +205,18 @@ VALUES (999, 'http://gitlab.internal', 1, 1, 'abc', 'queued')`)
 	if err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
 		t.Fatalf("foreign-key violating insert error = %v", err)
 	}
+	accepted, err := storage.AcceptEvent(context.Background(), readyEvent("patch-constraints"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.db.Exec(`UPDATE review_jobs SET patch_id_status = ?, patch_id_sha = ? WHERE id = ?`,
+		PatchIDAvailable, strings.Repeat("A", 40), accepted.JobID); err == nil || !strings.Contains(err.Error(), "CHECK") {
+		t.Fatalf("malformed patch ID constraint error = %v", err)
+	}
+	if _, err := storage.db.Exec(`UPDATE review_jobs SET patch_id_status = ? WHERE id = ?`,
+		PatchIDAvailable, accepted.JobID); err == nil || !strings.Contains(err.Error(), "CHECK") {
+		t.Fatalf("missing patch ID constraint error = %v", err)
+	}
 }
 
 func TestOpenRejectsNewerSchema(t *testing.T) {
@@ -239,7 +251,7 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if job.ID != accepted.JobID || job.State != JobRunning || job.AttemptCount != 1 {
+	if job.ID != accepted.JobID || job.State != JobRunning || job.AttemptCount != 1 || job.PatchIDStatus != PatchIDUnknown {
 		t.Fatalf("claimed job = %+v", job)
 	}
 	if other, err := storage.ClaimJob(ctx, "owner-2", now, 2*time.Minute, 5); err != nil || other != nil {
@@ -261,10 +273,10 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, nil, nil, recoveredAt); !errors.Is(err, ErrLeaseLost) {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, nil, nil, PatchIDUnavailable, "", recoveredAt); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("wrong-owner SaveReviewResult() error = %v", err)
 	}
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, nil, nil, recoveredAt); err != nil {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, nil, nil, PatchIDUnavailable, "", recoveredAt); err != nil {
 		t.Fatalf("SaveReviewResult() error = %v", err)
 	}
 
@@ -289,6 +301,144 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 	assertCount(t, storage.db, "publications", 1)
 }
 
+func TestPatchIDRetryAndEquivalentCompletion(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Add(time.Hour)
+	patchID := strings.Repeat("a", 64)
+
+	canonicalEvent := readyEvent("canonical")
+	canonical, err := storage.AcceptEvent(ctx, canonicalEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalJob, err := storage.ClaimJob(ctx, "canonical-owner", now, time.Minute, 5)
+	if err != nil || canonicalJob == nil {
+		t.Fatalf("ClaimJob(canonical) = %+v, %v", canonicalJob, err)
+	}
+	if err := storage.SaveReviewResult(ctx, canonicalJob.ID, "canonical-owner",
+		[]byte(`{"summary":"canonical","findings":[]}`), nil, nil,
+		PatchIDAvailable, patchID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CompletePublication(ctx, canonicalJob.ID, "canonical-owner", "canonical-marker", 71, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	equivalentEvent := readyEvent("equivalent")
+	equivalentEvent.HeadSHA = strings.Repeat("b", 40)
+	equivalent, err := storage.AcceptEvent(ctx, equivalentEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := storage.ClaimJob(ctx, "equivalent-owner", now.Add(3*time.Second), time.Minute, 5)
+	if err != nil || claimed == nil || claimed.ID != equivalent.JobID || claimed.PatchIDStatus != PatchIDUnknown {
+		t.Fatalf("ClaimJob(equivalent) = %+v, %v", claimed, err)
+	}
+	if err := storage.DeferPendingPatchID(ctx, claimed.ID, "equivalent-owner", now.Add(3*time.Second), now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = storage.ClaimJob(ctx, "equivalent-owner-2", now.Add(5*time.Second), time.Minute, 5)
+	if err != nil || claimed == nil || claimed.PatchIDStatus != PatchIDPending || claimed.AttemptCount != 2 {
+		t.Fatalf("ClaimJob(pending) = %+v, %v", claimed, err)
+	}
+	canonicalID, found, err := storage.FindCanonicalReviewJob(ctx, claimed.ID, patchID)
+	if err != nil || !found || canonicalID != canonical.JobID {
+		t.Fatalf("FindCanonicalReviewJob() = %d, %t, %v", canonicalID, found, err)
+	}
+	if err := storage.CompleteEquivalentReview(ctx, claimed.ID, "wrong-owner", canonicalID, patchID, now.Add(6*time.Second)); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("wrong-owner CompleteEquivalentReview() error = %v", err)
+	}
+	if err := storage.CompleteEquivalentReview(ctx, claimed.ID, "equivalent-owner-2", canonicalID, patchID, now.Add(6*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	var state, status, storedPatch string
+	var equivalentTo int64
+	if err := storage.db.QueryRow(`
+SELECT state, patch_id_status, patch_id_sha, equivalent_to_job_id
+FROM review_jobs WHERE id = ?`, equivalent.JobID).Scan(&state, &status, &storedPatch, &equivalentTo); err != nil {
+		t.Fatal(err)
+	}
+	if state != JobCompleted || status != PatchIDAvailable || storedPatch != patchID || equivalentTo != canonical.JobID {
+		t.Fatalf("equivalent state=%q status=%q patch=%q canonical=%d", state, status, storedPatch, equivalentTo)
+	}
+	var ownResults, ownPublications int
+	if err := storage.db.QueryRow(`
+SELECT EXISTS(SELECT 1 FROM review_results WHERE job_id = ?),
+       EXISTS(SELECT 1 FROM publications WHERE job_id = ?)`, equivalent.JobID, equivalent.JobID).Scan(&ownResults, &ownPublications); err != nil {
+		t.Fatal(err)
+	}
+	if ownResults != 0 || ownPublications != 0 {
+		t.Fatalf("equivalent owns result=%d publication=%d", ownResults, ownPublications)
+	}
+	detail, err := storage.GetReviewRecord(ctx, equivalent.JobID)
+	if err != nil || !detail.Equivalent || detail.EquivalentToJobID != canonical.JobID ||
+		detail.PatchIDStatus != PatchIDAvailable || detail.PatchIDSHA != patchID ||
+		detail.HasResult || detail.Published || detail.ExternalOnly || detail.Result != nil {
+		t.Fatalf("equivalent panel detail = %+v, %v", detail, err)
+	}
+}
+
+func TestCanonicalReviewLookupRejectsIneligibleAndOtherMergeRequestJobs(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Add(time.Hour)
+	patchID := strings.Repeat("c", 40)
+
+	unknownID := preparePublishedReview(t, storage, now, "unknown-patch", strings.Repeat("1", 40),
+		[]byte(`{"summary":"unknown","findings":[]}`), nil)
+	if _, err := storage.db.Exec(`UPDATE review_jobs SET patch_id_status = ?, patch_id_sha = NULL WHERE id = ?`, PatchIDUnknown, unknownID); err != nil {
+		t.Fatal(err)
+	}
+
+	unpublishedEvent := readyEvent("unpublished")
+	unpublishedEvent.HeadSHA = strings.Repeat("2", 40)
+	if _, err := storage.AcceptEvent(ctx, unpublishedEvent); err != nil {
+		t.Fatal(err)
+	}
+	unpublished, err := storage.ClaimJob(ctx, "unpublished-owner", now.Add(3*time.Second), time.Minute, 5)
+	if err != nil || unpublished == nil {
+		t.Fatalf("ClaimJob(unpublished) = %+v, %v", unpublished, err)
+	}
+	if err := storage.SaveReviewResult(ctx, unpublished.ID, "unpublished-owner",
+		[]byte(`{"summary":"unpublished","findings":[]}`), nil, nil,
+		PatchIDAvailable, patchID, now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	otherEvent := readyEvent("other-merge-request")
+	otherEvent.MergeRequestIID = 8
+	otherEvent.HeadSHA = strings.Repeat("3", 40)
+	if _, err := storage.AcceptEvent(ctx, otherEvent); err != nil {
+		t.Fatal(err)
+	}
+	other, err := storage.ClaimJob(ctx, "other-owner", now.Add(5*time.Second), time.Minute, 5)
+	if err != nil || other == nil {
+		t.Fatalf("ClaimJob(other MR) = %+v, %v", other, err)
+	}
+	if err := storage.SaveReviewResult(ctx, other.ID, "other-owner",
+		[]byte(`{"summary":"other","findings":[]}`), nil, nil,
+		PatchIDAvailable, patchID, now.Add(6*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CompletePublication(ctx, other.ID, "other-owner", "other-marker", 72, now.Add(7*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceEvent := readyEvent("lookup-source")
+	sourceEvent.HeadSHA = strings.Repeat("4", 40)
+	source, err := storage.AcceptEvent(ctx, sourceEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalID, found, err := storage.FindCanonicalReviewJob(ctx, source.JobID, patchID); err != nil || found || canonicalID != 0 {
+		t.Fatalf("FindCanonicalReviewJob() = %d, %t, %v", canonicalID, found, err)
+	}
+}
+
 func TestCompletePublicationWithoutLocalReviewResult(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
@@ -302,20 +452,27 @@ func TestCompletePublicationWithoutLocalReviewResult(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if err := storage.CompletePublication(ctx, job.ID, "publication-owner", "<!-- existing -->", 73, now.Add(time.Second)); err != nil {
-		t.Fatalf("CompletePublication() error = %v", err)
-	}
-	var state, marker string
-	var noteID int64
-	if err := storage.db.QueryRow(`
-SELECT j.state, p.marker, p.gitlab_note_id
-FROM review_jobs j
-JOIN publications p ON p.job_id = j.id
-WHERE j.id = ?`, accepted.JobID).Scan(&state, &marker, &noteID); err != nil {
+	if err := storage.DeferPendingPatchID(ctx, job.ID, "publication-owner", now, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if state != JobCompleted || marker != "<!-- existing -->" || noteID != 73 {
-		t.Fatalf("recovered publication state=%q marker=%q note=%d", state, marker, noteID)
+	job, err = storage.ClaimJob(ctx, "publication-owner-2", now.Add(2*time.Second), time.Minute, 5)
+	if err != nil || job == nil || job.PatchIDStatus != PatchIDPending {
+		t.Fatalf("ClaimJob(pending) = %+v, %v", job, err)
+	}
+	if err := storage.CompletePublication(ctx, job.ID, "publication-owner-2", "<!-- existing -->", 73, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("CompletePublication() error = %v", err)
+	}
+	var state, marker, patchIDStatus string
+	var noteID int64
+	if err := storage.db.QueryRow(`
+SELECT j.state, p.marker, p.gitlab_note_id, j.patch_id_status
+FROM review_jobs j
+JOIN publications p ON p.job_id = j.id
+WHERE j.id = ?`, accepted.JobID).Scan(&state, &marker, &noteID, &patchIDStatus); err != nil {
+		t.Fatal(err)
+	}
+	if state != JobCompleted || marker != "<!-- existing -->" || noteID != 73 || patchIDStatus != PatchIDUnknown {
+		t.Fatalf("recovered publication state=%q marker=%q note=%d patch_status=%q", state, marker, noteID, patchIDStatus)
 	}
 	assertCount(t, storage.db, "review_results", 0)
 	assertCount(t, storage.db, "publications", 1)
@@ -338,7 +495,7 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[{"priority":"P1","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
 	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
-	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, nil, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, nil, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.Close(); err != nil {
@@ -354,7 +511,8 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 	if err != nil || recovered == nil {
 		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
 	}
-	if recovered.State != JobPublishing || string(recovered.ValidatedResultJSON) != string(resultJSON) ||
+	if recovered.State != JobPublishing || recovered.PatchIDStatus != PatchIDUnavailable ||
+		string(recovered.ValidatedResultJSON) != string(resultJSON) ||
 		len(recovered.FindingIDs) != 1 || recovered.FindingIDs[0] != findingIDs[0] {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
@@ -372,7 +530,7 @@ func TestSaveReviewResultRejectsMalformedFindingIdentifiers(t *testing.T) {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "owner", resultJSON, []string{"model-id"}, nil, now); err == nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, "owner", resultJSON, []string{"model-id"}, nil, PatchIDUnavailable, "", now); err == nil {
 		t.Fatal("SaveReviewResult() accepted a malformed finding identifier")
 	}
 	assertCount(t, storage.db, "review_results", 0)
@@ -565,12 +723,12 @@ PRAGMA user_version = 2;`)
 	}
 	defer storage.Close()
 	var sourceEventID sql.NullInt64
-	var state string
-	if err := storage.db.QueryRow(`SELECT source_event_id, state FROM review_jobs WHERE id = 9`).Scan(&sourceEventID, &state); err != nil {
+	var state, patchIDStatus string
+	if err := storage.db.QueryRow(`SELECT source_event_id, state, patch_id_status FROM review_jobs WHERE id = 9`).Scan(&sourceEventID, &state, &patchIDStatus); err != nil {
 		t.Fatal(err)
 	}
-	if !sourceEventID.Valid || sourceEventID.Int64 != 5 || state != JobCompleted {
-		t.Fatalf("migrated job source=%+v state=%q", sourceEventID, state)
+	if !sourceEventID.Valid || sourceEventID.Int64 != 5 || state != JobCompleted || patchIDStatus != PatchIDUnknown {
+		t.Fatalf("migrated job source=%+v state=%q patch_status=%q", sourceEventID, state, patchIDStatus)
 	}
 	assertCount(t, storage.db, "review_results", 1)
 	assertCount(t, storage.db, "review_findings", 0)

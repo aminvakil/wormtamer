@@ -32,7 +32,10 @@ const (
 type JobStore interface {
 	ClaimJob(context.Context, string, time.Time, time.Duration, int) (*store.Job, error)
 	RenewLease(context.Context, int64, string, time.Time, time.Duration) (bool, error)
-	SaveReviewResult(context.Context, int64, string, []byte, []string, []store.ReviewMemoryRetrieval, time.Time) error
+	DeferPendingPatchID(context.Context, int64, string, time.Time, time.Time) error
+	FindCanonicalReviewJob(context.Context, int64, string) (int64, bool, error)
+	CompleteEquivalentReview(context.Context, int64, string, int64, string, time.Time) error
+	SaveReviewResult(context.Context, int64, string, []byte, []string, []store.ReviewMemoryRetrieval, string, string, time.Time) error
 	ListActiveReviewMemories(context.Context, string, int64) ([]store.ReviewMemory, error)
 	RetryJob(context.Context, int64, string, time.Time, time.Time, int, string, string) (string, error)
 	FinishJob(context.Context, int64, string, string, string, string, time.Time) error
@@ -55,6 +58,8 @@ type RepositoryWorkspaces interface {
 type Reviewer interface {
 	Review(context.Context, gitlab.Snapshot, repository.ToolBroker) (review.Result, []byte, error)
 }
+
+var errPatchIDDeferred = errors.New("patch ID deferred")
 
 type Worker struct {
 	store                    JobStore
@@ -277,6 +282,9 @@ func (w *Worker) processClaimed(ctx context.Context, job *store.Job) error {
 		w.logger.Info("review job completed", append(jobLogFields(job), "outcome", store.JobCompleted)...)
 		return nil
 	}
+	if errors.Is(err, errPatchIDDeferred) {
+		return nil
+	}
 	return w.handleFailure(ctx, job, err)
 }
 
@@ -313,6 +321,42 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if err != nil {
 			return err
 		}
+		if snapshot.PatchIDStatus == gitlab.PatchIDPending {
+			if job.PatchIDStatus == store.PatchIDUnknown && maxAttempts-job.AttemptCount >= 3 {
+				now := w.now().UTC()
+				if err := w.store.DeferPendingPatchID(ctx, job.ID, w.owner, now, now.Add(localBackoff(job.AttemptCount))); err != nil {
+					if errors.Is(err, store.ErrLeaseLost) {
+						return err
+					}
+					return failure.Retry("persistence_failed", 0)
+				}
+				w.logger.Info("review job deferred",
+					append(jobLogFields(job), "outcome", store.JobQueued, "reason", "merge_request_patch_id_pending")...)
+				return errPatchIDDeferred
+			}
+			snapshot.PatchIDStatus = gitlab.PatchIDUnavailable
+			snapshot.PatchIDSHA = ""
+		}
+		if snapshot.PatchIDStatus == gitlab.PatchIDAvailable {
+			canonicalJobID, found, err := w.store.FindCanonicalReviewJob(ctx, job.ID, snapshot.PatchIDSHA)
+			if err != nil {
+				return failure.Retry("persistence_failed", 0)
+			}
+			if found {
+				if err := w.gitlab.CheckCurrent(ctx, identity); err != nil {
+					return err
+				}
+				if err := w.store.CompleteEquivalentReview(ctx, job.ID, w.owner, canonicalJobID, snapshot.PatchIDSHA, w.now().UTC()); err != nil {
+					if errors.Is(err, store.ErrLeaseLost) {
+						return err
+					}
+					return failure.Retry("persistence_failed", 0)
+				}
+				w.logger.Info("review generation skipped",
+					append(jobLogFields(job), "outcome", "equivalent_patch", "canonical_job_id", canonicalJobID)...)
+				return nil
+			}
+		}
 		snapshot.AllowedPublicDomains = append([]string(nil), w.allowedPublicDomains...)
 		snapshot.PublicGitHubRepositories = append([]string(nil), w.publicGitHubRepositories...)
 		tools := newReviewTools(snapshot, w.gitlab, w.public, w.workspaces, w.store, w.now)
@@ -328,7 +372,11 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if err := applyFindingIDs(&validated, job.FindingIDs); err != nil {
 			return err
 		}
-		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, tools.Retrievals(), w.now().UTC()); err != nil {
+		patchIDStatus := store.PatchIDUnavailable
+		if snapshot.PatchIDStatus == gitlab.PatchIDAvailable {
+			patchIDStatus = store.PatchIDAvailable
+		}
+		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, tools.Retrievals(), patchIDStatus, snapshot.PatchIDSHA, w.now().UTC()); err != nil {
 			if errors.Is(err, store.ErrLeaseLost) {
 				return err
 			}

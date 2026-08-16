@@ -105,7 +105,7 @@ func TestRetryFailedReviewJobPreservesCheckpoint(t *testing.T) {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"checkpointed","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "review-owner", resultJSON, nil, nil, now.Add(time.Second)); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "review-owner", resultJSON, nil, nil, PatchIDUnavailable, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.FinishJob(ctx, job.ID, "review-owner", JobFailed, "publication_failed", "private publication error", now.Add(2*time.Second)); err != nil {

@@ -64,7 +64,7 @@ func TestSaveReviewResultPersistsVersionedMemoryRetrieval(t *testing.T) {
 	retrieval := ReviewMemoryRetrieval{
 		MemoryID: "WT-M-" + strings.Repeat("A", 26), MemoryUpdatedAt: now.Add(-time.Hour), RetrievedAt: now.Add(-time.Second),
 	}
-	if err := storage.SaveReviewResult(ctx, job.ID, "owner", []byte(`{"summary":"ok","findings":[]}`), nil, []ReviewMemoryRetrieval{retrieval}, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "owner", []byte(`{"summary":"ok","findings":[]}`), nil, []ReviewMemoryRetrieval{retrieval}, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	var memoryID, updatedAt, retrievedAt string
@@ -106,7 +106,7 @@ func activateReviewMemory(t *testing.T, storage *Store, fixture memoryFixture, n
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, []string{fixture.findingID}, nil, now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, []string{fixture.findingID}, nil, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(ctx, job.ID, owner, "<!-- "+fixture.delivery+" -->", job.ID, now.Add(time.Second)); err != nil {

@@ -13,7 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 const (
 	OutcomeQueued          = "queued"
@@ -29,6 +29,13 @@ const (
 	JobCompleted  = "completed"
 	JobFailed     = "failed"
 	JobObsolete   = "obsolete"
+)
+
+const (
+	PatchIDUnknown     = "unknown"
+	PatchIDPending     = "pending"
+	PatchIDAvailable   = "available"
+	PatchIDUnavailable = "unavailable"
 )
 
 const timestampLayout = "2006-01-02T15:04:05.000000000Z"
@@ -79,6 +86,9 @@ type Job struct {
 	LeaseOwner          string
 	LeaseExpiresAt      time.Time
 	AttemptCount        int
+	PatchIDStatus       string
+	PatchIDSHA          string
+	EquivalentToJobID   int64
 	ValidatedResultJSON []byte
 	FindingIDs          []string
 }
@@ -463,6 +473,31 @@ ALTER TABLE review_memories_v7 RENAME TO review_memories;
 
 PRAGMA user_version = 7;
 `
+		case 7:
+			migration = `
+ALTER TABLE review_jobs ADD COLUMN patch_id_sha TEXT
+    CHECK(
+        patch_id_sha IS NULL OR (
+            length(patch_id_sha) IN (40, 64) AND
+            patch_id_sha = lower(patch_id_sha) AND
+            patch_id_sha NOT GLOB '*[^0-9a-f]*'
+        )
+    );
+ALTER TABLE review_jobs ADD COLUMN patch_id_status TEXT NOT NULL DEFAULT 'unknown'
+    CHECK(patch_id_status IN ('unknown', 'pending', 'available', 'unavailable'))
+    CHECK((patch_id_status = 'available') = (patch_id_sha IS NOT NULL));
+ALTER TABLE review_jobs ADD COLUMN equivalent_to_job_id INTEGER REFERENCES review_jobs(id)
+    CHECK(equivalent_to_job_id IS NULL OR equivalent_to_job_id != id)
+    CHECK(equivalent_to_job_id IS NULL OR patch_id_status = 'available');
+
+CREATE INDEX review_jobs_patch_id_idx
+ON review_jobs (
+    gitlab_instance, project_id, merge_request_iid,
+    patch_id_status, patch_id_sha, id DESC
+);
+
+PRAGMA user_version = 8;
+`
 		}
 
 		if _, err := tx.ExecContext(ctx, migration); err != nil {
@@ -646,14 +681,16 @@ WHERE id = (
     LIMIT 1
 )
 RETURNING id, gitlab_instance, project_id, merge_request_iid, head_sha,
-          state, lease_owner, lease_expires_at, attempt_count`,
+          state, lease_owner, lease_expires_at, attempt_count,
+          patch_id_status, COALESCE(patch_id_sha, ''), COALESCE(equivalent_to_job_id, 0)`,
 		JobQueued, JobPublishing, JobQueued, JobRunning, owner, leaseText, nowText, nowText,
 		maxAttempts, JobQueued, nowText, JobRunning, JobPublishing, nowText)
 
 	job := &Job{}
 	var leaseExpires string
 	if err := row.Scan(&job.ID, &job.GitLabInstance, &job.ProjectID, &job.MergeRequestIID,
-		&job.HeadSHA, &job.State, &job.LeaseOwner, &leaseExpires, &job.AttemptCount); err != nil {
+		&job.HeadSHA, &job.State, &job.LeaseOwner, &leaseExpires, &job.AttemptCount,
+		&job.PatchIDStatus, &job.PatchIDSHA, &job.EquivalentToJobID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -709,8 +746,138 @@ WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
 	return updated == 1, nil
 }
 
-func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, findingIDs []string, retrievals []ReviewMemoryRetrieval, now time.Time) error {
-	if len(resultJSON) == 0 || len(resultJSON) > 65536 || len(findingIDs) > 20 {
+func (s *Store) DeferPendingPatchID(ctx context.Context, jobID int64, owner string, now, nextAttempt time.Time) error {
+	if jobID <= 0 || owner == "" || now.IsZero() || nextAttempt.Before(now) {
+		return errors.New("invalid pending patch ID retry")
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = ?, patch_id_status = ?, patch_id_sha = NULL,
+    next_attempt_at = ?, lease_owner = NULL, lease_expires_at = NULL,
+    last_error_category = 'merge_request_patch_id_pending',
+    last_error_message = 'merge_request_patch_id_pending', updated_at = ?
+WHERE id = ? AND state = ? AND lease_owner = ? AND patch_id_status = ?
+  AND julianday(lease_expires_at) > julianday(?)`,
+		JobQueued, PatchIDPending, formatTime(nextAttempt), formatTime(now),
+		jobID, JobRunning, owner, PatchIDUnknown, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("defer pending patch ID: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect pending patch ID retry: %w", err)
+	}
+	if updated != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *Store) FindCanonicalReviewJob(ctx context.Context, jobID int64, patchIDSHA string) (int64, bool, error) {
+	if jobID <= 0 || !validPatchIDSHA(patchIDSHA) {
+		return 0, false, errors.New("invalid canonical review lookup")
+	}
+	var canonicalID int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT candidate.id
+FROM review_jobs source
+JOIN review_jobs candidate ON
+    candidate.gitlab_instance = source.gitlab_instance AND
+    candidate.project_id = source.project_id AND
+    candidate.merge_request_iid = source.merge_request_iid
+JOIN review_results result ON result.job_id = candidate.id
+JOIN publications publication ON publication.job_id = candidate.id
+WHERE source.id = ? AND candidate.id != source.id
+  AND candidate.state = ? AND candidate.patch_id_status = ?
+  AND candidate.patch_id_sha = ? AND candidate.equivalent_to_job_id IS NULL
+ORDER BY candidate.id DESC
+LIMIT 1`, jobID, JobCompleted, PatchIDAvailable, patchIDSHA).Scan(&canonicalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("find canonical review job: %w", err)
+	}
+	return canonicalID, true, nil
+}
+
+var errCanonicalReviewUnavailable = errors.New("canonical review unavailable")
+
+func (s *Store) CompleteEquivalentReview(ctx context.Context, jobID int64, owner string, canonicalJobID int64, patchIDSHA string, now time.Time) error {
+	if jobID <= 0 || owner == "" || canonicalJobID <= 0 || jobID == canonicalJobID ||
+		now.IsZero() || !validPatchIDSHA(patchIDSHA) {
+		return errors.New("invalid equivalent review completion")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin equivalent review transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var validSource int
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM review_jobs source
+    WHERE source.id = ? AND source.state = ? AND source.lease_owner = ?
+      AND julianday(source.lease_expires_at) > julianday(?)
+      AND source.patch_id_status IN (?, ?) AND source.patch_id_sha IS NULL
+      AND source.equivalent_to_job_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM review_results r WHERE r.job_id = source.id)
+      AND NOT EXISTS (SELECT 1 FROM publications p WHERE p.job_id = source.id)
+)`, jobID, JobRunning, owner, formatTime(now), PatchIDUnknown, PatchIDPending).Scan(&validSource); err != nil {
+		return fmt.Errorf("validate equivalent review source: %w", err)
+	}
+	if validSource != 1 {
+		return ErrLeaseLost
+	}
+	var validCanonical int
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1
+    FROM review_jobs source
+    JOIN review_jobs canonical ON canonical.id = ?
+    WHERE source.id = ? AND source.id != canonical.id
+      AND source.gitlab_instance = canonical.gitlab_instance
+      AND source.project_id = canonical.project_id
+      AND source.merge_request_iid = canonical.merge_request_iid
+      AND canonical.state = ? AND canonical.patch_id_status = ?
+      AND canonical.patch_id_sha = ? AND canonical.equivalent_to_job_id IS NULL
+      AND EXISTS (SELECT 1 FROM review_results r WHERE r.job_id = canonical.id)
+      AND EXISTS (SELECT 1 FROM publications p WHERE p.job_id = canonical.id)
+)`, canonicalJobID, jobID, JobCompleted, PatchIDAvailable, patchIDSHA).Scan(&validCanonical); err != nil {
+		return fmt.Errorf("validate canonical review job: %w", err)
+	}
+	if validCanonical != 1 {
+		return errCanonicalReviewUnavailable
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = ?, patch_id_status = ?, patch_id_sha = ?, equivalent_to_job_id = ?,
+    lease_owner = NULL, lease_expires_at = NULL,
+    last_error_category = NULL, last_error_message = NULL, updated_at = ?
+WHERE id = ? AND state = ? AND lease_owner = ?
+  AND julianday(lease_expires_at) > julianday(?)`,
+		JobCompleted, PatchIDAvailable, patchIDSHA, canonicalJobID, formatTime(now),
+		jobID, JobRunning, owner, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("complete equivalent review job: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect equivalent review completion: %w", err)
+	}
+	if updated != 1 {
+		return ErrLeaseLost
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit equivalent review transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, findingIDs []string, retrievals []ReviewMemoryRetrieval, patchIDStatus, patchIDSHA string, now time.Time) error {
+	if len(resultJSON) == 0 || len(resultJSON) > 65536 || len(findingIDs) > 20 ||
+		!validReviewPatchID(patchIDStatus, patchIDSHA) {
 		return errors.New("invalid validated review result")
 	}
 	seenIDs := make(map[string]struct{}, len(findingIDs))
@@ -762,10 +929,11 @@ VALUES (?, ?, ?, ?)`, jobID, retrieval.MemoryID, formatTime(retrieval.MemoryUpda
 	}
 	update, err := tx.ExecContext(ctx, `
 UPDATE review_jobs
-SET state = ?, updated_at = ?
-WHERE id = ? AND state = ? AND lease_owner = ?
+SET state = ?, patch_id_status = ?, patch_id_sha = ?, updated_at = ?
+WHERE id = ? AND state = ? AND lease_owner = ? AND equivalent_to_job_id IS NULL
   AND julianday(lease_expires_at) > julianday(?)`,
-		JobPublishing, formatTime(now), jobID, JobRunning, owner, formatTime(now))
+		JobPublishing, patchIDStatus, nullablePatchIDSHA(patchIDSHA), formatTime(now),
+		jobID, JobRunning, owner, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("checkpoint review result: %w", err)
 	}
@@ -857,14 +1025,18 @@ ON CONFLICT(job_id) DO UPDATE SET
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE review_jobs
-SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
+SET patch_id_status = CASE WHEN state = ? THEN ? ELSE patch_id_status END,
+    patch_id_sha = CASE WHEN state = ? THEN NULL ELSE patch_id_sha END,
+    state = ?, lease_owner = NULL, lease_expires_at = NULL,
     last_error_category = NULL, last_error_message = NULL, updated_at = ?
 WHERE id = ? AND lease_owner = ?
   AND julianday(lease_expires_at) > julianday(?)
   AND (
       (state = ? AND EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id)) OR
       (state = ? AND NOT EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id))
-  )`,
+  )
+  AND equivalent_to_job_id IS NULL`,
+		JobRunning, PatchIDUnknown, JobRunning,
 		JobCompleted, formatTime(now), jobID, owner, formatTime(now), JobPublishing, JobRunning)
 	if err != nil {
 		return fmt.Errorf("complete published review job: %w", err)
@@ -890,4 +1062,34 @@ func formatTime(value time.Time) string {
 
 func validFailure(category, message string) bool {
 	return category != "" && len(category) <= 128 && len(message) <= 512
+}
+
+func validReviewPatchID(status, sha string) bool {
+	switch status {
+	case PatchIDAvailable:
+		return validPatchIDSHA(sha)
+	case PatchIDUnavailable:
+		return sha == ""
+	default:
+		return false
+	}
+}
+
+func validPatchIDSHA(sha string) bool {
+	if len(sha) != 40 && len(sha) != 64 {
+		return false
+	}
+	for _, character := range sha {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func nullablePatchIDSHA(sha string) any {
+	if sha == "" {
+		return nil
+	}
+	return sha
 }

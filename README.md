@@ -12,11 +12,13 @@
 - Lets Gemini inspect bounded text snapshots from the current repository and explicitly shared related repositories
 - Lets Gemini consult repository-scoped advisory lessons derived from eligible review comments
 - Lets Gemini retrieve bounded public text from approved domains and exact configured GitHub repositories
-- Validates model output before posting one idempotent review note for each merge request revision
-- Persists webhook, job, result, publication, feedback, and advisory-memory state in SQLite
+- Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
+- Persists webhook, job, patch-equivalence, result, publication, feedback, and advisory-memory state in SQLite
 - Shows persisted review, feedback, and runtime-memory state in a built-in read-only web panel
 
 Wormtamer supports GitLab 17 and newer. Each deployment serves one team and runs as one process and one replica.
+
+Patch equivalence uses GitLab's whitespace-insensitive patch IDs. It can therefore suppress a whitespace-only update or reuse a review after target-branch context changes. Exact head SHA remains the review and finding identity. Equivalence is retained only in SQLite: after database loss, an unchanged head can still be recovered from its marked note, but a rebased head is reviewed and published again.
 
 ## Deliberately small
 

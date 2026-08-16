@@ -258,6 +258,71 @@ func TestFeedbackIgnoresRecoveredPublicationWithoutReviewResult(t *testing.T) {
 	assertCount(t, storage.db, "feedback_jobs", 0)
 }
 
+func TestFeedbackResolvesNewestEquivalentRevisionToCanonicalReview(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Add(time.Hour)
+	patchX := strings.Repeat("a", 40)
+
+	canonicalX := preparePublishedReview(t, storage, now, "review-x", strings.Repeat("1", 40),
+		[]byte(`{"summary":"X","findings":[]}`), nil)
+	if _, err := storage.db.Exec(`
+UPDATE review_jobs SET patch_id_status = ?, patch_id_sha = ? WHERE id = ?`,
+		PatchIDAvailable, patchX, canonicalX); err != nil {
+		t.Fatal(err)
+	}
+	preparePublishedReview(t, storage, now.Add(10*time.Second), "review-y", strings.Repeat("2", 40),
+		[]byte(`{"summary":"Y","findings":[]}`), nil)
+
+	event := readyEvent("equivalent-x")
+	event.HeadSHA = strings.Repeat("3", 40)
+	equivalent, err := storage.AcceptEvent(ctx, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := storage.ClaimJob(ctx, "equivalent-owner", now.Add(20*time.Second), time.Minute, 5)
+	if err != nil || job == nil || job.ID != equivalent.JobID {
+		t.Fatalf("ClaimJob(equivalent) = %+v, %v", job, err)
+	}
+	if err := storage.CompleteEquivalentReview(ctx, job.ID, "equivalent-owner", canonicalX, patchX, now.Add(21*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
+		DeliveryID: "feedback-after-equivalent", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "create", SourceUpdatedAt: now.Add(22 * time.Second),
+	}, now.Add(22*time.Second))
+	if err != nil || accepted.JobID == 0 {
+		t.Fatalf("AcceptFeedbackEvent() = %+v, %v", accepted, err)
+	}
+	var boundReviewID int64
+	if err := storage.db.QueryRow(`SELECT review_job_id FROM feedback_jobs WHERE id = ?`, accepted.JobID).Scan(&boundReviewID); err != nil {
+		t.Fatal(err)
+	}
+	if boundReviewID != canonicalX {
+		t.Fatalf("feedback bound review = %d, want canonical X %d", boundReviewID, canonicalX)
+	}
+
+	preparePublishedReview(t, storage, now.Add(30*time.Second), "review-z", strings.Repeat("4", 40),
+		[]byte(`{"summary":"Z","findings":[]}`), nil)
+	updated, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
+		DeliveryID: "feedback-after-equivalent-update", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "update", SourceUpdatedAt: now.Add(32 * time.Second),
+	}, now.Add(32*time.Second))
+	if err != nil || updated.JobID != accepted.JobID {
+		t.Fatalf("AcceptFeedbackEvent(update) = %+v, %v", updated, err)
+	}
+	if err := storage.db.QueryRow(`SELECT review_job_id FROM feedback_jobs WHERE id = ?`, accepted.JobID).Scan(&boundReviewID); err != nil {
+		t.Fatal(err)
+	}
+	if boundReviewID != canonicalX {
+		t.Fatalf("updated feedback rebound review = %d, want %d", boundReviewID, canonicalX)
+	}
+}
+
 func TestFeedbackBindsLatestPublishedReviewWithoutFallingBackToFindings(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
@@ -313,7 +378,7 @@ func preparePublishedReview(t *testing.T, storage *Store, now time.Time, deliver
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, findingIDs, nil, now.Add(time.Second)); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, findingIDs, nil, PatchIDUnavailable, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(ctx, job.ID, owner, "<!-- "+delivery+" -->", job.ID, now.Add(2*time.Second)); err != nil {

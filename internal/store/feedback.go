@@ -158,13 +158,20 @@ WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.note_id = ?`,
 	}
 	if newJob {
 		err = tx.QueryRowContext(ctx, `
-SELECT j.id
-FROM review_jobs j
-JOIN review_results r ON r.job_id = j.id
-JOIN publications p ON p.job_id = j.id
-WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.merge_request_iid = ?
-ORDER BY p.created_at DESC, j.id DESC
-LIMIT 1`, event.GitLabInstance, event.ProjectID, event.MergeRequestIID).Scan(&reviewJobID)
+SELECT effective.id
+FROM review_jobs candidate
+JOIN review_jobs effective ON effective.id = COALESCE(candidate.equivalent_to_job_id, candidate.id)
+JOIN review_results r ON r.job_id = effective.id
+JOIN publications p ON p.job_id = effective.id
+WHERE candidate.gitlab_instance = ? AND candidate.project_id = ?
+  AND candidate.merge_request_iid = ? AND candidate.state = ?
+  AND effective.gitlab_instance = candidate.gitlab_instance
+  AND effective.project_id = candidate.project_id
+  AND effective.merge_request_iid = candidate.merge_request_iid
+  AND effective.state = ? AND effective.equivalent_to_job_id IS NULL
+ORDER BY candidate.id DESC
+LIMIT 1`, event.GitLabInstance, event.ProjectID, event.MergeRequestIID,
+			JobCompleted, JobCompleted).Scan(&reviewJobID)
 		if errors.Is(err, sql.ErrNoRows) {
 			result.Outcome = FeedbackOutcomeIgnoredReview
 			if _, err := tx.ExecContext(ctx, `UPDATE feedback_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {

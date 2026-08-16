@@ -117,6 +117,7 @@ func TestReviewDetailEscapesUntrustedContentAndDistinguishesPublication(t *testi
 			ID: 9, ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
 			HeadSHA: strings.Repeat("a", 40), Source: "webhook", State: store.JobCompleted,
 			CreatedAt: now, UpdatedAt: &now, LastErrorCategory: "safe_failure_category",
+			PatchIDStatus: store.PatchIDAvailable, PatchIDSHA: strings.Repeat("d", 64),
 			HasResult: true, Published: true,
 		},
 		ReviewID: "WT-R-" + strings.Repeat("B", 26), Result: &result,
@@ -132,7 +133,8 @@ func TestReviewDetailEscapesUntrustedContentAndDistinguishesPublication(t *testi
 		!strings.Contains(body, "summary &lt;script&gt;alert(1)&lt;/script&gt; **markdown**") ||
 		!strings.Contains(body, "file&lt;script&gt;.go") || strings.Contains(body, "<script>") ||
 		strings.Contains(body, "<img src=x>") || strings.Contains(body, "<iframe>") ||
-		!strings.Contains(body, "#note_81") || !strings.Contains(body, "safe_failure_category") {
+		!strings.Contains(body, "#note_81") || !strings.Contains(body, strings.Repeat("d", 64)) ||
+		!strings.Contains(body, "safe_failure_category") {
 		t.Fatalf("review detail status=%d body=%s", response.Code, body)
 	}
 	storage.detail = store.ReviewRecordDetail{
@@ -147,6 +149,21 @@ func TestReviewDetailEscapesUntrustedContentAndDistinguishesPublication(t *testi
 	if response.Code != http.StatusOK || !strings.Contains(strings.ToLower(response.Body.String()), "external-only") ||
 		!strings.Contains(response.Body.String(), "No local structured result is available") {
 		t.Fatalf("external-only detail status=%d body=%s", response.Code, response.Body.String())
+	}
+	storage.detail = store.ReviewRecordDetail{
+		ReviewRecord: store.ReviewRecord{
+			ID: 11, ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+			HeadSHA: strings.Repeat("c", 40), Source: "webhook", State: store.JobCompleted,
+			CreatedAt: now, PatchIDStatus: store.PatchIDAvailable, PatchIDSHA: strings.Repeat("d", 64),
+			Equivalent: true, EquivalentToJobID: 9,
+		},
+		ReviewID: "WT-R-" + strings.Repeat("F", 26),
+	}
+	response = request(t, handler, http.MethodGet, "/reviews/11")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Equivalent to canonical") ||
+		!strings.Contains(response.Body.String(), "/reviews/9") ||
+		strings.Contains(response.Body.String(), "No locally validated result has been checkpointed") {
+		t.Fatalf("equivalent detail status=%d body=%s", response.Code, response.Body.String())
 	}
 	response = request(t, handler, http.MethodGet, "/reviews/not-a-number")
 	if response.Code != http.StatusBadRequest {

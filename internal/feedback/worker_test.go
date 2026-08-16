@@ -106,7 +106,7 @@ func TestWorkerEvaluatesNaturalFeedbackAgainstZeroFindingReview(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", []byte(`{"summary":"No actionable findings.","findings":[]}`), nil, nil, now); err != nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", []byte(`{"summary":"No actionable findings.","findings":[]}`), nil, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(context.Background(), job.ID, "review-owner", "<!-- zero-review -->", 100, now.Add(time.Second)); err != nil {
@@ -237,7 +237,7 @@ func prepareReviewFinding(t *testing.T, storage *store.Store, now time.Time) str
 	}
 	findingID := "WT-F-" + strings.Repeat("A", 26)
 	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", result, []string{findingID}, nil, now); err != nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", result, []string{findingID}, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.CompletePublication(context.Background(), job.ID, "review-owner", "<!-- review -->", 99, now.Add(time.Second)); err != nil {
