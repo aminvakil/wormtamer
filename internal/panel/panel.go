@@ -19,7 +19,7 @@ import (
 
 const (
 	pageSize        = 50
-	dashboardRecent = 10
+	dashboardRecent = 5
 )
 
 //go:embed templates/*.html assets/*.css
@@ -75,6 +75,13 @@ type sharingView struct {
 
 type stateView struct {
 	State string
+	URL   string
+	Count int
+}
+
+type metricView struct {
+	Label string
+	Tone  string
 	Count int
 }
 
@@ -98,18 +105,20 @@ type memoryView struct {
 
 type overviewPage struct {
 	Page           string
+	Title          string
 	Config         configView
+	Metrics        []metricView
 	ReviewStates   []stateView
 	FeedbackStates []stateView
 	OldestReview   *time.Time
 	OldestFeedback *time.Time
-	ActiveMemories int
 	RecentReviews  []reviewView
 	RecentFeedback []feedbackView
 }
 
 type reviewsPage struct {
 	Page       string
+	Title      string
 	Records    []reviewView
 	State      string
 	NextURL    string
@@ -118,6 +127,7 @@ type reviewsPage struct {
 
 type reviewDetailPage struct {
 	Page            string
+	Title           string
 	Detail          store.ReviewRecordDetail
 	Project         string
 	MergeRequestURL string
@@ -126,6 +136,7 @@ type reviewDetailPage struct {
 
 type feedbackPage struct {
 	Page       string
+	Title      string
 	Records    []feedbackView
 	State      string
 	NextURL    string
@@ -134,6 +145,7 @@ type feedbackPage struct {
 
 type memoryPage struct {
 	Page        string
+	Title       string
 	Records     []memoryView
 	Active      string
 	NextURL     string
@@ -158,9 +170,15 @@ func New(storage Store, config Config, logger *slog.Logger) (*Handler, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	templates, err := template.New("panel").Funcs(template.FuncMap{
-		"formatTime":         formatTime,
-		"formatOptionalTime": formatOptionalTime,
-		"shortSHA":           shortSHA,
+		"formatTime":                formatTime,
+		"formatOptionalTime":        formatOptionalTime,
+		"formatCompactTime":         formatCompactTime,
+		"formatCompactOptionalTime": formatCompactOptionalTime,
+		"timeAttribute":             timeAttribute,
+		"optionalTimeAttribute":     optionalTimeAttribute,
+		"sourceLabel":               sourceLabel,
+		"patchStatusLabel":          patchStatusLabel,
+		"shortSHA":                  shortSHA,
 	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse panel templates: %w", err)
@@ -201,12 +219,12 @@ func (h *Handler) overview(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	page := overviewPage{
-		Page: "overview", Config: h.config,
+		Page: "overview", Title: "Overview · Wormtamer", Config: h.config,
+		Metrics:        overviewMetrics(dashboard),
 		ReviewStates:   reviewStateViews(dashboard.ReviewCounts),
 		FeedbackStates: feedbackStateViews(dashboard.FeedbackCounts),
 		OldestReview:   dashboard.OldestQueuedReview,
 		OldestFeedback: dashboard.OldestQueuedFeedback,
-		ActiveMemories: dashboard.ActiveMemoryCount,
 		RecentReviews:  h.reviewViews(dashboard.RecentReviews),
 		RecentFeedback: h.feedbackViews(dashboard.RecentFeedback),
 	}
@@ -225,7 +243,8 @@ func (h *Handler) reviews(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	page := reviewsPage{
-		Page: "reviews", Records: h.reviewViews(pageRecords.Records), State: state,
+		Page: "reviews", Title: "Reviews · Wormtamer",
+		Records: h.reviewViews(pageRecords.Records), State: state,
 		StateLinks: stateLinks("/reviews", state, reviewStates()),
 	}
 	if pageRecords.NextBefore > 0 {
@@ -255,7 +274,7 @@ func (h *Handler) reviewDetail(w http.ResponseWriter, request *http.Request) {
 	}
 	mergeRequestURL := h.mergeRequestURL(detail.ProjectPath, detail.MergeRequestIID)
 	page := reviewDetailPage{
-		Page: "reviews", Detail: detail,
+		Page: "reviews", Title: fmt.Sprintf("Review #%d · Wormtamer", detail.ID), Detail: detail,
 		Project:         projectLabel(detail.ProjectPath, detail.ProjectID),
 		MergeRequestURL: mergeRequestURL,
 	}
@@ -277,7 +296,8 @@ func (h *Handler) feedback(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	page := feedbackPage{
-		Page: "feedback", Records: h.feedbackViews(pageRecords.Records), State: state,
+		Page: "feedback", Title: "Feedback · Wormtamer",
+		Records: h.feedbackViews(pageRecords.Records), State: state,
 		StateLinks: stateLinks("/feedback", state, feedbackStates()),
 	}
 	if pageRecords.NextBefore > 0 {
@@ -298,7 +318,8 @@ func (h *Handler) memory(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	page := memoryPage{
-		Page: "memory", Records: h.memoryViews(pageRecords.Records), Active: activeText,
+		Page: "memory", Title: "Runtime memory · Wormtamer",
+		Records: h.memoryViews(pageRecords.Records), Active: activeText,
 		FilterLinks: []filterLink{
 			{Label: "All", URL: "/memory", Current: activeText == ""},
 			{Label: "Active", URL: "/memory?active=true", Current: activeText == "true"},
@@ -387,23 +408,45 @@ func panelConfig(config Config) configView {
 }
 
 func reviewStateViews(counts []store.StateCount) []stateView {
-	return orderedStateViews(counts, reviewStates())
+	return orderedStateViews(counts, reviewStates(), "/reviews")
 }
 
 func feedbackStateViews(counts []store.StateCount) []stateView {
-	return orderedStateViews(counts, feedbackStates())
+	return orderedStateViews(counts, feedbackStates(), "/feedback")
 }
 
-func orderedStateViews(counts []store.StateCount, states []string) []stateView {
+func orderedStateViews(counts []store.StateCount, states []string, path string) []stateView {
 	byState := make(map[string]int, len(counts))
 	for _, count := range counts {
 		byState[count.State] = count.Count
 	}
 	views := make([]stateView, len(states))
 	for index, state := range states {
-		views[index] = stateView{State: state, Count: byState[state]}
+		views[index] = stateView{
+			State: state, Count: byState[state],
+			URL: path + "?state=" + url.QueryEscape(state),
+		}
 	}
 	return views
+}
+
+func overviewMetrics(dashboard store.Dashboard) []metricView {
+	reviews := stateCounts(dashboard.ReviewCounts)
+	feedback := stateCounts(dashboard.FeedbackCounts)
+	return []metricView{
+		{Label: "Waiting", Tone: "waiting", Count: reviews[store.JobQueued] + feedback[store.FeedbackQueued]},
+		{Label: "In progress", Tone: "active", Count: reviews[store.JobRunning] + reviews[store.JobPublishing] + feedback[store.FeedbackRunning]},
+		{Label: "Failed", Tone: "failed", Count: reviews[store.JobFailed] + feedback[store.FeedbackFailed]},
+		{Label: "Active lessons", Tone: "memory", Count: dashboard.ActiveMemoryCount},
+	}
+}
+
+func stateCounts(counts []store.StateCount) map[string]int {
+	values := make(map[string]int, len(counts))
+	for _, count := range counts {
+		values[count.State] = count.Count
+	}
+	return values
 }
 
 func reviewStates() []string {
@@ -568,6 +611,57 @@ func formatOptionalTime(timestamp *time.Time) string {
 		return "—"
 	}
 	return formatTime(*timestamp)
+}
+
+func formatCompactTime(timestamp time.Time) string {
+	if timestamp.IsZero() {
+		return "—"
+	}
+	return timestamp.UTC().Format("2006 Jan 02 · 15:04 UTC")
+}
+
+func formatCompactOptionalTime(timestamp *time.Time) string {
+	if timestamp == nil {
+		return "—"
+	}
+	return formatCompactTime(*timestamp)
+}
+
+func timeAttribute(timestamp time.Time) string {
+	if timestamp.IsZero() {
+		return ""
+	}
+	return timestamp.UTC().Format(time.RFC3339Nano)
+}
+
+func optionalTimeAttribute(timestamp *time.Time) string {
+	if timestamp == nil {
+		return ""
+	}
+	return timeAttribute(*timestamp)
+}
+
+func sourceLabel(source string) string {
+	if source == "reconciled" {
+		return "Reconciler"
+	}
+	if source == "webhook" {
+		return "Webhook"
+	}
+	return source
+}
+
+func patchStatusLabel(status string) string {
+	switch status {
+	case store.PatchIDAvailable:
+		return "Patch ID available"
+	case store.PatchIDPending:
+		return "Patch ID pending"
+	case store.PatchIDUnavailable:
+		return "Patch ID unavailable"
+	default:
+		return "Patch ID not fetched"
+	}
 }
 
 func shortSHA(sha string) string {

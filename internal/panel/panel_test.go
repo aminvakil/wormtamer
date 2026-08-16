@@ -17,8 +17,15 @@ import (
 )
 
 func TestTimeFormattersRejectUnsupportedTemplateValues(t *testing.T) {
-	if formatTime(time.Time{}) != "—" || formatOptionalTime(nil) != "—" {
+	if formatTime(time.Time{}) != "—" || formatOptionalTime(nil) != "—" ||
+		formatCompactTime(time.Time{}) != "—" || formatCompactOptionalTime(nil) != "—" ||
+		timeAttribute(time.Time{}) != "" || optionalTimeAttribute(nil) != "" {
 		t.Fatal("zero or absent time did not render as missing")
+	}
+	now := time.Date(2026, 8, 16, 12, 0, 0, 123, time.FixedZone("test", 90*60))
+	if formatCompactTime(now) != "2026 Aug 16 · 10:30 UTC" ||
+		timeAttribute(now) != "2026-08-16T10:30:00.000000123Z" {
+		t.Fatalf("compact time = %q attribute = %q", formatCompactTime(now), timeAttribute(now))
 	}
 	for name, source := range map[string]string{
 		"required": `{{formatTime .}}`,
@@ -53,8 +60,10 @@ func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
 	handler := newTestHandler(t, storage)
 	response := request(t, handler, http.MethodGet, "/")
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, "Review activity") ||
-		!strings.Contains(body, ">2</strong>") || !strings.Contains(body, "group/project") ||
+	if response.Code != http.StatusOK || !strings.Contains(body, "<title>Overview · Wormtamer</title>") ||
+		!strings.Contains(body, "Skip to content") || !strings.Contains(body, `aria-current="page"`) ||
+		!strings.Contains(body, "Review activity") || !strings.Contains(body, `data-tone="waiting" data-empty="false"><span>Waiting</span><strong>2</strong>`) ||
+		!strings.Contains(body, "No queued feedback") || !strings.Contains(body, "group/project") ||
 		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "docs.example.com") ||
 		!strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
@@ -82,7 +91,10 @@ func TestReviewListValidatesFiltersAndPaginates(t *testing.T) {
 	response := request(t, handler, http.MethodGet, "/reviews?state=failed&before=10")
 	body := response.Body.String()
 	if response.Code != http.StatusOK || storage.reviewState != store.JobFailed || storage.reviewBefore != 10 ||
-		storage.reviewLimit != pageSize || !strings.Contains(body, "Project #55") ||
+		storage.reviewLimit != pageSize || !strings.Contains(body, "<title>Reviews · Wormtamer</title>") ||
+		!strings.Contains(body, `class="filter current" aria-current="page"`) ||
+		!strings.Contains(body, "Review #8") || !strings.Contains(body, "Project #55") ||
+		!strings.Contains(body, "Reconciler") || !strings.Contains(body, `data-retried="true"`) ||
 		!strings.Contains(body, "Older reviews") || !strings.Contains(body, "before=8") ||
 		!strings.Contains(body, "state=failed") {
 		t.Fatalf("reviews status=%d calls=%+v body=%s", response.Code, storage, body)
@@ -147,7 +159,8 @@ func TestReviewDetailEscapesUntrustedContentAndDistinguishesPublication(t *testi
 	}
 	response = request(t, handler, http.MethodGet, "/reviews/10")
 	if response.Code != http.StatusOK || !strings.Contains(strings.ToLower(response.Body.String()), "external-only") ||
-		!strings.Contains(response.Body.String(), "No local structured result is available") {
+		!strings.Contains(response.Body.String(), "No local structured result is available") ||
+		strings.Contains(response.Body.String(), "<h3>Failure</h3>") {
 		t.Fatalf("external-only detail status=%d body=%s", response.Code, response.Body.String())
 	}
 	storage.detail = store.ReviewRecordDetail{
@@ -203,6 +216,7 @@ func TestFeedbackAndMemoryViewsUseBoundedReadQueries(t *testing.T) {
 	feedback := request(t, handler, http.MethodGet, "/feedback?state=completed")
 	if feedback.Code != http.StatusOK || storage.feedbackState != store.FeedbackCompleted ||
 		storage.feedbackLimit != pageSize || !strings.Contains(feedback.Body.String(), "Review #9") ||
+		!strings.Contains(feedback.Body.String(), `class="filter current" aria-current="page"`) ||
 		!strings.Contains(feedback.Body.String(), "Older feedback") {
 		t.Fatalf("feedback status=%d body=%s", feedback.Code, feedback.Body.String())
 	}
@@ -232,7 +246,9 @@ func TestPanelErrorsAreGenericAndStylesheetIsEmbedded(t *testing.T) {
 	}
 	css := request(t, handler, http.MethodGet, "/assets/panel.css")
 	if css.Code != http.StatusOK || !strings.HasPrefix(css.Header().Get("Content-Type"), "text/css") ||
-		!strings.Contains(css.Body.String(), "--background") {
+		!strings.Contains(css.Body.String(), "--background") ||
+		!strings.Contains(css.Body.String(), ":focus-visible") ||
+		!strings.Contains(css.Body.String(), "prefers-reduced-motion") {
 		t.Fatalf("stylesheet status=%d body=%s", css.Code, css.Body.String())
 	}
 	if css.Header().Get("Cache-Control") != "public, max-age=3600" {
