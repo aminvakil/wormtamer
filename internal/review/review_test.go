@@ -145,7 +145,9 @@ func TestGeminiReviewModelContract(t *testing.T) {
 		"changed behavior, triggering scenario, and impact", "Consolidate findings with the same root cause",
 		"P0 means an immediate deployment or operations blocker", "P3 means a limited but real defect",
 		"Read an exact known file path directly", "Scope recursive listing or search to a known relevant directory",
-		"root listing or search remains valid", "exact repository and immutable revision",
+		"root listing or search remains valid", "multiple tool calls are independent", "complete arguments are already known",
+		"request them together in one turn", "Keep calls sequential", "do not guess an argument",
+		"exact repository and immutable revision",
 		"Current code, the changed diff, and explicit project policy always override conflicting memory",
 		"When another tool request would exceed a limit", "Never place private repository content",
 		"suspected secret is present", "Return only the requested structured result",
@@ -476,6 +478,82 @@ func TestGeminiReviewerDispatchesBoundedRepositoryToolCall(t *testing.T) {
 	response := request[2].Parts[0].FunctionResponse
 	if response == nil || response.ID != "call-1" || response.Name != repository.ToolReadFile || response.Response["path"] != "internal/helper.go" {
 		t.Fatalf("function response = %+v", response)
+	}
+}
+
+func TestGeminiReviewerDispatchesIndependentToolCallsInOneTurn(t *testing.T) {
+	parts := []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{
+			ID: "repository-call", Name: repository.ToolReadFile,
+			Args: map[string]any{"repository": "group/project", "path": "internal/helper.go"},
+		}},
+		{FunctionCall: &genai.FunctionCall{
+			ID: "memory-call", Name: ToolSearchMemory,
+			Args: map[string]any{"query": "generated files"},
+		}},
+		{FunctionCall: &genai.FunctionCall{
+			ID: "public-call", Name: publicsource.ToolFetchURL,
+			Args: map[string]any{"url": "https://openbao.org/docs"},
+		}},
+	}
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts(parts, genai.RoleModel),
+		genai.NewContentFromText(`{"summary":"independent evidence checked","findings":[]}`, genai.RoleModel),
+	}}
+	wantNames := []string{repository.ToolReadFile, ToolSearchMemory, publicsource.ToolFetchURL}
+	broker := &fakeToolBroker{callFn: func(call int, name string, args map[string]any) (map[string]any, error) {
+		if call > len(wantNames) || name != wantNames[call-1] {
+			t.Fatalf("broker call %d tool = %q", call, name)
+		}
+		switch call {
+		case 1:
+			if args["repository"] != "group/project" || args["path"] != "internal/helper.go" {
+				t.Fatalf("repository arguments = %+v", args)
+			}
+		case 2:
+			if args["query"] != "generated files" {
+				t.Fatalf("memory arguments = %+v", args)
+			}
+		case 3:
+			if args["url"] != "https://openbao.org/docs" {
+				t.Fatalf("public arguments = %+v", args)
+			}
+		}
+		return map[string]any{"sequence": call, "tool": name}, nil
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
+
+	result, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	if err != nil || result.Summary != "independent evidence checked" {
+		t.Fatalf("Review() result=%+v error=%v", result, err)
+	}
+	if broker.calls != len(parts) || generator.calls != 2 {
+		t.Fatalf("broker calls=%d generator calls=%d", broker.calls, generator.calls)
+	}
+	responses := generator.requests[1][2].Parts
+	if len(responses) != len(parts) {
+		t.Fatalf("function responses=%d, want %d", len(responses), len(parts))
+	}
+	for index, part := range responses {
+		response := part.FunctionResponse
+		if response == nil || response.ID != parts[index].FunctionCall.ID || response.Name != wantNames[index] || response.Response["sequence"] != index+1 {
+			t.Fatalf("function response %d = %+v", index, response)
+		}
+	}
+	generationEvents := jsonLogEvents(t, logs.String(), "Gemini review generation")
+	if len(generationEvents) != 2 || generationEvents[0]["tool_call_count"] != float64(len(parts)) {
+		t.Fatalf("generation telemetry = %+v", generationEvents)
+	}
+	toolNames, ok := generationEvents[0]["tool_names"].([]any)
+	if !ok || len(toolNames) != len(wantNames) {
+		t.Fatalf("tool names = %+v", generationEvents[0]["tool_names"])
+	}
+	for index, name := range wantNames {
+		if toolNames[index] != name {
+			t.Fatalf("tool name %d = %v, want %q", index, toolNames[index], name)
+		}
 	}
 }
 
