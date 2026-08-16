@@ -311,6 +311,17 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 				continue
 			}
 			result, callErr := tools.Call(requestCtx, call.Name, call.Args)
+			if callErr == nil && categories[index] == internalRepositoryToolCategory {
+				repositoryName, ok := call.Args["repository"].(string)
+				if !ok || repositoryName == "" {
+					return Result{}, nil, failure.Retry("repository_tool_output_invalid", 0)
+				}
+				logger.InfoContext(requestCtx, "Gemini review repository accessed",
+					"turn", turn,
+					"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256),
+					"repository", boundedDiagnosticValue(repositoryName, r.forbidden, 256),
+					"outcome", "completed")
+			}
 			if callErr != nil {
 				if requestCtx.Err() != nil {
 					if ctx.Err() != nil {

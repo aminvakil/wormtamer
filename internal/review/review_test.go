@@ -342,6 +342,59 @@ func TestGeminiReviewerDebugLogsModelTranscript(t *testing.T) {
 	}
 }
 
+func TestGeminiReviewerInfoLogsInternalRepositoryAccess(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "call-1", Name: repository.ToolReadFile,
+			Args: map[string]any{"repository": "group/related", "path": "private/helper.go"},
+		}}}, genai.RoleModel),
+		genai.NewContentFromText(`{"summary":"related repository checked","findings":[]}`, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{result: map[string]any{
+		"path": "private/helper.go", "lines": []string{"private source"},
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
+
+	if _, _, err := reviewer.Review(context.Background(), testSnapshot(), broker); err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	events := jsonLogEvents(t, logs.String(), "Gemini review repository accessed")
+	if len(events) != 1 {
+		t.Fatalf("repository access log events = %d, want 1: %s", len(events), logs.String())
+	}
+	event := events[0]
+	if event["repository"] != "group/related" || event["tool"] != repository.ToolReadFile || event["turn"] != float64(0) ||
+		event["outcome"] != "completed" || event["project_id"] != float64(42) || event["merge_request_iid"] != float64(7) {
+		t.Fatalf("repository access event = %+v", event)
+	}
+	if strings.Contains(logs.String(), "private/helper.go") || strings.Contains(logs.String(), "private source") {
+		t.Fatalf("info logs exposed repository tool arguments or content: %s", logs.String())
+	}
+}
+
+func TestGeminiReviewerRejectsSuccessfulRepositoryToolCallWithoutRepository(t *testing.T) {
+	generator := &fakeGenerator{turns: []*genai.Content{
+		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+			Name: repository.ToolReadFile, Args: map[string]any{"path": "helper.go"},
+		}}}, genai.RoleModel),
+	}}
+	broker := &fakeToolBroker{result: map[string]any{"path": "helper.go", "lines": []string{"package helper"}}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, logger)
+
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "repository_tool_output_invalid" || !failureError.Retryable {
+		t.Fatalf("Review() error = %v, want retryable repository_tool_output_invalid", err)
+	}
+	if broker.calls != 1 || len(jsonLogEvents(t, logs.String(), "Gemini review repository accessed")) != 0 {
+		t.Fatalf("broker calls=%d logs=%s", broker.calls, logs.String())
+	}
+}
+
 func TestGeminiReviewerDoesNotLogRejectedSensitiveResponses(t *testing.T) {
 	const secret = `configured-credential`
 	tests := []struct {
@@ -466,14 +519,18 @@ func TestGeminiReviewerDispatchesPublicSourceTool(t *testing.T) {
 	}
 }
 
-func TestGeminiReviewerRejectsSensitiveRepositoryToolOutput(t *testing.T) {
+func TestGeminiReviewerLogsRepositoryAccessBeforeRejectingSensitiveToolOutput(t *testing.T) {
+	const secret = "configured-credential"
 	generator := &fakeGenerator{turns: []*genai.Content{
 		genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
-			Name: repository.ToolSearch, Args: map[string]any{"query": "token"},
+			Name: repository.ToolSearch, Args: map[string]any{"repository": "group/project", "query": "token"},
 		}}}, genai.RoleModel),
 	}}
-	broker := &fakeToolBroker{result: map[string]any{"matches": []string{`contains a"b`}}}
-	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", []string{`a"b`})
+	broker := &fakeToolBroker{result: map[string]any{"matches": []string{"contains " + secret}}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	reviewer := newGeminiReviewer(generator, "gemini-test", []string{secret}, logger)
+
 	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
 	var failureError *failure.Error
 	if !errors.As(err, &failureError) || failureError.Category != "sensitive_tool_content" || failureError.Retryable {
@@ -481,6 +538,13 @@ func TestGeminiReviewerRejectsSensitiveRepositoryToolOutput(t *testing.T) {
 	}
 	if generator.calls != 1 {
 		t.Fatalf("sensitive output sent back to Gemini; calls=%d", generator.calls)
+	}
+	events := jsonLogEvents(t, logs.String(), "Gemini review repository accessed")
+	if len(events) != 1 || events[0]["repository"] != "group/project" || events[0]["tool"] != repository.ToolSearch {
+		t.Fatalf("repository access events = %+v", events)
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Fatalf("repository access logs exposed sensitive tool output: %s", logs.String())
 	}
 }
 
@@ -745,7 +809,11 @@ func TestGeminiReviewerPartiallyAdmitsOverBudgetBatches(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			parts := make([]*genai.Part, test.limit+1)
 			for index := range parts {
-				parts[index] = &genai.Part{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("call-%d", index), Name: test.tool}}
+				call := &genai.FunctionCall{ID: fmt.Sprintf("call-%d", index), Name: test.tool}
+				if test.tool == repository.ToolListFiles {
+					call.Args = map[string]any{"repository": "group/project"}
+				}
+				parts[index] = &genai.Part{FunctionCall: call}
 			}
 			generator := &fakeGenerator{turns: []*genai.Content{
 				genai.NewContentFromParts(parts, genai.RoleModel),
@@ -818,6 +886,7 @@ func TestGeminiReviewerOrdersMixedCategoryAndCombinedLimitResponses(t *testing.T
 	for index := 0; index <= repository.ReviewResourceLimit; index++ {
 		parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{
 			ID: fmt.Sprintf("repository-%d", index), Name: repository.ToolListFiles,
+			Args: map[string]any{"repository": "group/project"},
 		}})
 	}
 	for index := 0; index <= maxMemoryToolCalls; index++ {
@@ -882,7 +951,10 @@ func TestGeminiReviewerDoesNotChargeDeniedResponsesAgainstToolResultBytes(t *tes
 	}
 	parts := make([]*genai.Part, repository.ReviewResourceLimit+1)
 	for index := range parts {
-		parts[index] = &genai.Part{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("call-%d", index), Name: repository.ToolListFiles}}
+		parts[index] = &genai.Part{FunctionCall: &genai.FunctionCall{
+			ID: fmt.Sprintf("call-%d", index), Name: repository.ToolListFiles,
+			Args: map[string]any{"repository": "group/project"},
+		}}
 	}
 	generator := &fakeGenerator{turns: []*genai.Content{
 		genai.NewContentFromParts(parts, genai.RoleModel),
@@ -1375,6 +1447,7 @@ func combinedBudgetToolCalls() []*genai.Part {
 	for index := 0; index < repository.ReviewResourceLimit; index++ {
 		parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{
 			ID: fmt.Sprintf("repository-%d", index), Name: repository.ToolListFiles,
+			Args: map[string]any{"repository": "group/project"},
 		}})
 	}
 	for index := 0; index < maxMemoryToolCalls; index++ {
