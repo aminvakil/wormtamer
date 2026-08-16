@@ -53,19 +53,98 @@ type Generation struct {
 }
 
 type Generator interface {
-	Generate(context.Context, string, []*genai.Content) (Generation, error)
+	Generate(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (Generation, error)
+}
+
+type reviewToolSet struct {
+	internalRepository bool
+	memory             bool
+	publicSource       bool
+}
+
+func (s reviewToolSet) any() bool {
+	return s.internalRepository || s.memory || s.publicSource
+}
+
+func (s reviewToolSet) contains(category reviewToolCategory) bool {
+	switch category {
+	case internalRepositoryToolCategory:
+		return s.internalRepository
+	case memoryToolCategory:
+		return s.memory
+	case publicSourceToolCategory:
+		return s.publicSource
+	default:
+		return false
+	}
+}
+
+type reviewToolCategory uint8
+
+const (
+	internalRepositoryToolCategory reviewToolCategory = iota
+	memoryToolCategory
+	publicSourceToolCategory
+)
+
+type reviewToolBudget struct {
+	internalRepository int
+	memory             int
+	publicSource       int
+	combined           int
+}
+
+func (b reviewToolBudget) available() reviewToolSet {
+	if b.combined >= maxTotalToolCalls {
+		return reviewToolSet{}
+	}
+	return reviewToolSet{
+		internalRepository: b.internalRepository < repository.ReviewResourceLimit,
+		memory:             b.memory < maxMemoryToolCalls,
+		publicSource:       b.publicSource < publicsource.MaxToolCalls,
+	}
+}
+
+func (b *reviewToolBudget) admit(category reviewToolCategory) string {
+	switch category {
+	case internalRepositoryToolCategory:
+		if b.internalRepository >= repository.ReviewResourceLimit {
+			return "repository_tool_call_limit_exceeded"
+		}
+	case memoryToolCategory:
+		if b.memory >= maxMemoryToolCalls {
+			return "memory_tool_call_limit_exceeded"
+		}
+	case publicSourceToolCategory:
+		if b.publicSource >= publicsource.MaxToolCalls {
+			return "public_source_tool_call_limit_exceeded"
+		}
+	}
+	if b.combined >= maxTotalToolCalls {
+		return "tool_call_limit_exceeded"
+	}
+	switch category {
+	case internalRepositoryToolCategory:
+		b.internalRepository++
+	case memoryToolCategory:
+		b.memory++
+	case publicSourceToolCategory:
+		b.publicSource++
+	}
+	b.combined++
+	return ""
 }
 
 type GeminiReviewer struct {
-	generator Generator
-	model     string
-	forbidden []string
-	logger    *slog.Logger
+	generator     Generator
+	model         string
+	thinkingLevel string
+	forbidden     []string
+	logger        *slog.Logger
 }
 
 type sdkGenerator struct {
-	client        *genai.Client
-	thinkingLevel string
+	client *genai.Client
 }
 
 func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger) (*GeminiReviewer, error) {
@@ -87,7 +166,9 @@ func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLeve
 	if err != nil {
 		return nil, errors.New("initialize Gemini client")
 	}
-	return newGeminiReviewer(&sdkGenerator{client: client, thinkingLevel: thinkingLevel}, model, forbidden, logger), nil
+	reviewer := newGeminiReviewer(&sdkGenerator{client: client}, model, forbidden, logger)
+	reviewer.thinkingLevel = thinkingLevel
+	return reviewer, nil
 }
 
 func resolvedGeminiBaseURL(configured string) string {
@@ -145,13 +226,16 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			"system_instruction", diagnosticValue(systemInstruction, r.forbidden),
 			"prompt", diagnosticValue(prompt, r.forbidden))
 	}
-	repositoryCalls := 0
-	memoryCalls := 0
-	publicCalls := 0
+	budget := reviewToolBudget{}
 	toolBytes := 0
+	finalOnly := false
 	for turn := 0; turn <= maxTotalToolCalls; turn++ {
+		available := budget.available()
+		if finalOnly {
+			available = reviewToolSet{}
+		}
 		started := time.Now()
-		generation, err := r.generator.Generate(requestCtx, r.model, contents)
+		generation, err := r.generator.Generate(requestCtx, r.model, contents, generationConfig(r.thinkingLevel, available))
 		latency := time.Since(started)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -186,7 +270,11 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			}
 			return result, encoded, nil
 		}
-		r.logGeneration(logger, requestCtx, turn, generation, latency, calls, "not_final")
+		validation := "not_final"
+		if finalOnly {
+			validation = "invalid_final_only"
+		}
+		r.logGeneration(logger, requestCtx, turn, generation, latency, calls, validation)
 		if logger.Enabled(requestCtx, slog.LevelDebug) {
 			for _, call := range calls {
 				logger.DebugContext(requestCtx, "Gemini review tool call",
@@ -196,37 +284,32 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 					"arguments", diagnosticJSON(call.Args, r.forbidden, 4096))
 			}
 		}
+		if finalOnly {
+			return Result{}, nil, failure.Retry("invalid_model_response", 0)
+		}
+		categories := make([]reviewToolCategory, len(calls))
+		for index, call := range calls {
+			category, ok := reviewToolCategoryForName(call.Name)
+			if !ok {
+				return Result{}, nil, failure.Retry("model_requested_undeclared_tool", 0)
+			}
+			categories[index] = category
+		}
 		if tools == nil {
 			return Result{}, nil, failure.Retry("tool_call_limit_exceeded", 0)
 		}
-		nextRepositoryCalls, nextMemoryCalls, nextPublicCalls := repositoryCalls, memoryCalls, publicCalls
-		for _, call := range calls {
-			switch call.Name {
-			case repository.ToolListFiles, repository.ToolReadFile, repository.ToolSearch:
-				nextRepositoryCalls++
-			case ToolSearchMemory:
-				nextMemoryCalls++
-			case publicsource.ToolFetchURL, publicsource.ToolListFiles, publicsource.ToolReadFile:
-				nextPublicCalls++
-			default:
-				return Result{}, nil, failure.Retry("model_requested_undeclared_tool", 0)
-			}
-		}
-		if nextRepositoryCalls > repository.ReviewResourceLimit {
-			return Result{}, nil, failure.Retry("repository_tool_call_limit_exceeded", 0)
-		}
-		if nextMemoryCalls > maxMemoryToolCalls {
-			return Result{}, nil, failure.Retry("memory_tool_call_limit_exceeded", 0)
-		}
-		if nextPublicCalls > publicsource.MaxToolCalls {
-			return Result{}, nil, failure.Retry("public_source_tool_call_limit_exceeded", 0)
-		}
-		if nextRepositoryCalls+nextMemoryCalls+nextPublicCalls > maxTotalToolCalls {
-			return Result{}, nil, failure.Retry("tool_call_limit_exceeded", 0)
-		}
-		repositoryCalls, memoryCalls, publicCalls = nextRepositoryCalls, nextMemoryCalls, nextPublicCalls
 		responses := make([]*genai.Part, 0, len(calls))
-		for _, call := range calls {
+		deniedCategory := ""
+		for index, call := range calls {
+			if limitCategory := budget.admit(categories[index]); limitCategory != "" {
+				if deniedCategory == "" {
+					deniedCategory = limitCategory
+				}
+				responses = append(responses, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+					ID: call.ID, Name: call.Name, Response: map[string]any{"error": limitCategory},
+				}})
+				continue
+			}
 			result, callErr := tools.Call(requestCtx, call.Name, call.Args)
 			if callErr != nil {
 				if requestCtx.Err() != nil {
@@ -271,6 +354,23 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			}})
 		}
 		contents = append(contents, genai.NewContentFromParts(responses, genai.RoleUser))
+		if deniedCategory != "" || budget.combined >= maxTotalToolCalls {
+			finalOnly = true
+			reason := "combined_budget_exhausted"
+			limitCategory := "tool_call_limit_exceeded"
+			if deniedCategory != "" {
+				reason = "tool_call_denied"
+				limitCategory = deniedCategory
+			}
+			logger.InfoContext(requestCtx, "Gemini review final-only mode entered",
+				"turn", turn,
+				"reason", reason,
+				"limit_category", limitCategory,
+				"internal_repository_tool_calls", budget.internalRepository,
+				"memory_tool_calls", budget.memory,
+				"public_source_tool_calls", budget.publicSource,
+				"combined_tool_calls", budget.combined)
+		}
 	}
 	return Result{}, nil, failure.Retry("tool_call_limit_exceeded", 0)
 }
@@ -341,18 +441,25 @@ func safeToolNames(calls []*genai.FunctionCall) ([]string, int) {
 }
 
 func declaredTool(name string) bool {
+	_, ok := reviewToolCategoryForName(name)
+	return ok
+}
+
+func reviewToolCategoryForName(name string) (reviewToolCategory, bool) {
 	switch name {
-	case repository.ToolListFiles, repository.ToolReadFile, repository.ToolSearch,
-		ToolSearchMemory,
-		publicsource.ToolFetchURL, publicsource.ToolListFiles, publicsource.ToolReadFile:
-		return true
+	case repository.ToolListFiles, repository.ToolReadFile, repository.ToolSearch:
+		return internalRepositoryToolCategory, true
+	case ToolSearchMemory:
+		return memoryToolCategory, true
+	case publicsource.ToolFetchURL, publicsource.ToolListFiles, publicsource.ToolReadFile:
+		return publicSourceToolCategory, true
 	default:
-		return false
+		return 0, false
 	}
 }
 
-func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*genai.Content) (Generation, error) {
-	response, err := g.client.Models.GenerateContent(ctx, model, contents, generationConfig(g.thinkingLevel))
+func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (Generation, error) {
+	response, err := g.client.Models.GenerateContent(ctx, model, contents, config)
 	if err != nil {
 		return Generation{}, err
 	}
@@ -371,7 +478,7 @@ func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*g
 	return generation, nil
 }
 
-func generationConfig(thinkingLevel string) *genai.GenerateContentConfig {
+func generationConfig(thinkingLevel string, available reviewToolSet) *genai.GenerateContentConfig {
 	config := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: systemInstruction}}},
 		MaxOutputTokens:   16384,
@@ -418,10 +525,16 @@ func generationConfig(thinkingLevel string) *genai.GenerateContentConfig {
 				},
 			},
 		},
-		Tools: []*genai.Tool{{FunctionDeclarations: toolDeclarations()}},
-		ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
+	}
+	if available.any() {
+		config.Tools = []*genai.Tool{{FunctionDeclarations: toolDeclarations(available)}}
+		config.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
 			Mode: genai.FunctionCallingConfigModeAuto,
-		}},
+		}}
+	} else {
+		config.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
+			Mode: genai.FunctionCallingConfigModeNone,
+		}}
 	}
 	thinkingLevel = strings.TrimSpace(thinkingLevel)
 	if thinkingLevel != "" && !strings.EqualFold(thinkingLevel, "default") {
@@ -432,12 +545,12 @@ func generationConfig(thinkingLevel string) *genai.GenerateContentConfig {
 	return config
 }
 
-func toolDeclarations() []*genai.FunctionDeclaration {
+func toolDeclarations(available reviewToolSet) []*genai.FunctionDeclaration {
 	pathProperty := map[string]any{"type": "string", "maxLength": 1024}
 	repositoryProperty := map[string]any{"type": "string", "minLength": 1, "maxLength": 1024}
 	startLineProperty := map[string]any{"type": "integer", "minimum": 1, "description": "First line to return; defaults to 1."}
 	lineCountProperty := map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum lines to return; defaults to 200."}
-	return []*genai.FunctionDeclaration{
+	declarations := []*genai.FunctionDeclaration{
 		{
 			Name: repository.ToolListFiles, Description: "Recursively list bounded text-file paths under an optional repository-relative directory in the current or a related internal repository listed in the review input. Omit path to list from the repository root. Supply the narrowest relevant directory when known; retry an output-limit error with a narrower path.",
 			ParametersJsonSchema: map[string]any{
@@ -498,6 +611,14 @@ func toolDeclarations() []*genai.FunctionDeclaration {
 			},
 		},
 	}
+	filtered := make([]*genai.FunctionDeclaration, 0, len(declarations))
+	for _, declaration := range declarations {
+		category, _ := reviewToolCategoryForName(declaration.Name)
+		if available.contains(category) {
+			filtered = append(filtered, declaration)
+		}
+	}
+	return filtered
 }
 
 func parseModelTurn(content *genai.Content) (string, []*genai.FunctionCall, error) {
