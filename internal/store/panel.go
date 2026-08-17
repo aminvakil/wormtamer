@@ -67,10 +67,12 @@ type ReviewMemoryRetrievalRecord struct {
 
 type ReviewRecordDetail struct {
 	ReviewRecord
-	ReviewID     string
-	Result       *review.Result
-	GitLabNoteID int64
-	Retrievals   []ReviewMemoryRetrievalRecord
+	ReviewID             string
+	Result               *review.Result
+	GitLabNoteID         int64
+	Retrievals           []ReviewMemoryRetrievalRecord
+	Generations          []GenerationRecord
+	GenerationsTruncated bool
 }
 
 type FeedbackRecord struct {
@@ -348,6 +350,13 @@ ORDER BY retrieved_at, memory_id, memory_updated_at`, jobID)
 	if err := rows.Err(); err != nil {
 		return ReviewRecordDetail{}, fmt.Errorf("iterate panel memory retrievals: %w", err)
 	}
+	if err := rows.Close(); err != nil {
+		return ReviewRecordDetail{}, fmt.Errorf("close panel memory retrievals: %w", err)
+	}
+	detail.Generations, detail.GenerationsTruncated, err = s.ListReviewGenerations(ctx, jobID, maxPanelPageSize)
+	if err != nil {
+		return ReviewRecordDetail{}, err
+	}
 	return detail, nil
 }
 
@@ -390,6 +399,20 @@ func (s *Store) ListFeedbackRecords(ctx context.Context, state string, beforeID 
 	if !validPanelLimit(limit) || beforeID < 0 || (state != "" && !validFeedbackState(state)) {
 		return FeedbackRecordsPage{}, errors.New("invalid feedback record query")
 	}
+	conditions := make([]string, 0, 2)
+	arguments := make([]any, 0, 2)
+	if state != "" {
+		conditions = append(conditions, "j.state = ?")
+		arguments = append(arguments, state)
+	}
+	if beforeID > 0 {
+		conditions = append(conditions, "j.id < ?")
+		arguments = append(arguments, beforeID)
+	}
+	return s.listFeedbackRecords(ctx, strings.Join(conditions, " AND "), arguments, limit)
+}
+
+func (s *Store) listFeedbackRecords(ctx context.Context, condition string, arguments []any, limit int) (FeedbackRecordsPage, error) {
 	query := `
 SELECT j.id, COALESCE(j.review_job_id, 0), j.project_id, j.project_path,
        j.merge_request_iid, j.note_id, j.state, j.attempt_count,
@@ -400,18 +423,8 @@ SELECT j.id, COALESCE(j.review_job_id, 0), j.project_id, j.project_path,
 FROM feedback_jobs j
 JOIN feedback_events e ON e.id = j.source_event_id
 LEFT JOIN review_jobs r ON r.id = j.review_job_id`
-	conditions := make([]string, 0, 2)
-	arguments := make([]any, 0, 3)
-	if state != "" {
-		conditions = append(conditions, "j.state = ?")
-		arguments = append(arguments, state)
-	}
-	if beforeID > 0 {
-		conditions = append(conditions, "j.id < ?")
-		arguments = append(arguments, beforeID)
-	}
-	if len(conditions) > 0 {
-		query += "\nWHERE " + strings.Join(conditions, " AND ")
+	if condition != "" {
+		query += "\nWHERE " + condition
 	}
 	query += "\nORDER BY j.id DESC\nLIMIT ?"
 	arguments = append(arguments, limit+1)

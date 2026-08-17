@@ -12,11 +12,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/repository"
+	"github.com/aminvakil/wormtamer/internal/usage"
 	"google.golang.org/genai"
 )
 
@@ -230,20 +232,30 @@ func TestGeminiReviewerUsesConfiguredBaseURLAndRetriesRateLimit(t *testing.T) {
 			_, _ = response.Write([]byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`))
 			return
 		}
-		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"proxied\",\"findings\":[]}"}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-proxy"}`))
+		response.Header().Set("X-Litellm-Response-Cost", "0.000604")
+		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"proxied\",\"findings\":[]}"}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-proxy","usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,"toolUsePromptTokenCount":10,"candidatesTokenCount":30,"thoughtsTokenCount":5,"totalTokenCount":145}}`))
 	}))
 	defer server.Close()
 
-	reviewer, err := NewGeminiReviewer(context.Background(), "gateway-key", server.URL, "gemini-proxy", "default", nil, nil)
+	recorder := &fakeUsageRecorder{}
+	reviewer, err := NewGeminiReviewer(context.Background(), "gateway-key", server.URL, "gemini-proxy", "default", nil, nil, recorder)
 	if err != nil {
 		t.Fatalf("NewGeminiReviewer() error = %v", err)
 	}
-	result, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 9, Attempt: 1})
+	result, _, err := reviewer.Review(ctx, testSnapshot(), nil)
 	if err != nil {
 		t.Fatalf("Review() error = %v", err)
 	}
 	if result.Summary != "proxied" || requests != 2 || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
 		t.Fatalf("result=%+v requests=%d path=%q API key=%q", result, requests, gotPath, gotAPIKey)
+	}
+	if len(recorder.starts) != 1 || len(recorder.completions) != 1 ||
+		recorder.completions[0].Tokens.Prompt != 100 || recorder.completions[0].Tokens.Cached != 20 ||
+		recorder.completions[0].Tokens.ToolUsePrompt != 10 || recorder.completions[0].Tokens.Candidates != 30 ||
+		recorder.completions[0].Tokens.Thoughts != 5 || recorder.completions[0].Tokens.Total != 145 ||
+		recorder.completions[0].EndpointCostPicos == nil || *recorder.completions[0].EndpointCostPicos != 604_000_000 {
+		t.Fatalf("SDK usage metadata = %+v", recorder.completions)
 	}
 }
 
@@ -341,6 +353,123 @@ func TestGeminiReviewerDebugLogsModelTranscript(t *testing.T) {
 		if event["turn"] != float64(turn) || event["project_id"] != float64(42) || event["merge_request_iid"] != float64(7) || event["head_sha"] != strings.Repeat("a", 40) {
 			t.Fatalf("generation event lacks review correlation: %+v", event)
 		}
+	}
+}
+
+func TestGeminiReviewerRecordsEveryApplicationTurn(t *testing.T) {
+	generator := &fakeGenerator{
+		modelVersion: "resolved-test", promptTokenCount: 100, cachedContentTokenCount: 20,
+		toolUsePromptTokenCount: 10, candidatesTokenCount: 30, thoughtsTokenCount: 5,
+		totalTokenCount: 145, usageMetadataAvailable: true,
+		turns: []*genai.Content{
+			genai.NewContentFromParts([]*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call-1", Name: repository.ToolReadFile,
+				Args: map[string]any{"repository": "group/project", "path": "internal/helper.go"},
+			}}}, genai.RoleModel),
+			genai.NewContentFromText(`{"summary":"usage recorded","findings":[]}`, genai.RoleModel),
+		},
+	}
+	recorder := &fakeUsageRecorder{}
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.recorder = recorder
+	ctx := usage.WithScope(context.Background(), usage.Scope{
+		RequestKind: usage.RequestReview, ReviewJobID: 77, Attempt: 3,
+	})
+	broker := &fakeToolBroker{result: map[string]any{"repository": "group/project", "path": "internal/helper.go"}}
+	if _, _, err := reviewer.Review(ctx, testSnapshot(), broker); err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if len(recorder.starts) != 2 || len(recorder.completions) != 2 ||
+		recorder.starts[0].ReviewJobID != 77 || recorder.starts[0].Attempt != 3 ||
+		recorder.starts[0].Turn == nil || *recorder.starts[0].Turn != 0 ||
+		recorder.starts[1].Turn == nil || *recorder.starts[1].Turn != 1 {
+		t.Fatalf("usage starts = %+v", recorder.starts)
+	}
+	first, second := recorder.completions[0], recorder.completions[1]
+	if first.State != usage.CompletionResponse || first.StructuredValidation != "not_final" ||
+		!first.ToolCallsAvailable || len(first.ToolNames) != 1 || first.ToolNames[0] != repository.ToolReadFile ||
+		!first.UsageMetadataAvailable || first.Tokens.Prompt != 100 || first.Tokens.Cached != 20 ||
+		first.Tokens.ToolUsePrompt != 10 || first.Tokens.Candidates != 30 || first.Tokens.Thoughts != 5 || first.Tokens.Total != 145 ||
+		second.StructuredValidation != "valid" || !second.ToolCallsAvailable || len(second.ToolNames) != 0 {
+		t.Fatalf("usage completions = %+v", recorder.completions)
+	}
+}
+
+func TestGeminiReviewerPreRequestPersistenceFailurePreventsModelCall(t *testing.T) {
+	generator := &fakeGenerator{output: []byte(`{"summary":"must not run","findings":[]}`)}
+	recorder := &fakeUsageRecorder{startErr: errors.New("database unavailable")}
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.recorder = recorder
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 77, Attempt: 1})
+	_, _, err := reviewer.Review(ctx, testSnapshot(), nil)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "persistence_failed" || generator.calls != 0 {
+		t.Fatalf("Review() error=%v generator calls=%d", err, generator.calls)
+	}
+}
+
+func TestGeminiReviewerRecordsFailedRequestWithoutUsage(t *testing.T) {
+	generator := &fakeGenerator{err: errors.New("network unavailable")}
+	recorder := &fakeUsageRecorder{}
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.recorder = recorder
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 77, Attempt: 2})
+	_, _, err := reviewer.Review(ctx, testSnapshot(), nil)
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "gemini_network_failure" ||
+		len(recorder.starts) != 1 || len(recorder.completions) != 1 ||
+		recorder.completions[0].State != usage.CompletionFailed ||
+		recorder.completions[0].UsageMetadataAvailable || recorder.completions[0].StructuredValidation != "request_failed" {
+		t.Fatalf("Review() error=%v starts=%+v completions=%+v", err, recorder.starts, recorder.completions)
+	}
+}
+
+func TestGeminiReviewerCheckpointsAfterWorkflowCancellation(t *testing.T) {
+	scoped := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 77, Attempt: 2})
+	ctx, cancel := context.WithCancel(scoped)
+	generator := &fakeGenerator{err: context.Canceled, onGenerate: cancel}
+	recorder := &fakeUsageRecorder{}
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.recorder = recorder
+
+	_, _, err := reviewer.Review(ctx, testSnapshot(), nil)
+	if !errors.Is(err, context.Canceled) || len(recorder.completions) != 1 ||
+		recorder.completionContextErrs[0] != nil || !recorder.completionHasDeadlines[0] ||
+		recorder.completions[0].State != usage.CompletionFailed {
+		t.Fatalf("Review() error=%v completions=%+v context_errors=%v deadlines=%v",
+			err, recorder.completions, recorder.completionContextErrs, recorder.completionHasDeadlines)
+	}
+}
+
+func TestGeminiReviewerLatencyCoversOnlySDKCall(t *testing.T) {
+	requestStartedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	sdkStartedAt := requestStartedAt.Add(30 * time.Second)
+	clockCalls := 0
+	generator := &fakeGenerator{output: []byte(`{"summary":"timed","findings":[]}`)}
+	recorder := &fakeUsageRecorder{}
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.recorder = recorder
+	reviewer.now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return requestStartedAt
+		}
+		return sdkStartedAt
+	}
+	reviewer.since = func(start time.Time) time.Duration {
+		if !start.Equal(sdkStartedAt) {
+			t.Fatalf("latency started at %v, want SDK start %v", start, sdkStartedAt)
+		}
+		return 2 * time.Second
+	}
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 77, Attempt: 1})
+
+	if _, _, err := reviewer.Review(ctx, testSnapshot(), nil); err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if len(recorder.starts) != 1 || !recorder.starts[0].StartedAt.Equal(requestStartedAt) ||
+		len(recorder.completions) != 1 || recorder.completions[0].Latency != 2*time.Second {
+		t.Fatalf("starts=%+v completions=%+v", recorder.starts, recorder.completions)
 	}
 }
 
@@ -1572,26 +1701,59 @@ func (b *fakeToolBroker) Call(_ context.Context, name string, args map[string]an
 	return b.result, b.err
 }
 
+type fakeUsageRecorder struct {
+	starts                 []usage.GenerationStart
+	completions            []usage.GenerationCompletion
+	completionContextErrs  []error
+	completionHasDeadlines []bool
+	startErr               error
+	completeErr            error
+}
+
+func (r *fakeUsageRecorder) Start(_ context.Context, start usage.GenerationStart) (int64, error) {
+	if r.startErr != nil {
+		return 0, r.startErr
+	}
+	r.starts = append(r.starts, start)
+	return int64(len(r.starts)), nil
+}
+
+func (r *fakeUsageRecorder) Complete(ctx context.Context, _ int64, completion usage.GenerationCompletion) error {
+	r.completions = append(r.completions, completion)
+	r.completionContextErrs = append(r.completionContextErrs, ctx.Err())
+	_, hasDeadline := ctx.Deadline()
+	r.completionHasDeadlines = append(r.completionHasDeadlines, hasDeadline)
+	return r.completeErr
+}
+
 type fakeGenerator struct {
-	output                 []byte
-	turns                  []*genai.Content
-	err                    error
-	model                  string
-	prompt                 string
-	calls                  int
-	requests               [][]*genai.Content
-	configs                []*genai.GenerateContentConfig
-	modelVersion           string
-	finishReason           genai.FinishReason
-	finishReasons          []genai.FinishReason
-	candidateTokenCount    int32
-	candidatesTokenCount   int32
-	thoughtsTokenCount     int32
-	usageMetadataAvailable bool
+	output                  []byte
+	turns                   []*genai.Content
+	err                     error
+	model                   string
+	prompt                  string
+	calls                   int
+	requests                [][]*genai.Content
+	configs                 []*genai.GenerateContentConfig
+	modelVersion            string
+	finishReason            genai.FinishReason
+	finishReasons           []genai.FinishReason
+	candidateTokenCount     int32
+	promptTokenCount        int32
+	cachedContentTokenCount int32
+	toolUsePromptTokenCount int32
+	candidatesTokenCount    int32
+	thoughtsTokenCount      int32
+	totalTokenCount         int32
+	usageMetadataAvailable  bool
+	onGenerate              func()
 }
 
 func (g *fakeGenerator) Generate(_ context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (Generation, error) {
 	g.calls++
+	if g.onGenerate != nil {
+		g.onGenerate()
+	}
 	g.model = model
 	g.requests = append(g.requests, append([]*genai.Content(nil), contents...))
 	g.configs = append(g.configs, config)
@@ -1616,7 +1778,9 @@ func (g *fakeGenerator) Generate(_ context.Context, model string, contents []*ge
 	}
 	return Generation{
 		Content: content, ModelVersion: g.modelVersion, FinishReason: finishReason,
-		CandidateTokenCount: g.candidateTokenCount, CandidatesTokenCount: g.candidatesTokenCount,
-		ThoughtsTokenCount: g.thoughtsTokenCount, UsageMetadataAvailable: g.usageMetadataAvailable,
+		CandidateTokenCount: g.candidateTokenCount, PromptTokenCount: g.promptTokenCount,
+		CachedContentTokenCount: g.cachedContentTokenCount, ToolUsePromptTokenCount: g.toolUsePromptTokenCount,
+		CandidatesTokenCount: g.candidatesTokenCount, ThoughtsTokenCount: g.thoughtsTokenCount,
+		TotalTokenCount: g.totalTokenCount, UsageMetadataAvailable: g.usageMetadataAvailable,
 	}, nil
 }

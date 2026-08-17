@@ -17,6 +17,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
+	"github.com/aminvakil/wormtamer/internal/usage"
 )
 
 const (
@@ -360,7 +361,10 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		snapshot.AllowedPublicDomains = append([]string(nil), w.allowedPublicDomains...)
 		snapshot.PublicGitHubRepositories = append([]string(nil), w.publicGitHubRepositories...)
 		tools := newReviewTools(snapshot, w.gitlab, w.public, w.workspaces, w.store, w.now)
-		validated, encoded, reviewErr := w.reviewer.Review(ctx, snapshot, tools)
+		reviewCtx := usage.WithScope(ctx, usage.Scope{
+			RequestKind: usage.RequestReview, ReviewJobID: job.ID, Attempt: job.AttemptCount,
+		})
+		validated, encoded, reviewErr := w.reviewer.Review(reviewCtx, snapshot, tools)
 		closeErr := tools.Close()
 		if reviewErr != nil {
 			return reviewErr

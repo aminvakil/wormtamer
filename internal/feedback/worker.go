@@ -13,6 +13,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/memory"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
+	"github.com/aminvakil/wormtamer/internal/usage"
 )
 
 const (
@@ -164,7 +165,10 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 		}
 		findings[index] = memory.Finding{TargetID: job.FindingIDs[index], Finding: result.Findings[index]}
 	}
-	assessment, err := w.evaluator.Evaluate(ctx, memory.Input{
+	evaluationCtx := usage.WithScope(ctx, usage.Scope{
+		RequestKind: usage.RequestFeedback, FeedbackJobID: job.ID, Attempt: job.AttemptCount,
+	})
+	assessment, err := w.evaluator.Evaluate(evaluationCtx, memory.Input{
 		ProjectID: job.ProjectID, ProjectPath: job.ProjectPath, MergeRequestIID: job.MergeRequestIID,
 		ReviewTargetID: job.ReviewTargetID, HeadSHA: job.HeadSHA, Summary: result.Summary,
 		ActorID: job.ActorID, ActorAccess: comment.AccessLevel, ActorRole: comment.Role,

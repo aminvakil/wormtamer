@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aminvakil/wormtamer/internal/store"
 )
@@ -30,7 +31,10 @@ type Store interface {
 	ListReviewRecords(context.Context, string, int64, int) (store.ReviewRecordsPage, error)
 	GetReviewRecord(context.Context, int64) (store.ReviewRecordDetail, error)
 	ListFeedbackRecords(context.Context, string, int64, int) (store.FeedbackRecordsPage, error)
+	GetFeedbackRecord(context.Context, int64) (store.FeedbackRecordDetail, error)
 	ListMemoryRecords(context.Context, *bool, int64, int) (store.MemoryRecordsPage, error)
+	ReadUsageReport(context.Context, store.UsageQuery) (store.UsageReport, error)
+	GetGenerationRecord(context.Context, int64) (store.GenerationRecord, error)
 }
 
 type Config struct {
@@ -53,6 +57,7 @@ type Handler struct {
 	css       []byte
 	config    configView
 	gitlabURL *url.URL
+	now       func() time.Time
 }
 
 type configView struct {
@@ -103,6 +108,33 @@ type memoryView struct {
 	SourceLink string
 }
 
+type generationView struct {
+	Record  store.GenerationRecord
+	Project string
+	JobURL  string
+}
+
+type costView struct {
+	Amount          string
+	GenerationCount int
+}
+
+type usageModelView struct {
+	Breakdown store.UsageModelBreakdown
+	URL       string
+}
+
+type usageProjectView struct {
+	Breakdown store.UsageProjectBreakdown
+	Project   string
+	URL       string
+}
+
+type usageKindView struct {
+	Breakdown store.UsageKindBreakdown
+	URL       string
+}
+
 type overviewPage struct {
 	Page           string
 	Title          string
@@ -132,6 +164,7 @@ type reviewDetailPage struct {
 	Project         string
 	MergeRequestURL string
 	PublicationURL  string
+	Generations     []generationView
 }
 
 type feedbackPage struct {
@@ -141,6 +174,38 @@ type feedbackPage struct {
 	State      string
 	NextURL    string
 	StateLinks []filterLink
+}
+
+type feedbackDetailPage struct {
+	Page            string
+	Title           string
+	Detail          store.FeedbackRecordDetail
+	Project         string
+	MergeRequestURL string
+	Generations     []generationView
+}
+
+type usagePage struct {
+	Page            string
+	Title           string
+	Window          string
+	Filters         usageFilters
+	Report          store.UsageReport
+	WindowLinks     []filterLink
+	KindLinks       []filterLink
+	ClearFiltersURL string
+	Costs           []costView
+	Models          []usageModelView
+	Projects        []usageProjectView
+	Kinds           []usageKindView
+	Generations     []generationView
+	NextURL         string
+}
+
+type generationDetailPage struct {
+	Page       string
+	Title      string
+	Generation generationView
 }
 
 type memoryPage struct {
@@ -156,6 +221,16 @@ type filterLink struct {
 	Label   string
 	URL     string
 	Current bool
+}
+
+type usageFilters struct {
+	Window                   string
+	RequestKind              string
+	ConfiguredModel          string
+	ResolvedModel            string
+	ResolvedModelUnavailable bool
+	ProjectID                int64
+	BeforeID                 int64
 }
 
 func New(storage Store, config Config, logger *slog.Logger) (*Handler, error) {
@@ -189,7 +264,7 @@ func New(storage Store, config Config, logger *slog.Logger) (*Handler, error) {
 	}
 	return &Handler{
 		store: storage, logger: logger, templates: templates, css: css,
-		config: panelConfig(config), gitlabURL: gitLabURL,
+		config: panelConfig(config), gitlabURL: gitLabURL, now: time.Now,
 	}, nil
 }
 
@@ -199,7 +274,10 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /reviews", h.reviews)
 	mux.HandleFunc("GET /reviews/{jobID}", h.reviewDetail)
 	mux.HandleFunc("GET /feedback", h.feedback)
+	mux.HandleFunc("GET /feedback/{jobID}", h.feedbackDetail)
 	mux.HandleFunc("GET /memory", h.memory)
+	mux.HandleFunc("GET /usage", h.usage)
+	mux.HandleFunc("GET /usage/{generationID}", h.generationDetail)
 	mux.HandleFunc("GET /assets/panel.css", h.stylesheet)
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		setSecurityHeaders(w)
@@ -277,6 +355,7 @@ func (h *Handler) reviewDetail(w http.ResponseWriter, request *http.Request) {
 		Page: "reviews", Title: fmt.Sprintf("Review #%d · Wormtamer", detail.ID), Detail: detail,
 		Project:         projectLabel(detail.ProjectPath, detail.ProjectID),
 		MergeRequestURL: mergeRequestURL,
+		Generations:     h.generationViews(detail.Generations),
 	}
 	if mergeRequestURL != "" && detail.GitLabNoteID > 0 {
 		page.PublicationURL = mergeRequestURL + "#note_" + strconv.FormatInt(detail.GitLabNoteID, 10)
@@ -304,6 +383,128 @@ func (h *Handler) feedback(w http.ResponseWriter, request *http.Request) {
 		page.NextURL = listURL("/feedback", state, pageRecords.NextBefore, "state")
 	}
 	h.render(w, "feedback", page)
+}
+
+func (h *Handler) feedbackDetail(w http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" {
+		h.badRequest(w)
+		return
+	}
+	jobID, err := strconv.ParseInt(request.PathValue("jobID"), 10, 64)
+	if err != nil || jobID <= 0 {
+		h.badRequest(w)
+		return
+	}
+	detail, err := h.store.GetFeedbackRecord(request.Context(), jobID)
+	if errors.Is(err, store.ErrFeedbackRecordNotFound) {
+		h.writeError(w, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.internalError(w, "feedback_detail")
+		return
+	}
+	page := feedbackDetailPage{
+		Page: "feedback", Title: fmt.Sprintf("Feedback #%d · Wormtamer", detail.ID), Detail: detail,
+		Project:         projectLabel(detail.ProjectPath, detail.ProjectID),
+		MergeRequestURL: h.mergeRequestURL(detail.ProjectPath, detail.MergeRequestIID),
+		Generations:     h.generationViews(detail.Generations),
+	}
+	h.render(w, "feedback-detail", page)
+}
+
+func (h *Handler) usage(w http.ResponseWriter, request *http.Request) {
+	filters, ok := parseUsageQuery(request.URL.Query())
+	if !ok {
+		h.badRequest(w)
+		return
+	}
+	now := h.now().UTC()
+	duration := 24 * time.Hour
+	switch filters.Window {
+	case "week":
+		duration = 7 * 24 * time.Hour
+	case "month":
+		duration = 30 * 24 * time.Hour
+	}
+	report, err := h.store.ReadUsageReport(request.Context(), store.UsageQuery{
+		Since: now.Add(-duration), Until: now, RequestKind: filters.RequestKind,
+		ConfiguredModel: filters.ConfiguredModel, ResolvedModel: filters.ResolvedModel,
+		ResolvedModelUnavailable: filters.ResolvedModelUnavailable,
+		ProjectID:                filters.ProjectID, BeforeID: filters.BeforeID, Limit: pageSize,
+	})
+	if err != nil {
+		h.internalError(w, "usage")
+		return
+	}
+	page := usagePage{
+		Page: "usage", Title: "Model usage · Wormtamer", Window: filters.Window, Filters: filters, Report: report,
+		WindowLinks: []filterLink{
+			{Label: "24 hours", URL: usageFilterURL(withUsageWindow(filters, "day"), 0), Current: filters.Window == "day"},
+			{Label: "7 days", URL: usageFilterURL(withUsageWindow(filters, "week"), 0), Current: filters.Window == "week"},
+			{Label: "30 days", URL: usageFilterURL(withUsageWindow(filters, "month"), 0), Current: filters.Window == "month"},
+		},
+		KindLinks: []filterLink{
+			{Label: "All requests", URL: usageFilterURL(withUsageKind(filters, ""), 0), Current: filters.RequestKind == ""},
+			{Label: "Reviews", URL: usageFilterURL(withUsageKind(filters, "review"), 0), Current: filters.RequestKind == "review"},
+			{Label: "Feedback", URL: usageFilterURL(withUsageKind(filters, "feedback"), 0), Current: filters.RequestKind == "feedback"},
+		},
+		ClearFiltersURL: usageFilterURL(usageFilters{Window: filters.Window}, 0),
+		Generations:     h.generationViews(report.Generations.Records),
+	}
+	for _, cost := range report.Costs {
+		page.Costs = append(page.Costs, costView{
+			Amount: formatPicoCost(cost.EstimatedCostPicos), GenerationCount: cost.GenerationCount,
+		})
+	}
+	for _, model := range report.Models {
+		filtered := filters
+		filtered.ConfiguredModel, filtered.ResolvedModel, filtered.BeforeID = model.ConfiguredModel, model.ResolvedModel, 0
+		filtered.ResolvedModelUnavailable = model.ResolvedModel == ""
+		page.Models = append(page.Models, usageModelView{Breakdown: model, URL: usageFilterURL(filtered, 0)})
+	}
+	for _, project := range report.Projects {
+		filtered := filters
+		filtered.ProjectID, filtered.BeforeID = project.ProjectID, 0
+		page.Projects = append(page.Projects, usageProjectView{
+			Breakdown: project, Project: projectLabel(project.ProjectPath, project.ProjectID), URL: usageFilterURL(filtered, 0),
+		})
+	}
+	for _, kind := range report.Kinds {
+		filtered := filters
+		filtered.RequestKind, filtered.BeforeID = kind.RequestKind, 0
+		page.Kinds = append(page.Kinds, usageKindView{Breakdown: kind, URL: usageFilterURL(filtered, 0)})
+	}
+	if report.Generations.NextBefore > 0 {
+		page.NextURL = usageFilterURL(filters, report.Generations.NextBefore)
+	}
+	h.render(w, "usage", page)
+}
+
+func (h *Handler) generationDetail(w http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" {
+		h.badRequest(w)
+		return
+	}
+	generationID, err := strconv.ParseInt(request.PathValue("generationID"), 10, 64)
+	if err != nil || generationID <= 0 {
+		h.badRequest(w)
+		return
+	}
+	record, err := h.store.GetGenerationRecord(request.Context(), generationID)
+	if errors.Is(err, store.ErrGenerationRecordNotFound) {
+		h.writeError(w, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.internalError(w, "generation_detail")
+		return
+	}
+	page := generationDetailPage{
+		Page: "usage", Title: fmt.Sprintf("Generation #%d · Wormtamer", record.ID),
+		Generation: h.generationViews([]store.GenerationRecord{record})[0],
+	}
+	h.render(w, "generation-detail", page)
 }
 
 func (h *Handler) memory(w http.ResponseWriter, request *http.Request) {
@@ -501,6 +702,102 @@ func parseMemoryQuery(values url.Values) (string, *bool, int64, bool) {
 	return activeText, active, before, ok
 }
 
+func parseUsageQuery(values url.Values) (usageFilters, bool) {
+	if !onlyQueryKeys(values, "window", "kind", "configured_model", "resolved_model", "resolved_model_unavailable", "project_id", "before") {
+		return usageFilters{}, false
+	}
+	for _, key := range []string{"window", "kind", "configured_model", "resolved_model", "resolved_model_unavailable", "project_id", "before"} {
+		if len(values[key]) > 1 {
+			return usageFilters{}, false
+		}
+	}
+	filters := usageFilters{
+		Window: values.Get("window"), RequestKind: values.Get("kind"),
+		ConfiguredModel: values.Get("configured_model"), ResolvedModel: values.Get("resolved_model"),
+	}
+	if filters.Window == "" {
+		filters.Window = "day"
+	}
+	if filters.Window != "day" && filters.Window != "week" && filters.Window != "month" {
+		return usageFilters{}, false
+	}
+	if filters.RequestKind != "" && filters.RequestKind != "review" && filters.RequestKind != "feedback" {
+		return usageFilters{}, false
+	}
+	if !validUsageFilterText(filters.ConfiguredModel) || !validUsageFilterText(filters.ResolvedModel) {
+		return usageFilters{}, false
+	}
+	if value := values.Get("resolved_model_unavailable"); value != "" {
+		if value != "true" || filters.ResolvedModel != "" {
+			return usageFilters{}, false
+		}
+		filters.ResolvedModelUnavailable = true
+	}
+	if value := values.Get("project_id"); value != "" {
+		projectID, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || projectID <= 0 {
+			return usageFilters{}, false
+		}
+		filters.ProjectID = projectID
+	}
+	before, ok := parseBefore(values.Get("before"))
+	if !ok {
+		return usageFilters{}, false
+	}
+	filters.BeforeID = before
+	return filters, true
+}
+
+func validUsageFilterText(value string) bool {
+	if len(value) > 256 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func withUsageWindow(filters usageFilters, window string) usageFilters {
+	filters.Window, filters.BeforeID = window, 0
+	return filters
+}
+
+func withUsageKind(filters usageFilters, kind string) usageFilters {
+	filters.RequestKind, filters.BeforeID = kind, 0
+	return filters
+}
+
+func usageFilterURL(filters usageFilters, before int64) string {
+	values := url.Values{}
+	if filters.Window != "" && filters.Window != "day" {
+		values.Set("window", filters.Window)
+	}
+	if filters.RequestKind != "" {
+		values.Set("kind", filters.RequestKind)
+	}
+	if filters.ConfiguredModel != "" {
+		values.Set("configured_model", filters.ConfiguredModel)
+	}
+	if filters.ResolvedModelUnavailable {
+		values.Set("resolved_model_unavailable", "true")
+	} else if filters.ResolvedModel != "" {
+		values.Set("resolved_model", filters.ResolvedModel)
+	}
+	if filters.ProjectID > 0 {
+		values.Set("project_id", strconv.FormatInt(filters.ProjectID, 10))
+	}
+	if before > 0 {
+		values.Set("before", strconv.FormatInt(before, 10))
+	}
+	if len(values) == 0 {
+		return "/usage"
+	}
+	return "/usage?" + values.Encode()
+}
+
 func onlyQueryKeys(values url.Values, allowed ...string) bool {
 	for key := range values {
 		if !contains(allowed, key) {
@@ -552,6 +849,22 @@ func (h *Handler) feedbackViews(records []store.FeedbackRecord) []feedbackView {
 		views[index] = feedbackView{
 			Record: record, Project: projectLabel(record.ProjectPath, record.ProjectID),
 			MergeRequestURL: h.mergeRequestURL(record.ProjectPath, record.MergeRequestIID),
+		}
+	}
+	return views
+}
+
+func (h *Handler) generationViews(records []store.GenerationRecord) []generationView {
+	views := make([]generationView, len(records))
+	for index, record := range records {
+		jobURL := ""
+		if record.ReviewJobID > 0 {
+			jobURL = "/reviews/" + strconv.FormatInt(record.ReviewJobID, 10)
+		} else if record.FeedbackJobID > 0 {
+			jobURL = "/feedback/" + strconv.FormatInt(record.FeedbackJobID, 10)
+		}
+		views[index] = generationView{
+			Record: record, Project: projectLabel(record.ProjectPath, record.ProjectID), JobURL: jobURL,
 		}
 	}
 	return views
@@ -669,4 +982,16 @@ func shortSHA(sha string) string {
 		return sha
 	}
 	return sha[:12]
+}
+
+func formatPicoCost(value int64) string {
+	const scale = int64(1_000_000_000_000)
+	whole := value / scale
+	fraction := value % scale
+	if fraction == 0 {
+		return strconv.FormatInt(whole, 10)
+	}
+	fractionText := fmt.Sprintf("%012d", fraction)
+	fractionText = strings.TrimRight(fractionText, "0")
+	return strconv.FormatInt(whole, 10) + "." + fractionText
 }

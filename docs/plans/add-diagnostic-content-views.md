@@ -5,7 +5,7 @@ Status: proposed
 Depends on:
 
 - [Read-only web panel](../agents/architecture.md#read-only-web-panel)
-- [Model usage and cost reporting](add-model-usage-reporting.md)
+- [Model usage diagnostics](../agents/architecture.md#model-usage-diagnostics)
 
 ## Goal
 

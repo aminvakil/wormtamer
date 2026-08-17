@@ -251,6 +251,7 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
   },
   "gemini": {
     "api_key": "gemini-key",
+    "base_url": "http://gemini.internal",
     "model": "gemini-test"
   },
   "public_sources": {

@@ -26,6 +26,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
+	"github.com/aminvakil/wormtamer/internal/usage"
 	"github.com/aminvakil/wormtamer/internal/webhook"
 	"github.com/aminvakil/wormtamer/internal/worker"
 )
@@ -72,6 +73,24 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if invocation.jobs != nil {
 		return executeJobsCommand(ctx, storage, *invocation.jobs, output)
 	}
+	if err := storage.MarkStartedModelGenerationsUnknown(ctx); err != nil {
+		return err
+	}
+	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
+	var modelPricing *usage.Pricing
+	if cfg.Gemini.BaseURL == "" {
+		pricingCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		modelPricing, err = usage.FetchGeminiPricing(pricingCtx, cfg.Gemini.Model)
+		cancel()
+		if err != nil {
+			logger.Warn("Gemini pricing unavailable; cost estimates disabled", "error", bounded(err.Error()))
+			modelPricing = nil
+		}
+	}
+	usageRecorder, err := usage.NewRecorder(storage, modelPricing, forbidden)
+	if err != nil {
+		return err
+	}
 
 	webPanel, err := panel.New(storage, panel.Config{
 		GitLabBaseURL:                  cfg.GitLab.BaseURL,
@@ -99,8 +118,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err != nil {
 		return err
 	}
-	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
-	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden, logger)
+	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden, logger, usageRecorder)
 	if err != nil {
 		return err
 	}
@@ -114,7 +132,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err != nil {
 		return err
 	}
-	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden, logger)
+	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden, logger, usageRecorder)
 	if err != nil {
 		return err
 	}

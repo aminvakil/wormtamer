@@ -3,15 +3,18 @@ package memory
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/review"
+	"github.com/aminvakil/wormtamer/internal/usage"
 	"google.golang.org/genai"
 )
 
@@ -28,20 +31,25 @@ func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
 		gotPath = request.URL.Path
 		gotAPIKey = request.Header.Get("x-goog-api-key")
 		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("X-Litellm-Response-Cost", "0.000001")
 		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"decisions\":[]}"}],"role":"model"},"finishReason":"STOP"}]}`))
 	}))
 	defer server.Close()
 
-	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil)
+	recorder := &fakeUsageRecorder{}
+	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil, recorder)
 	if err != nil {
 		t.Fatalf("NewEvaluator() error = %v", err)
 	}
-	result, err := evaluator.Evaluate(context.Background(), testInput("WT-F-"+strings.Repeat("A", 26)))
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestFeedback, FeedbackJobID: 9, Attempt: 1})
+	result, err := evaluator.Evaluate(ctx, testInput("WT-F-"+strings.Repeat("A", 26)))
 	if err != nil {
 		t.Fatalf("Evaluate() error = %v", err)
 	}
-	if len(result.Decisions) != 0 || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
-		t.Fatalf("result=%+v path=%q API key=%q", result, gotPath, gotAPIKey)
+	if len(result.Decisions) != 0 || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" ||
+		len(recorder.completions) != 1 || recorder.completions[0].EndpointCostPicos == nil ||
+		*recorder.completions[0].EndpointCostPicos != 1_000_000 {
+		t.Fatalf("result=%+v path=%q API key=%q completions=%+v", result, gotPath, gotAPIKey, recorder.completions)
 	}
 }
 
@@ -132,6 +140,87 @@ func TestEvaluatorModelContract(t *testing.T) {
 	}
 }
 
+func TestEvaluatorRecordsFeedbackGenerationMetadata(t *testing.T) {
+	findingID := "WT-F-" + strings.Repeat("A", 26)
+	generator := &fakeGenerator{
+		output: `{"decisions":[]}`,
+		generation: review.Generation{
+			ModelVersion: "resolved-test", FinishReason: genai.FinishReasonStop,
+			PromptTokenCount: 80, CachedContentTokenCount: 10, ToolUsePromptTokenCount: 0,
+			CandidatesTokenCount: 20, ThoughtsTokenCount: 5, TotalTokenCount: 105,
+			UsageMetadataAvailable: true,
+		},
+	}
+	recorder := &fakeUsageRecorder{}
+	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
+	evaluator.recorder = recorder
+	ctx := usage.WithScope(context.Background(), usage.Scope{
+		RequestKind: usage.RequestFeedback, FeedbackJobID: 91, Attempt: 4,
+	})
+	if _, err := evaluator.Evaluate(ctx, testInput(findingID)); err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if len(recorder.starts) != 1 || recorder.starts[0].FeedbackJobID != 91 || recorder.starts[0].Attempt != 4 || recorder.starts[0].Turn != nil ||
+		len(recorder.completions) != 1 || recorder.completions[0].StructuredValidation != "valid" ||
+		!recorder.completions[0].ToolCallsAvailable || len(recorder.completions[0].ToolNames) != 0 ||
+		recorder.completions[0].ResolvedModel != "resolved-test" || recorder.completions[0].Tokens.Prompt != 80 ||
+		recorder.completions[0].Tokens.Cached != 10 || recorder.completions[0].Tokens.Candidates != 20 ||
+		recorder.completions[0].Tokens.Thoughts != 5 || recorder.completions[0].Tokens.Total != 105 {
+		t.Fatalf("starts=%+v completions=%+v", recorder.starts, recorder.completions)
+	}
+}
+
+func TestEvaluatorCheckpointsAfterWorkflowCancellation(t *testing.T) {
+	findingID := "WT-F-" + strings.Repeat("A", 26)
+	scoped := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestFeedback, FeedbackJobID: 91, Attempt: 2})
+	ctx, cancel := context.WithCancel(scoped)
+	generator := &fakeGenerator{err: context.Canceled, onGenerate: cancel}
+	recorder := &fakeUsageRecorder{}
+	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
+	evaluator.recorder = recorder
+
+	_, err := evaluator.Evaluate(ctx, testInput(findingID))
+	if !errors.Is(err, context.Canceled) || len(recorder.completions) != 1 ||
+		recorder.completionContextErrs[0] != nil || !recorder.completionHasDeadlines[0] ||
+		recorder.completions[0].State != usage.CompletionFailed {
+		t.Fatalf("Evaluate() error=%v completions=%+v context_errors=%v deadlines=%v",
+			err, recorder.completions, recorder.completionContextErrs, recorder.completionHasDeadlines)
+	}
+}
+
+func TestEvaluatorLatencyCoversOnlySDKCall(t *testing.T) {
+	findingID := "WT-F-" + strings.Repeat("A", 26)
+	requestStartedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	sdkStartedAt := requestStartedAt.Add(30 * time.Second)
+	clockCalls := 0
+	generator := &fakeGenerator{output: `{"decisions":[]}`}
+	recorder := &fakeUsageRecorder{}
+	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
+	evaluator.recorder = recorder
+	evaluator.now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return requestStartedAt
+		}
+		return sdkStartedAt
+	}
+	evaluator.since = func(start time.Time) time.Duration {
+		if !start.Equal(sdkStartedAt) {
+			t.Fatalf("latency started at %v, want SDK start %v", start, sdkStartedAt)
+		}
+		return 2 * time.Second
+	}
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestFeedback, FeedbackJobID: 91, Attempt: 1})
+
+	if _, err := evaluator.Evaluate(ctx, testInput(findingID)); err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if len(recorder.starts) != 1 || !recorder.starts[0].StartedAt.Equal(requestStartedAt) ||
+		len(recorder.completions) != 1 || recorder.completions[0].Latency != 2*time.Second {
+		t.Fatalf("starts=%+v completions=%+v", recorder.starts, recorder.completions)
+	}
+}
+
 func TestEvaluatorDebugLogsModelTranscript(t *testing.T) {
 	findingID := "WT-F-" + strings.Repeat("A", 26)
 	generator := &fakeGenerator{output: `{"decisions":[]}`}
@@ -218,18 +307,52 @@ func testInput(findingID string) Input {
 	}
 }
 
-type fakeGenerator struct {
-	output string
-	prompt string
-	config *genai.GenerateContentConfig
+type fakeUsageRecorder struct {
+	starts                 []usage.GenerationStart
+	completions            []usage.GenerationCompletion
+	completionContextErrs  []error
+	completionHasDeadlines []bool
 }
 
-func (g *fakeGenerator) Generate(_ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.Content, error) {
+func (r *fakeUsageRecorder) Start(_ context.Context, start usage.GenerationStart) (int64, error) {
+	r.starts = append(r.starts, start)
+	return int64(len(r.starts)), nil
+}
+
+func (r *fakeUsageRecorder) Complete(ctx context.Context, _ int64, completion usage.GenerationCompletion) error {
+	r.completions = append(r.completions, completion)
+	r.completionContextErrs = append(r.completionContextErrs, ctx.Err())
+	_, hasDeadline := ctx.Deadline()
+	r.completionHasDeadlines = append(r.completionHasDeadlines, hasDeadline)
+	return nil
+}
+
+type fakeGenerator struct {
+	output     string
+	prompt     string
+	config     *genai.GenerateContentConfig
+	generation review.Generation
+	err        error
+	onGenerate func()
+}
+
+func (g *fakeGenerator) Generate(_ context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (review.Generation, error) {
 	g.config = config
+	if g.onGenerate != nil {
+		g.onGenerate()
+	}
+	if g.err != nil {
+		return review.Generation{}, g.err
+	}
 	if len(contents) == 1 && len(contents[0].Parts) == 1 {
 		g.prompt = contents[0].Parts[0].Text
 	}
-	return genai.NewContentFromText(g.output, genai.RoleModel), nil
+	generation := g.generation
+	generation.Content = genai.NewContentFromText(g.output, genai.RoleModel)
+	if generation.FinishReason == "" {
+		generation.FinishReason = genai.FinishReasonStop
+	}
+	return generation, nil
 }
 
 func failureCategory(err error) string {

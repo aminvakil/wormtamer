@@ -13,7 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 const (
 	OutcomeQueued          = "queued"
@@ -497,6 +497,58 @@ ON review_jobs (
 );
 
 PRAGMA user_version = 8;
+`
+		case 8:
+			migration = `
+CREATE TABLE model_generations (
+    id INTEGER PRIMARY KEY,
+    request_kind TEXT NOT NULL CHECK(request_kind IN ('review', 'feedback')),
+    review_job_id INTEGER REFERENCES review_jobs(id),
+    feedback_job_id INTEGER REFERENCES feedback_jobs(id),
+    workflow_attempt INTEGER NOT NULL CHECK(workflow_attempt > 0),
+    review_turn INTEGER CHECK(review_turn IS NULL OR (review_turn >= 0 AND review_turn <= 1000)),
+    configured_model TEXT NOT NULL CHECK(length(configured_model) > 0 AND length(configured_model) <= 256),
+    resolved_model TEXT CHECK(resolved_model IS NULL OR length(resolved_model) <= 256),
+    request_started_at TEXT NOT NULL,
+    completed_at TEXT,
+    completion_state TEXT NOT NULL CHECK(completion_state IN ('started', 'response', 'failed', 'unknown')),
+    latency_ms INTEGER CHECK(latency_ms IS NULL OR (latency_ms >= 0 AND latency_ms <= 86400000)),
+    finish_reason TEXT CHECK(finish_reason IS NULL OR length(finish_reason) <= 128),
+    structured_validation TEXT CHECK(structured_validation IS NULL OR length(structured_validation) <= 128),
+    tool_calls_available INTEGER NOT NULL DEFAULT 0 CHECK(tool_calls_available IN (0, 1)),
+    tool_call_count INTEGER CHECK(tool_call_count IS NULL OR (tool_call_count >= 0 AND tool_call_count <= 32768)),
+    tool_names_json BLOB CHECK(tool_names_json IS NULL OR length(tool_names_json) <= 65536),
+    final_only INTEGER NOT NULL CHECK(final_only IN (0, 1)),
+    usage_metadata_available INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_available IN (0, 1)),
+    usage_metadata_valid INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_valid IN (0, 1) AND usage_metadata_valid <= usage_metadata_available),
+    prompt_tokens INTEGER CHECK(prompt_tokens IS NULL OR (prompt_tokens >= 0 AND prompt_tokens <= 2147483647)),
+    cached_tokens INTEGER CHECK(cached_tokens IS NULL OR (cached_tokens >= 0 AND cached_tokens <= 2147483647)),
+    tool_use_prompt_tokens INTEGER CHECK(tool_use_prompt_tokens IS NULL OR (tool_use_prompt_tokens >= 0 AND tool_use_prompt_tokens <= 2147483647)),
+    candidate_tokens INTEGER CHECK(candidate_tokens IS NULL OR (candidate_tokens >= 0 AND candidate_tokens <= 2147483647)),
+    thought_tokens INTEGER CHECK(thought_tokens IS NULL OR (thought_tokens >= 0 AND thought_tokens <= 2147483647)),
+    total_tokens INTEGER CHECK(total_tokens IS NULL OR (total_tokens >= 0 AND total_tokens <= 2147483647)),
+    cost_source TEXT CHECK(cost_source IS NULL OR cost_source IN ('litellm_catalog', 'endpoint_response')),
+    estimated_cost_picos INTEGER CHECK(estimated_cost_picos IS NULL OR estimated_cost_picos >= 0),
+    CHECK(
+        (request_kind = 'review' AND review_job_id IS NOT NULL AND feedback_job_id IS NULL AND review_turn IS NOT NULL) OR
+        (request_kind = 'feedback' AND review_job_id IS NULL AND feedback_job_id IS NOT NULL AND review_turn IS NULL)
+    ),
+    CHECK(completion_state != 'started' OR completed_at IS NULL),
+    CHECK(usage_metadata_valid = 0 OR (
+        prompt_tokens IS NOT NULL AND prompt_tokens > 0 AND cached_tokens IS NOT NULL AND tool_use_prompt_tokens IS NOT NULL AND
+        candidate_tokens IS NOT NULL AND thought_tokens IS NOT NULL AND total_tokens IS NOT NULL AND total_tokens > 0 AND
+        cached_tokens <= prompt_tokens AND
+        total_tokens = prompt_tokens + tool_use_prompt_tokens + candidate_tokens + thought_tokens
+    )),
+    CHECK(estimated_cost_picos IS NULL OR cost_source IS NOT NULL),
+    CHECK(estimated_cost_picos IS NULL OR cost_source != 'litellm_catalog' OR usage_metadata_valid = 1)
+);
+
+CREATE INDEX model_generations_time_idx ON model_generations (request_started_at DESC, id DESC);
+CREATE INDEX model_generations_review_idx ON model_generations (review_job_id, id DESC);
+CREATE INDEX model_generations_feedback_idx ON model_generations (feedback_job_id, id DESC);
+
+PRAGMA user_version = 9;
 `
 		}
 

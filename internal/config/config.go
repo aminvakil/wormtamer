@@ -146,6 +146,14 @@ func validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.Gemini.Model) == "" {
 		return errors.New("gemini.model is required")
 	}
+	if len(cfg.Gemini.Model) > 256 {
+		return errors.New("gemini.model must not exceed 256 bytes")
+	}
+	for _, character := range cfg.Gemini.Model {
+		if character < 0x20 || character == 0x7f {
+			return errors.New("gemini.model must not contain control characters")
+		}
+	}
 	cfg.Gemini.ThinkingLevel = strings.TrimSpace(cfg.Gemini.ThinkingLevel)
 	if cfg.Gemini.ThinkingLevel == "" {
 		cfg.Gemini.ThinkingLevel = "default"

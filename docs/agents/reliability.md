@@ -80,11 +80,19 @@ Use at most five claims per job. Optional patch-ID waiting consumes at most one 
 
 The single worker polls once per second, leases one job for two minutes, renews every 30 seconds, and processes one job at a time. On shutdown it allows active work ten seconds to reach a checkpoint. At that deadline it cancels the job and returns without waiting for an uncooperative operation; unfinished work remains recoverable through lease expiry.
 
+## Model Generation Diagnostics
+
+Create one durable diagnostic record before every application-level Gemini SDK call made by review or feedback processing. Failure to create that record prevents the model call. Complete the same record after a response or request error. The completion write uses a separate five-second context so lease loss or workflow cancellation after the SDK returns does not prevent the checkpoint; a completion-write failure remains a persistence failure and leaves the started record incomplete rather than reconstructing usage from candidate content. SDK latency covers only the SDK call and excludes the durable pre-request insert. On service startup, records still started from the previous process become `unknown`. The local jobs command does not perform this transition and cannot disturb an active service request.
+
+Workflow retries and review tool turns create additional records because each can consume model usage. One record may include multiple hidden SDK HTTP attempts; Wormtamer neither enumerates nor infers usage for those attempts. A returned response may complete without usage metadata, while a request error completes as failed without inferred usage. Missing usage metadata and non-negative counts whose total is inconsistent with prompt, tool-use prompt, candidate, and thought counts remain explicit and cannot produce a catalog-derived estimate.
+
+When the Gemini Developer API is used directly, startup retrieves the configured model's USD rates from LiteLLM's bounded public pricing catalog. Failure, an absent model, malformed data, or unavailable required rates disables catalog estimates without blocking service. Standard or above-200k rates are selected from total prompt and tool-use input, then exact integer fixed point charges uncached prompt and tool-use input at the input rate, cached input at the cache-read rate, candidates at the output rate, and thoughts at the reasoning rate. For a custom endpoint, a valid non-negative USD `x-litellm-response-cost` returned through the SDK's processed response headers takes precedence and does not require locally consistent token metadata; no header means no cost rather than an assumed upstream rate. Aggregate USD costs remain stable after catalog changes. They are diagnostics, not invoice reconciliation.
+
 ## Read-only Observability
 
-The built-in panel reads committed SQLite workflow and memory state through bounded queries and cursor pagination. Rendering a page performs no workflow mutation and no external request. Dashboard counts and recent lists are separate short reads rather than one long snapshot transaction, so concurrent worker commits may become visible between sections of one response.
+The built-in panel reads committed SQLite workflow, memory, and model-generation state through bounded queries and cursor pagination. Rendering a page performs no workflow mutation and no external request. Dashboard counts and recent lists are separate short reads rather than one long snapshot transaction, so concurrent worker commits may become visible between sections of one response.
 
-The panel reports durable local state, not live GitLab, Gemini, worker, or reconciliation connectivity. It shows bounded failure categories but not stored error messages. External-only publication recovery is visible without fabricating a local result. Reconciled jobs with no directly associated webhook retain numeric project identity in the panel rather than triggering a lookup or adding presentation-only state.
+Usage aggregates use rolling 24-hour, 7-day, or 30-day request-time windows, bounded model and project breakdowns, and fixed-size generation pagination. The panel reports durable local state, not live GitLab, Gemini, worker, reconciliation, or billing connectivity. It shows bounded failure categories but not stored error messages. External-only publication recovery is visible without fabricating a local result. Reconciled jobs with no directly associated webhook retain numeric project identity in the panel rather than triggering a lookup or adding presentation-only state.
 
 ## Idempotent Publication
 
@@ -118,13 +126,14 @@ SQLite stores the locally validated structured review result before publication 
 - Application-owned finding identifiers and their ordered positions under validated review results
 - Feedback jobs bound to immutable published reviews, plus current typed review- or finding-target decisions and repository-scoped active memories
 - Versioned identities of memory returned during each successfully checkpointed review, without queries or lesson copies
+- One structured record for every application-level review and feedback Gemini request, including workflow correlation, observed usage metadata, completion state, and an optional retrieved-cost source and fixed-point USD estimate
 - Last-seen and successfully reviewed merge request revisions
 
 Webhook event insertion and its job creation occur in one transaction. Webhook events retain the bounded raw JSON payload and delivery, project, merge request, revision, action, and outcome metadata needed for later inspection. Events and jobs are separate records with database-enforced delivery and review uniqueness. A reconciled job has no source event; a later webhook for the same review identity is persisted as a duplicate review without creating another job.
 
 Keep the database and WAL on persistent storage with reliable file locking. Enable foreign keys, configure bounded lock waiting, and choose durability settings and backup procedures appropriate to the deployment platform. The application owns and checks the SQLite schema version at startup. Run one replica per installation.
 
-There is no merge request webhook-event or payload retention policy yet; ignored events and stored merge request payloads accumulate until operational requirements establish one. Feedback events intentionally retain no comment payload or body.
+There is no merge request webhook-event, payload, or model-generation retention policy yet; these records accumulate until operational requirements establish one. Feedback events intentionally retain no comment payload or body, and model-generation records retain no model or repository content.
 
 Repository workspaces are disposable and rebuilt when a review attempt restarts. The GitLab broker limits requests to 30 seconds, metadata responses to 256 KiB, each diff or note page to 2 MiB, changed diffs to five pages, 100 files, 512 KiB of aggregate diff content, and each repository archive to 32 MiB compressed. Archive extraction accepts at most 20,000 entries and 128 MiB uncompressed per repository, exposing at most 10,000 UTF-8 text files of at most 2 MiB each. One application-owned limit permits at most eight internal repository tool calls and eight distinct internal repositories per review; because each first repository access consumes a call, it is not charged again against a separate budget. One immutable revision is retained for each inspected repository.
 

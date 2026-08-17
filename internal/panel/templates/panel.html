@@ -15,6 +15,7 @@
       <a class="nav-link {{if eq .Page "overview"}}current{{end}}" {{if eq .Page "overview"}}aria-current="page"{{end}} href="/">Overview</a>
       <a class="nav-link {{if eq .Page "reviews"}}current{{end}}" {{if eq .Page "reviews"}}aria-current="page"{{end}} href="/reviews">Reviews</a>
       <a class="nav-link {{if eq .Page "feedback"}}current{{end}}" {{if eq .Page "feedback"}}aria-current="page"{{end}} href="/feedback">Feedback</a>
+      <a class="nav-link {{if eq .Page "usage"}}current{{end}}" {{if eq .Page "usage"}}aria-current="page"{{end}} href="/usage">Usage</a>
       <a class="nav-link {{if eq .Page "memory"}}current{{end}}" {{if eq .Page "memory"}}aria-current="page"{{end}} href="/memory">Memory</a>
     </nav>
   </div>
@@ -71,7 +72,7 @@
   {{range .}}<li>
     <article class="record-row feedback-grid" aria-labelledby="feedback-label-{{.Record.ID}}">
       <div class="record-primary">
-        <div class="record-reference"><strong id="feedback-label-{{.Record.ID}}">Feedback #{{.Record.ID}}</strong>{{if .Record.ReviewJobID}}<a href="/reviews/{{.Record.ReviewJobID}}">Review #{{.Record.ReviewJobID}}</a>{{end}}</div>
+        <div class="record-reference"><a id="feedback-label-{{.Record.ID}}" href="/feedback/{{.Record.ID}}">Feedback #{{.Record.ID}}</a>{{if .Record.ReviewJobID}}<a href="/reviews/{{.Record.ReviewJobID}}">Review #{{.Record.ReviewJobID}}</a>{{end}}</div>
         <strong class="record-project">{{.Project}}</strong>
         <div class="record-meta">{{if .MergeRequestURL}}<a href="{{.MergeRequestURL}}">MR !{{.Record.MergeRequestIID}}</a>{{else}}MR !{{.Record.MergeRequestIID}}{{end}}<span>Note #{{.Record.NoteID}}</span></div>
         {{if .Record.ReviewID}}<code class="record-id">{{.Record.ReviewID}}</code>{{end}}
@@ -92,6 +93,36 @@
       </div>
     </article>
   </li>{{else}}<li class="empty-state"><strong>No feedback jobs match this view.</strong><span>Eligible merge request comments will appear after evaluation.</span></li>{{end}}
+  </ol>
+</div>{{end}}
+
+{{define "generation-records"}}<div class="record-collection generation-records">
+  <div class="record-head generation-grid" aria-hidden="true"><span>Generation / project</span><span>Workflow</span><span>Outcome</span><span>Observed tokens</span><span>Requested</span></div>
+  <ol class="record-list">
+  {{range .}}<li>
+    <article class="record-row generation-grid" aria-labelledby="generation-link-{{.Record.ID}}">
+      <div class="record-primary">
+        <div class="record-reference"><a id="generation-link-{{.Record.ID}}" href="/usage/{{.Record.ID}}">Generation #{{.Record.ID}}</a><code>{{.Record.RequestKind}}</code></div>
+        <strong class="record-project">{{.Project}}</strong>
+        <div class="record-meta"><span>MR !{{.Record.MergeRequestIID}}</span>{{if .Record.NoteID}}<span>Note #{{.Record.NoteID}}</span>{{end}}</div>
+      </div>
+      <div class="record-outcome">
+        <span class="cell-label">Workflow</span>
+        {{if .JobURL}}<a href="{{.JobURL}}">{{.Record.RequestKind}} job</a>{{else}}<span>{{.Record.RequestKind}} job</span>{{end}}
+        <span>Attempt {{.Record.WorkflowAttempt}}{{if .Record.ReviewTurn}} · turn {{.Record.ReviewTurn}}{{end}}</span>
+        {{if .Record.FinalOnly}}<span class="record-subtle">Final-only</span>{{end}}
+      </div>
+      <div class="record-outcome">
+        <span class="cell-label">Outcome</span><span class="status" data-state="{{.Record.CompletionState}}">{{.Record.CompletionState}}</span>
+        {{if .Record.StructuredValidation}}<code>{{.Record.StructuredValidation}}</code>{{end}}
+      </div>
+      <div class="record-stat token-cell">
+        <span class="cell-label">Observed tokens</span>
+        {{if .Record.TokenCountsAvailable}}<strong>{{.Record.TotalTokens}}</strong><span>{{.Record.PromptTokens}} prompt · {{.Record.CandidateTokens}} candidate</span>{{if not .Record.UsageMetadataValid}}<span>inconsistent metadata</span>{{end}}{{else if .Record.UsageMetadataAvailable}}<strong>Invalid</strong><span>metadata rejected</span>{{else}}<strong>—</strong><span>unavailable</span>{{end}}
+      </div>
+      <div class="record-updated"><span class="cell-label">Requested</span><time datetime="{{timeAttribute .Record.RequestStartedAt}}">{{formatCompactTime .Record.RequestStartedAt}}</time>{{if .Record.LatencyMS}}<span class="record-subtle">{{.Record.LatencyMS}} ms</span>{{end}}</div>
+    </article>
+  </li>{{else}}<li class="empty-state"><strong>No model generations match this view.</strong><span>Each application-level Gemini request will appear here.</span></li>{{end}}
   </ol>
 </div>{{end}}
 
@@ -167,6 +198,8 @@
   </div>
 </section>
 
+<section aria-labelledby="review-generations-heading"><div class="section-heading"><div><p class="section-index">MODEL USAGE</p><h2 id="review-generations-heading">Generation history</h2></div><span>{{len .Generations}} observed requests{{if .Detail.GenerationsTruncated}} · newest 100 shown{{end}}</span></div>{{template "generation-records" .Generations}}</section>
+
 <section aria-labelledby="retrieved-memory-heading"><div class="section-heading"><div><p class="section-index">CONTEXT AUDIT</p><h2 id="retrieved-memory-heading">Retrieved memory</h2></div><span>{{len .Detail.Retrievals}} records</span></div>{{if .Detail.Retrievals}}<ol class="audit-list">{{range .Detail.Retrievals}}<li class="audit-record"><div><span>Memory ID</span><code>{{.MemoryID}}</code></div><div><span>Memory version</span><time datetime="{{timeAttribute .MemoryUpdatedAt}}">{{formatTime .MemoryUpdatedAt}}</time></div><div><span>Retrieved</span><time datetime="{{timeAttribute .RetrievedAt}}">{{formatTime .RetrievedAt}}</time></div></li>{{end}}</ol>{{else}}<div class="empty-state compact"><strong>No memory retrievals recorded.</strong><span>{{if .Detail.Equivalent}}Equivalent revisions do not own a retrieval audit.{{else}}This review used no persisted runtime lessons.{{end}}</span></div>{{end}}</section>
 {{template "foot" .}}{{end}}
 
@@ -175,6 +208,80 @@
 <nav class="filters" aria-label="Feedback state filters">{{range .StateLinks}}<a class="filter {{if .Current}}current{{end}}" {{if .Current}}aria-current="page"{{end}} href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
 {{template "feedback-records" .Records}}
 {{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older feedback →</a></div>{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "feedback-detail"}}{{template "head" .}}
+<section class="hero compact detail-hero">
+  <div class="hero-copy"><p class="eyebrow">Feedback #{{.Detail.ID}}</p><div class="detail-title-line"><h1>{{.Project}} · MR !{{.Detail.MergeRequestIID}}</h1><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></div><p>Note #{{.Detail.NoteID}}</p></div>
+  {{if .MergeRequestURL}}<a class="button" href="{{.MergeRequestURL}}">Open merge request</a>{{end}}
+</section>
+<section aria-labelledby="feedback-record-heading"><div class="section-heading"><div><p class="section-index">DURABLE RECORD</p><h2 id="feedback-record-heading">Feedback record</h2></div></div>
+  <div class="detail-grid">
+    <article class="panel-card"><h3>Workflow</h3><dl><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd>{{.Detail.AttemptCount}}</dd><dt>Decisions</dt><dd>{{.Detail.DecisionCount}}</dd><dt>Active lessons</dt><dd>{{.Detail.ActiveLessonCount}}</dd></dl></article>
+    <article class="panel-card"><h3>Target</h3><dl><dt>Note</dt><dd>#{{.Detail.NoteID}}</dd><dt>Review job</dt><dd>{{if .Detail.ReviewJobID}}<a href="/reviews/{{.Detail.ReviewJobID}}">Review #{{.Detail.ReviewJobID}}</a>{{else}}—{{end}}</dd>{{if .Detail.ReviewID}}<dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd>{{end}}</dl></article>
+    <article class="panel-card"><h3>Timeline</h3><dl><dt>Received</dt><dd><time datetime="{{timeAttribute .Detail.ReceivedAt}}">{{formatTime .Detail.ReceivedAt}}</time></dd><dt>Updated</dt><dd><time datetime="{{timeAttribute .Detail.UpdatedAt}}">{{formatTime .Detail.UpdatedAt}}</time></dd></dl></article>
+    {{if .Detail.LastErrorCategory}}<article class="panel-card failure-card"><h3>Failure</h3><code>{{.Detail.LastErrorCategory}}</code></article>{{end}}
+  </div>
+</section>
+<section aria-labelledby="feedback-generations-heading"><div class="section-heading"><div><p class="section-index">MODEL USAGE</p><h2 id="feedback-generations-heading">Generation history</h2></div><span>{{len .Generations}} observed requests{{if .Detail.GenerationsTruncated}} · newest 100 shown{{end}}</span></div>{{template "generation-records" .Generations}}</section>
+{{template "foot" .}}{{end}}
+
+{{define "usage"}}{{template "head" .}}
+<section class="hero usage-hero">
+  <div class="hero-copy"><p class="eyebrow">Application-observed diagnostics</p><h1>Model usage</h1><p class="lede">Rolling local Gemini consumption. Counts and estimates may differ from endpoint billing.</p></div>
+  <div class="usage-ledger" aria-label="Usage record summary"><span>{{.Report.GenerationCount}} requests</span>{{if .Report.UsageAvailableCount}}<strong>{{.Report.Tokens.Total}}</strong><span>observed total tokens</span>{{else}}<strong>—</strong><span>token metadata unavailable</span>{{end}}</div>
+</section>
+<nav class="filters" aria-label="Usage time window">{{range .WindowLinks}}<a class="filter {{if .Current}}current{{end}}" {{if .Current}}aria-current="page"{{end}} href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
+<nav class="filters secondary-filters" aria-label="Usage request kind">{{range .KindLinks}}<a class="filter {{if .Current}}current{{end}}" {{if .Current}}aria-current="page"{{end}} href="{{.URL}}">{{.Label}}</a>{{end}}<a class="filter clear-filter" href="{{.ClearFiltersURL}}">Clear model / project filters</a></nav>
+{{if or .Filters.ConfiguredModel .Filters.ResolvedModel .Filters.ResolvedModelUnavailable .Filters.ProjectID}}<aside class="active-filter" aria-label="Active usage filters"><strong>Filtered view</strong>{{if .Filters.ConfiguredModel}}<span>Configured model <code>{{.Filters.ConfiguredModel}}</code></span>{{end}}{{if .Filters.ResolvedModelUnavailable}}<span>Resolved model unavailable</span>{{else if .Filters.ResolvedModel}}<span>Resolved model <code>{{.Filters.ResolvedModel}}</code></span>{{end}}{{if .Filters.ProjectID}}<span>Project #{{.Filters.ProjectID}}</span>{{end}}</aside>{{end}}
+
+<section aria-labelledby="usage-status-heading"><div class="section-heading"><div><p class="section-index">01 / COVERAGE</p><h2 id="usage-status-heading">Observed requests</h2></div><span>Only application-level SDK calls</span></div>
+  <div class="usage-status-grid">
+    <article><span>Returned</span><strong>{{.Report.ResponseCount}}</strong></article><article><span>Failed</span><strong>{{.Report.FailedCount}}</strong></article><article><span>Interrupted / unknown</span><strong>{{.Report.UnknownCount}}</strong></article><article><span>In progress</span><strong>{{.Report.StartedCount}}</strong></article>
+  </div>
+</section>
+<section aria-labelledby="token-totals-heading"><div class="section-heading"><div><p class="section-index">02 / TOKENS</p><h2 id="token-totals-heading">Token totals</h2></div><span>{{.Report.UsageAvailableCount}} responses supplied usage metadata{{if .Report.UsageInvalidCount}} · {{.Report.UsageInvalidCount}} inconsistent{{end}}</span></div>
+  {{if .Report.UsageAvailableCount}}<div class="token-ledger">
+    <article data-token="input"><span>Total input</span><strong>{{.Report.Tokens.Input}}</strong></article>
+    <article data-token="output"><span>Total output</span><strong>{{.Report.Tokens.Output}}</strong></article>
+    <article data-token="input"><span>Prompt</span><strong>{{.Report.Tokens.Prompt}}</strong></article>
+    <article data-token="uncached"><span>Uncached input</span><strong>{{.Report.Tokens.UncachedInput}}</strong></article>
+    <article data-token="cached"><span>Cached input</span><strong>{{.Report.Tokens.CachedInput}}</strong></article>
+    <article data-token="tool"><span>Tool-use input</span><strong>{{.Report.Tokens.ToolUseInput}}</strong></article>
+    <article data-token="output"><span>Candidate output</span><strong>{{.Report.Tokens.Candidate}}</strong></article>
+    <article data-token="thought"><span>Thought output</span><strong>{{.Report.Tokens.Thought}}</strong></article>
+    <article data-token="total"><span>Total</span><strong>{{.Report.Tokens.Total}}</strong></article>
+  </div>{{else}}<div class="empty-state compact"><strong>Token totals unavailable.</strong><span>No returned response in this view supplied usage metadata.</span></div>{{end}}
+  {{if .Report.UsageUnavailableCount}}<p class="coverage-note">Partial observation: {{.Report.UsageUnavailableCount}} returned responses omitted usage metadata. Failed and interrupted requests are not inferred.</p>{{end}}
+</section>
+<section aria-labelledby="cost-total-heading"><div class="section-heading"><div><p class="section-index">03 / ESTIMATE</p><h2 id="cost-total-heading">Estimated cost</h2></div><span>Retrieved pricing · persisted costs</span></div>
+  <div class="cost-totals">{{range .Costs}}<article><span>USD</span><strong>{{.Amount}}</strong><small>{{.GenerationCount}} priced generations</small></article>{{else}}<div class="empty-state compact"><strong>Cost unavailable.</strong><span>No generation in this view has catalog pricing or an endpoint-reported cost.</span></div>{{end}}</div>
+  {{if or .Report.CostUnavailableCount .Report.NoCostDataCount}}<p class="coverage-note">Partial estimate: {{.Report.CostUnavailableCount}} catalog-priced responses had unavailable cost; {{.Report.NoCostDataCount}} returned responses had no retrieved cost data.</p>{{end}}
+</section>
+<section class="usage-breakdowns" aria-labelledby="breakdowns-heading"><div class="section-heading"><div><p class="section-index">04 / BREAKDOWN</p><h2 id="breakdowns-heading">Where tokens went</h2></div>{{if .Report.BreakdownsTruncated}}<span>Largest 100 groups shown</span>{{end}}</div>
+  <div class="breakdown-grid">
+    <article class="panel-card"><h3>Models</h3><ol class="ranked-list">{{range .Models}}<li><a href="{{.URL}}"><span><code>{{.Breakdown.ConfiguredModel}}</code>{{if .Breakdown.ResolvedModel}}<small>{{.Breakdown.ResolvedModel}}</small>{{else}}<small>resolved model unavailable</small>{{end}}</span><strong>{{.Breakdown.TotalTokens}}</strong><small>{{.Breakdown.GenerationCount}} requests</small></a></li>{{else}}<li class="muted">No model usage.</li>{{end}}</ol></article>
+    <article class="panel-card"><h3>Repositories</h3><ol class="ranked-list">{{range .Projects}}<li><a href="{{.URL}}"><span>{{.Project}}</span><strong>{{.Breakdown.TotalTokens}}</strong><small>{{.Breakdown.GenerationCount}} requests</small></a></li>{{else}}<li class="muted">No repository usage.</li>{{end}}</ol></article>
+    <article class="panel-card"><h3>Request kinds</h3><ol class="ranked-list">{{range .Kinds}}<li><a href="{{.URL}}"><span>{{.Breakdown.RequestKind}}</span><strong>{{.Breakdown.TotalTokens}}</strong><small>{{.Breakdown.GenerationCount}} requests</small></a></li>{{else}}<li class="muted">No request usage.</li>{{end}}</ol></article>
+  </div>
+</section>
+<section aria-labelledby="generation-history-heading"><div class="section-heading"><div><p class="section-index">05 / REQUESTS</p><h2 id="generation-history-heading">Generation history</h2></div><span>Newest first · fixed page size</span></div>{{template "generation-records" .Generations}}{{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older generations →</a></div>{{end}}</section>
+{{template "foot" .}}{{end}}
+
+{{define "generation-detail"}}{{template "head" .}}
+<section class="hero compact detail-hero"><div class="hero-copy"><p class="eyebrow">Generation #{{.Generation.Record.ID}}</p><div class="detail-title-line"><h1>{{.Generation.Project}}</h1><span class="status" data-state="{{.Generation.Record.CompletionState}}">{{.Generation.Record.CompletionState}}</span></div><p>{{.Generation.Record.RequestKind}} request · MR !{{.Generation.Record.MergeRequestIID}}</p></div>{{if .Generation.JobURL}}<a class="button" href="{{.Generation.JobURL}}">Open workflow job</a>{{end}}</section>
+{{if eq .Generation.Record.CompletionState "unknown"}}<aside class="notice"><strong>Outcome unknown</strong><p>The process stopped before this application-level request could be checkpointed. Provider-side usage cannot be reconstructed.</p></aside>{{else if not .Generation.Record.UsageMetadataAvailable}}{{if eq .Generation.Record.CompletionState "response"}}<aside class="notice"><strong>Usage metadata unavailable</strong><p>The endpoint returned a response without usage metadata.</p></aside>{{end}}{{end}}
+<section aria-labelledby="generation-record-heading"><div class="section-heading"><div><p class="section-index">DURABLE RECORD</p><h2 id="generation-record-heading">Request metadata</h2></div></div>
+  <div class="detail-grid">
+    <article class="panel-card"><h3>Correlation</h3><dl><dt>Kind</dt><dd>{{.Generation.Record.RequestKind}}</dd><dt>Attempt</dt><dd>{{.Generation.Record.WorkflowAttempt}}</dd>{{if .Generation.Record.ReviewTurn}}<dt>Review turn</dt><dd>{{.Generation.Record.ReviewTurn}}</dd>{{end}}<dt>Final-only</dt><dd>{{if .Generation.Record.FinalOnly}}Yes{{else}}No{{end}}</dd></dl></article>
+    <article class="panel-card"><h3>Model</h3><dl><dt>Configured</dt><dd><code>{{.Generation.Record.ConfiguredModel}}</code></dd><dt>Resolved</dt><dd>{{if .Generation.Record.ResolvedModel}}<code>{{.Generation.Record.ResolvedModel}}</code>{{else}}Unavailable{{end}}</dd><dt>Finish reason</dt><dd>{{if .Generation.Record.FinishReason}}{{.Generation.Record.FinishReason}}{{else}}Unavailable{{end}}</dd></dl></article>
+    <article class="panel-card"><h3>Timeline</h3><dl><dt>Requested</dt><dd><time datetime="{{timeAttribute .Generation.Record.RequestStartedAt}}">{{formatTime .Generation.Record.RequestStartedAt}}</time></dd><dt>Completed</dt><dd>{{if .Generation.Record.CompletedAt}}<time datetime="{{optionalTimeAttribute .Generation.Record.CompletedAt}}">{{formatOptionalTime .Generation.Record.CompletedAt}}</time>{{else}}—{{end}}</dd><dt>Latency</dt><dd>{{if .Generation.Record.LatencyMS}}{{.Generation.Record.LatencyMS}} ms{{else}}—{{end}}</dd></dl></article>
+    <article class="panel-card"><h3>Validation</h3><dl><dt>Structured result</dt><dd>{{if .Generation.Record.StructuredValidation}}<code>{{.Generation.Record.StructuredValidation}}</code>{{else}}Unavailable{{end}}</dd><dt>Tool calls</dt><dd>{{if .Generation.Record.ToolCallsAvailable}}{{len .Generation.Record.ToolNames}}{{else}}Unavailable{{end}}</dd></dl>{{if .Generation.Record.ToolCallsAvailable}}<ul class="plain-list">{{range .Generation.Record.ToolNames}}<li><code>{{.}}</code></li>{{else}}<li class="muted">None</li>{{end}}</ul>{{end}}</article>
+  </div>
+</section>
+<section aria-labelledby="generation-tokens-heading"><div class="section-heading"><div><p class="section-index">OBSERVED USAGE</p><h2 id="generation-tokens-heading">Token counts</h2></div>{{if and .Generation.Record.UsageMetadataAvailable (not .Generation.Record.UsageMetadataValid)}}<span>Inconsistent metadata · catalog estimate unavailable</span>{{end}}</div>
+  {{if .Generation.Record.TokenCountsAvailable}}<div class="token-ledger"><article data-token="input"><span>Prompt</span><strong>{{.Generation.Record.PromptTokens}}</strong></article><article data-token="cached"><span>Cached input</span><strong>{{.Generation.Record.CachedTokens}}</strong></article><article data-token="tool"><span>Tool-use input</span><strong>{{.Generation.Record.ToolUsePromptTokens}}</strong></article><article data-token="output"><span>Candidate output</span><strong>{{.Generation.Record.CandidateTokens}}</strong></article><article data-token="thought"><span>Thought output</span><strong>{{.Generation.Record.ThoughtTokens}}</strong></article><article data-token="total"><span>Total</span><strong>{{.Generation.Record.TotalTokens}}</strong></article></div>{{else}}<div class="empty-state compact"><strong>Token counts unavailable.</strong><span>The application did not receive valid bounded numeric fields.</span></div>{{end}}
+</section>
 {{template "foot" .}}{{end}}
 
 {{define "memory"}}{{template "head" .}}

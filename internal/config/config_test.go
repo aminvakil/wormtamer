@@ -279,6 +279,8 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "Gemini base URL query", replace: `"api_key": "gemini-key",`, with: `"api_key": "gemini-key", "base_url": "https://gateway.example?key=value",`, want: "gemini.base_url must not contain credentials"},
 		{name: "empty Gemini model", replace: `"gemini-test"`, with: `""`, want: "gemini.model is required"},
 		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
+		{name: "long Gemini model", replace: `"gemini-test"`, with: `"` + strings.Repeat("m", 257) + `"`, want: "must not exceed 256 bytes"},
+		{name: "Gemini model control character", replace: `"gemini-test"`, with: `"gemini\ntest"`, want: "must not contain control characters"},
 		{name: "missing public domains", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `[]`, want: "public_sources.allowed_domains is required"},
 		{name: "missing GitHub domain", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `["openbao.org"]`, want: "must include github.com"},
 		{name: "invalid public domain", replace: `"openbao.org"`, with: `"fake_openbao.org"`, want: "invalid public source domain"},

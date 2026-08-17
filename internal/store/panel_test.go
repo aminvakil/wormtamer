@@ -170,6 +170,13 @@ func TestFeedbackAndMemoryRecords(t *testing.T) {
 		feedback.Records[0].ActiveLessonCount != 1 {
 		t.Fatalf("feedback second page = %+v, %v", feedback, err)
 	}
+	detail, err := storage.GetFeedbackRecord(ctx, activeJobID)
+	if err != nil || detail.ID != activeJobID || detail.ReviewJobID != reviewJobID || detail.ActiveLessonCount != 1 || len(detail.Generations) != 0 {
+		t.Fatalf("feedback detail = %+v, %v", detail, err)
+	}
+	if _, err := storage.GetFeedbackRecord(ctx, inactiveJobID+1000); !errors.Is(err, ErrFeedbackRecordNotFound) {
+		t.Fatalf("missing feedback error = %v", err)
+	}
 
 	all, err := storage.ListMemoryRecords(ctx, nil, 0, 10)
 	if err != nil || len(all.Records) != 2 {

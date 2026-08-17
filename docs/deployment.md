@@ -22,7 +22,7 @@ cp config.example.json /secure/path/config.json
 
 Leave `gemini.base_url` empty or omit it to use the Gemini Developer API directly. Set it to an HTTP or HTTPS Gemini Developer API-compatible base URL to use a custom endpoint for both reviews and feedback evaluation. Wormtamer appends `/v1beta/models/<model>:generateContent` and sends `gemini.api_key` in the `x-goog-api-key` header.
 
-A custom endpoint must accept and return the native Gemini Developer API behavior Wormtamer uses, including function calling, structured JSON response schemas, and thinking configuration. An OpenAI-compatible endpoint serving a Gemini model is not sufficient. The endpoint receives private merge request content and tool results and must serve the configured Gemini 3 or newer model. Wormtamer rejects model endpoint redirects and base URLs containing credentials, queries, or fragments. Use HTTPS unless the endpoint is confined to an appropriate local network.
+A custom endpoint must accept and return the native Gemini Developer API behavior Wormtamer uses, including function calling, structured JSON response schemas, thinking configuration, and optional usage metadata. An OpenAI-compatible endpoint serving a Gemini model is not sufficient. The endpoint receives private merge request content and tool results and must serve the configured Gemini 3 or newer model. Wormtamer rejects model endpoint redirects and base URLs containing credentials, queries, or fragments. Use HTTPS unless the endpoint is confined to an appropriate local network.
 
 Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on every authorized project. `repository_sharing` is directional: each key is a repository under review and its values are related repositories the reviewer may inspect. Configure a rule only when every audience able to view the reviewed repository's merge requests may receive information derived from each related repository; the configuration is the operator's explicit assertion of that sharing policy.
 
@@ -81,9 +81,15 @@ curl --fail --silent --show-error http://127.0.0.1:8080/healthcheck
 
 A successful response confirms that startup completed and the HTTP server is live. It does not check GitLab, Gemini, or queued jobs.
 
-Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, feedback processing, active and inactive runtime memory, and non-secret effective configuration. Review, feedback, and memory history use bounded pagination. The panel reflects local SQLite state and does not probe GitLab, Gemini, repositories, or public sources while rendering.
+Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, feedback processing, active and inactive runtime memory, model usage, and non-secret effective configuration. Review, feedback, memory, and generation history use bounded pagination. The panel reflects local SQLite state and does not probe GitLab, Gemini, repositories, or public sources while rendering.
 
-The panel also exposes `/reviews`, `/feedback`, and `/memory`; it has no controls or request methods for changing application state. Review summaries and memory lessons may contain private project information. Use container logs for operational failures:
+The panel also exposes `/reviews`, `/feedback`, `/memory`, and `/usage`, with review, feedback, and generation detail routes; it has no controls or request methods for changing application state. `/usage` reports rolling 24-hour, 7-day, and 30-day application-observed token totals and bounded model, repository, and request-kind breakdowns. When pricing or response cost is retrieved it shows aggregate estimated cost in USD, not per-generation prices, formulas, or rates. Review summaries and memory lessons may contain private project information.
+
+When the Gemini Developer API is used directly, Wormtamer makes a credential-free, bounded request to LiteLLM's public model pricing catalog at startup and locally selects the exact configured Gemini model. Retrieval failure or missing or invalid model rates does not prevent startup; cost remains unavailable until a later successful process start. Estimates require consistent endpoint usage metadata and are stored in integer fixed point so later catalog changes do not rewrite history.
+
+For a custom endpoint, Wormtamer does not apply public Gemini rates. A LiteLLM proxy can return its calculated USD request cost in `x-litellm-response-cost`; Wormtamer validates and persists that value. Other compatible endpoints simply report no cost. Aggregate costs are diagnostics, not provider invoices, and may differ because of free tiers, negotiated pricing, proxy configuration, or billing adjustments.
+
+Use container logs for operational failures:
 
 ```sh
 docker logs wormtamer
@@ -103,10 +109,10 @@ These commands open the same SQLite volume briefly but do not start an HTTP list
 
 For model diagnostics, set `"log_level": "debug"` and restart the container. Debug events include the complete model system instruction and prompt, each requested tool and its arguments, each validated tool result, and the validated final model response. Review tool-call arguments show when Gemini chooses a directionally shared repository. These logs can contain private merge request data, repository content, comments, and secrets unknown to Wormtamer. Restrict access and retention, and restore `"log_level": "info"` after diagnosis. Wormtamer replaces any diagnostic value containing a configured GitLab or Gemini credential rather than logging it.
 
-Restarting the container with the same volume preserves all SQLite state, including feedback and runtime memory. Stop the existing container before starting a replacement so only one replica accesses SQLite.
+Restarting the container with the same volume preserves all SQLite state, including feedback, runtime memory, and model-generation usage. A request that was started but not checkpointed before process interruption is labeled unknown after service startup; provider usage for it cannot be recovered. Stop the existing container before starting a replacement so only one replica accesses SQLite.
 
 ## Back up and restore
 
 The operator owns backup and restore. For a filesystem-level backup, stop Wormtamer and back up the entire persistent volume so the database and any WAL state stay together. An online backup must use a SQLite-aware backup mechanism; copying only the live database file is unsafe.
 
-Restore only while Wormtamer is stopped, restore the complete persistent state to storage writable by the image's `nobody` user, and then start one container with that volume. Protect backups as sensitive data because stored webhook payloads may contain private repository metadata.
+Restore only while Wormtamer is stopped, restore the complete persistent state to storage writable by the image's `nobody` user, and then start one container with that volume. Protect backups as sensitive data because stored webhook payloads may contain private repository metadata. Model-generation records contain structured operational metadata and token counts, but no prompts, model responses, tool content, comments, or repository content. No automatic generation-record retention policy is currently applied.
