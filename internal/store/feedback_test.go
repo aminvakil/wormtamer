@@ -101,6 +101,99 @@ func TestFeedbackEventAndMemoryLifecycle(t *testing.T) {
 	}
 }
 
+func TestSameSecondFeedbackUpdateRetriesMemoryReplacement(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	findingID := prepareFinding(t, storage, base)
+	sourceUpdatedAt := base.Add(3 * time.Second)
+
+	first, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
+		DeliveryID: "same-second-create", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "create", SourceUpdatedAt: sourceUpdatedAt,
+	}, sourceUpdatedAt)
+	if err != nil || first.Outcome != FeedbackOutcomeQueued {
+		t.Fatalf("AcceptFeedbackEvent(create) = %+v, %v", first, err)
+	}
+	job, err := storage.ClaimFeedbackJob(ctx, "first-owner", sourceUpdatedAt, time.Minute, 5)
+	if err != nil || job == nil {
+		t.Fatalf("ClaimFeedbackJob(first) = %+v, %v", job, err)
+	}
+	firstDecision := FeedbackDecision{
+		MemoryID: "WT-M-" + strings.Repeat("A", 26), TargetType: "finding", TargetID: findingID,
+		Outcome: "rejects_finding", Confidence: "high", Lesson: "First memory version.",
+	}
+	memoryUpdatedAt := sourceUpdatedAt.Add(time.Second)
+	if err := storage.CompleteFeedbackJob(ctx, job.ID, job.SourceEventID, "first-owner", 40, "maintainer",
+		"http://gitlab.internal/group/project/-/merge_requests/7#note_91", []FeedbackDecision{firstDecision}, memoryUpdatedAt, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
+		DeliveryID: "same-second-update", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "update", SourceUpdatedAt: sourceUpdatedAt.Add(500 * time.Millisecond),
+	}, memoryUpdatedAt)
+	if err != nil || second.Outcome != FeedbackOutcomeQueued || second.EventID == first.EventID {
+		t.Fatalf("AcceptFeedbackEvent(update) = %+v, %v", second, err)
+	}
+	updatedJob, err := storage.ClaimFeedbackJob(ctx, "second-owner", memoryUpdatedAt, time.Minute, 5)
+	if err != nil || updatedJob == nil || updatedJob.SourceEventID != second.EventID {
+		t.Fatalf("ClaimFeedbackJob(update) = %+v, %v", updatedJob, err)
+	}
+	secondDecision := firstDecision
+	secondDecision.Lesson = "Second memory version."
+	err = storage.CompleteFeedbackJob(ctx, updatedJob.ID, updatedJob.SourceEventID, "second-owner", 40, "maintainer",
+		"http://gitlab.internal/group/project/-/merge_requests/7#note_91", []FeedbackDecision{secondDecision}, memoryUpdatedAt, 5*time.Minute)
+	if !errors.Is(err, ErrMemoryVersionConflict) {
+		t.Fatalf("same-second CompleteFeedbackJob() error = %v", err)
+	}
+	var active, count int
+	var lesson, storedUpdatedAt string
+	if err := storage.db.QueryRow(`
+SELECT count(*), active, lesson, updated_at
+FROM review_memories
+WHERE feedback_job_id = ?`, updatedJob.ID).Scan(&count, &active, &lesson, &storedUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || active != 0 || lesson != firstDecision.Lesson || storedUpdatedAt != formatTime(memoryUpdatedAt) {
+		t.Fatalf("preserved memory count=%d active=%d lesson=%q updated_at=%q", count, active, lesson, storedUpdatedAt)
+	}
+
+	retryAt := memoryUpdatedAt.Add(5 * time.Second)
+	state, err := storage.RetryFeedbackJob(ctx, updatedJob.ID, updatedJob.SourceEventID, "second-owner",
+		memoryUpdatedAt, retryAt, 5, "memory_version_conflict")
+	if err != nil || state != FeedbackQueued {
+		t.Fatalf("RetryFeedbackJob() = %q, %v", state, err)
+	}
+	retriedJob, err := storage.ClaimFeedbackJob(ctx, "retry-owner", retryAt, time.Minute, 5)
+	if err != nil || retriedJob == nil || retriedJob.SourceEventID != second.EventID {
+		t.Fatalf("ClaimFeedbackJob(retry) = %+v, %v", retriedJob, err)
+	}
+	if err := storage.CompleteFeedbackJob(ctx, retriedJob.ID, retriedJob.SourceEventID, "retry-owner", 40, "maintainer",
+		"http://gitlab.internal/group/project/-/merge_requests/7#note_91", []FeedbackDecision{secondDecision}, retryAt, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.db.QueryRow(`SELECT count(*), active, lesson, updated_at FROM review_memories WHERE feedback_job_id = ?`,
+		retriedJob.ID).Scan(&count, &active, &lesson, &storedUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || active != 1 || lesson != secondDecision.Lesson || storedUpdatedAt != formatTime(retryAt) {
+		t.Fatalf("replaced memory count=%d active=%d lesson=%q updated_at=%q", count, active, lesson, storedUpdatedAt)
+	}
+
+	stale, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
+		DeliveryID: "older-update", GitLabInstance: "http://gitlab.internal",
+		ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+		NoteID: 91, ActorID: 12, Action: "update", SourceUpdatedAt: sourceUpdatedAt.Add(-time.Second),
+	}, retryAt.Add(time.Second))
+	if err != nil || stale.Outcome != FeedbackOutcomeStale {
+		t.Fatalf("AcceptFeedbackEvent(stale) = %+v, %v", stale, err)
+	}
+}
+
 func TestFeedbackCompletionRejectsTargetsOutsideBoundReview(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
@@ -134,7 +227,7 @@ func TestFeedbackSourceTimestampChangeDeactivatesMemory(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 	ctx := context.Background()
-	now := time.Now().UTC().Add(time.Second)
+	now := time.Now().UTC().Truncate(time.Second).Add(time.Second)
 	findingID := prepareFinding(t, storage, now)
 	accepted, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
 		DeliveryID: "note-create", GitLabInstance: "http://gitlab.internal",
@@ -157,11 +250,25 @@ func TestFeedbackSourceTimestampChangeDeactivatesMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := storage.ReconcileFeedbackSource(ctx, job.ID, true, now.Add(2*time.Second), now.Add(6*time.Minute), 5*time.Minute); err != nil {
+	if err := storage.ReconcileFeedbackSource(ctx, job.ID, true, now.Add(403*time.Millisecond), now.Add(6*time.Minute), 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	var active int
 	var sourceCheckStopped bool
+	if err := storage.db.QueryRow(`
+SELECT m.active, j.next_source_check_at IS NULL
+FROM review_memories m
+JOIN feedback_jobs j ON j.id = m.feedback_job_id
+WHERE j.id = ?`, job.ID).Scan(&active, &sourceCheckStopped); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || sourceCheckStopped {
+		t.Fatalf("same-second memory active=%d source_check_stopped=%t", active, sourceCheckStopped)
+	}
+
+	if err := storage.ReconcileFeedbackSource(ctx, job.ID, true, now.Add(2*time.Second), now.Add(7*time.Minute), 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.db.QueryRow(`
 SELECT m.active, j.next_source_check_at IS NULL
 FROM review_memories m

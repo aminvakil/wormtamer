@@ -38,7 +38,7 @@ const (
 	PatchIDUnavailable = "unavailable"
 )
 
-const timestampLayout = "2006-01-02T15:04:05.000000000Z"
+const timestampLayout = time.RFC3339
 
 type Store struct {
 	db *sql.DB
@@ -208,7 +208,7 @@ CREATE TABLE webhook_events (
     action TEXT NOT NULL,
     outcome TEXT NOT NULL,
     payload_json BLOB NOT NULL CHECK(length(payload_json) <= 1048576),
-    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE review_jobs (
@@ -219,7 +219,7 @@ CREATE TABLE review_jobs (
     merge_request_iid INTEGER NOT NULL,
     head_sha TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'queued',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
 );
 
@@ -267,7 +267,7 @@ CREATE TABLE review_jobs_v3 (
     merge_request_iid INTEGER NOT NULL,
     head_sha TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'queued',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     lease_owner TEXT,
     lease_expires_at TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -341,7 +341,7 @@ CREATE TABLE feedback_events (
     action TEXT NOT NULL CHECK(action IN ('create', 'update')),
     source_updated_at TEXT NOT NULL,
     outcome TEXT NOT NULL,
-    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE feedback_jobs (
@@ -701,7 +701,7 @@ func (s *Store) ClaimJob(ctx context.Context, owner string, now time.Time, lease
 		return nil, errors.New("invalid job claim")
 	}
 	nowText := formatTime(now)
-	leaseText := formatTime(now.Add(leaseDuration))
+	leaseText := formatDeadline(now.Add(leaseDuration))
 
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE review_jobs
@@ -786,7 +786,7 @@ UPDATE review_jobs
 SET lease_expires_at = ?, updated_at = ?
 WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
   AND julianday(lease_expires_at) > julianday(?)`,
-		formatTime(now.Add(leaseDuration)), formatTime(now), jobID, owner,
+		formatDeadline(now.Add(leaseDuration)), formatTime(now), jobID, owner,
 		JobRunning, JobPublishing, formatTime(now))
 	if err != nil {
 		return false, fmt.Errorf("renew job lease: %w", err)
@@ -810,7 +810,7 @@ SET state = ?, patch_id_status = ?, patch_id_sha = NULL,
     last_error_message = 'merge_request_patch_id_pending', updated_at = ?
 WHERE id = ? AND state = ? AND lease_owner = ? AND patch_id_status = ?
   AND julianday(lease_expires_at) > julianday(?)`,
-		JobQueued, PatchIDPending, formatTime(nextAttempt), formatTime(now),
+		JobQueued, PatchIDPending, formatDeadline(nextAttempt), formatTime(now),
 		jobID, JobRunning, owner, PatchIDUnknown, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("defer pending patch ID: %w", err)
@@ -1015,7 +1015,7 @@ SET state = CASE WHEN attempt_count >= ? THEN ? ELSE ? END,
 WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
   AND julianday(lease_expires_at) > julianday(?)
 RETURNING state`,
-		maxAttempts, JobFailed, JobQueued, maxAttempts, formatTime(nextAttempt),
+		maxAttempts, JobFailed, JobQueued, maxAttempts, formatDeadline(nextAttempt),
 		category, message, formatTime(now), jobID, owner, JobRunning, JobPublishing, formatTime(now))
 	var state string
 	if err := row.Scan(&state); err != nil {
@@ -1109,7 +1109,15 @@ WHERE id = ? AND lease_owner = ?
 var ErrLeaseLost = errors.New("job lease lost")
 
 func formatTime(value time.Time) string {
-	return value.UTC().Format(timestampLayout)
+	return value.UTC().Truncate(time.Second).Format(timestampLayout)
+}
+
+func formatDeadline(value time.Time) string {
+	value = value.UTC()
+	if truncated := value.Truncate(time.Second); !value.Equal(truncated) {
+		value = truncated.Add(time.Second)
+	}
+	return value.Format(timestampLayout)
 }
 
 func validFailure(category, message string) bool {

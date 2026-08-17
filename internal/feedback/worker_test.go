@@ -86,6 +86,60 @@ JOIN feedback_jobs j ON j.id = m.feedback_job_id`).Scan(&active, &lesson, &role,
 	}
 }
 
+func TestWorkerRetriesMemoryVersionConflict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	storage, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	base := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	findingID := prepareReviewFinding(t, storage, base)
+	sourceUpdatedAt := base.Add(3 * time.Second)
+	if _, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
+		DeliveryID: "memory-conflict", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
+		Action: "create", SourceUpdatedAt: sourceUpdatedAt,
+	}, sourceUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	broker := &fakeGitLab{comment: gitlab.FeedbackComment{
+		Body: "This file is generated.", UpdatedAt: sourceUpdatedAt,
+		AccessLevel: 40, Role: "maintainer",
+		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91",
+	}}
+	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
+		TargetType: "finding", TargetID: findingID, Outcome: "rejects_finding", Confidence: "high",
+		CreateMemory: true, Lesson: "Generated files should be assessed through their source generator.",
+	}}}}
+	conflictStore := &memoryConflictStore{Store: storage}
+	worker, err := New(conflictStore, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerNow := sourceUpdatedAt.Add(time.Second)
+	worker.now = func() time.Time { return workerNow }
+	processed, err := worker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var state, category, nextAttempt string
+	var attempts int
+	if err := db.QueryRow(`SELECT state, last_error_category, next_attempt_at, attempt_count FROM feedback_jobs`).
+		Scan(&state, &category, &nextAttempt, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if conflictStore.completions != 1 || state != store.FeedbackQueued || category != "memory_version_conflict" ||
+		attempts != 1 || nextAttempt != workerNow.Add(5*time.Second).Format(time.RFC3339) {
+		t.Fatalf("completions=%d state=%q category=%q next=%q attempts=%d", conflictStore.completions, state, category, nextAttempt, attempts)
+	}
+}
+
 func TestWorkerEvaluatesNaturalFeedbackAgainstZeroFindingReview(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
 	storage, err := store.Open(context.Background(), path)
@@ -268,6 +322,16 @@ type fakeEvaluator struct {
 func (e *fakeEvaluator) Evaluate(_ context.Context, input memory.Input) (memory.Result, error) {
 	e.input = input
 	return e.result, nil
+}
+
+type memoryConflictStore struct {
+	*store.Store
+	completions int
+}
+
+func (s *memoryConflictStore) CompleteFeedbackJob(context.Context, int64, int64, string, int, string, string, []store.FeedbackDecision, time.Time, time.Duration) error {
+	s.completions++
+	return store.ErrMemoryVersionConflict
 }
 
 type cancelAfterReconciliationStore struct {

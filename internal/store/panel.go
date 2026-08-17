@@ -552,7 +552,7 @@ func validFeedbackState(state string) bool {
 }
 
 func parseStoredTime(text string) (time.Time, error) {
-	return time.Parse(time.RFC3339Nano, text)
+	return time.Parse(timestampLayout, text)
 }
 
 func parseOptionalStoredTime(text sql.NullString) (*time.Time, error) {

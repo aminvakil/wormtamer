@@ -81,7 +81,10 @@ type FeedbackSource struct {
 	SourceUpdatedAt time.Time
 }
 
-var ErrFeedbackSuperseded = errors.New("feedback job superseded")
+var (
+	ErrFeedbackSuperseded    = errors.New("feedback job superseded")
+	ErrMemoryVersionConflict = errors.New("feedback memory version conflict")
+)
 
 func (s *Store) AcceptFeedbackEvent(ctx context.Context, event FeedbackEvent, now time.Time) (result AcceptFeedbackResult, err error) {
 	if event.DeliveryID == "" || event.GitLabInstance == "" || event.ProjectID <= 0 || event.ProjectPath == "" ||
@@ -145,7 +148,7 @@ WHERE j.gitlab_instance = ? AND j.project_id = ? AND j.note_id = ?`,
 		return result, fmt.Errorf("read current feedback job: %w", err)
 	}
 	newJob := errors.Is(err, sql.ErrNoRows)
-	if err == nil && formatTime(event.SourceUpdatedAt) <= currentUpdatedAt {
+	if err == nil && formatTime(event.SourceUpdatedAt) < currentUpdatedAt {
 		result.JobID = currentJobID
 		result.Outcome = FeedbackOutcomeStale
 		if _, err := tx.ExecContext(ctx, `UPDATE feedback_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {
@@ -256,7 +259,7 @@ WHERE id = (
 RETURNING id, source_event_id, gitlab_instance, project_id, project_path,
           merge_request_iid, note_id, actor_id, state, lease_owner,
           lease_expires_at, attempt_count, review_job_id`,
-		FeedbackRunning, owner, formatTime(now.Add(leaseDuration)), nowText,
+		FeedbackRunning, owner, formatDeadline(now.Add(leaseDuration)), nowText,
 		maxAttempts, FeedbackQueued, nowText, FeedbackRunning, nowText)
 	job := &FeedbackJob{}
 	var leaseExpires string
@@ -306,7 +309,7 @@ func (s *Store) RenewFeedbackLease(ctx context.Context, jobID int64, owner strin
 UPDATE feedback_jobs SET lease_expires_at = ?, updated_at = ?
 WHERE id = ? AND lease_owner = ? AND state = ?
   AND julianday(lease_expires_at) > julianday(?)`,
-		formatTime(now.Add(leaseDuration)), formatTime(now), jobID, owner, FeedbackRunning, formatTime(now))
+		formatDeadline(now.Add(leaseDuration)), formatTime(now), jobID, owner, FeedbackRunning, formatTime(now))
 	if err != nil {
 		return false, fmt.Errorf("renew feedback lease: %w", err)
 	}
@@ -377,6 +380,18 @@ WHERE f.id = ?`, jobID).Scan(&actorID, &reviewJobID, &gitLabInstance, &projectID
 			return errors.New("invalid feedback finding target")
 		}
 	}
+	memoryUpdatedAt := formatTime(now)
+	var versionConflict int
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM review_memories
+    WHERE feedback_job_id = ? AND updated_at = ?
+)`, jobID, memoryUpdatedAt).Scan(&versionConflict); err != nil {
+		return fmt.Errorf("check feedback memory version: %w", err)
+	}
+	if versionConflict == 1 {
+		return ErrMemoryVersionConflict
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM review_memories WHERE feedback_job_id = ?`, jobID); err != nil {
 		return fmt.Errorf("replace feedback memories: %w", err)
 	}
@@ -400,7 +415,7 @@ INSERT INTO review_memories (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			decision.MemoryID, jobID, decision.TargetType, decision.TargetID, findingID,
 			decision.Outcome, decision.Confidence, lesson, memoryActive, actorID,
-			accessLevel, sourceURL, formatTime(now)); err != nil {
+			accessLevel, sourceURL, memoryUpdatedAt); err != nil {
 			return fmt.Errorf("store feedback decision: %w", err)
 		}
 	}
@@ -419,7 +434,7 @@ ON CONFLICT(job_id) DO UPDATE SET
 	}
 	var nextCheck any
 	if active {
-		nextCheck = formatTime(now.Add(sourceCheckInterval))
+		nextCheck = formatDeadline(now.Add(sourceCheckInterval))
 	}
 	update, err := tx.ExecContext(ctx, `
 UPDATE feedback_jobs
@@ -456,7 +471,7 @@ SET state = CASE WHEN attempt_count >= ? THEN ? ELSE ? END,
     lease_owner = NULL, lease_expires_at = NULL, last_error_category = ?, updated_at = ?
 WHERE id = ? AND source_event_id = ? AND state = ? AND lease_owner = ?
   AND julianday(lease_expires_at) > julianday(?)
-RETURNING state`, maxAttempts, FeedbackFailed, FeedbackQueued, maxAttempts, formatTime(nextAttempt),
+RETURNING state`, maxAttempts, FeedbackFailed, FeedbackQueued, maxAttempts, formatDeadline(nextAttempt),
 		category, formatTime(now), jobID, sourceEventID, FeedbackRunning, owner, formatTime(now))
 	var state string
 	if err := row.Scan(&state); err != nil {
@@ -571,7 +586,7 @@ WHERE j.id = ?`, jobID).Scan(&storedUpdatedAt); err != nil {
 			return fmt.Errorf("read feedback source timestamp: %w", err)
 		}
 		if storedUpdatedAt == formatTime(sourceUpdatedAt) {
-			if _, err := tx.ExecContext(ctx, `UPDATE feedback_jobs SET next_source_check_at = ?, updated_at = ? WHERE id = ?`, formatTime(now.Add(interval)), formatTime(now), jobID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE feedback_jobs SET next_source_check_at = ?, updated_at = ? WHERE id = ?`, formatDeadline(now.Add(interval)), formatTime(now), jobID); err != nil {
 				return fmt.Errorf("schedule feedback source check: %w", err)
 			}
 			if err := tx.Commit(); err != nil {

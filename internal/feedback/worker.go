@@ -191,7 +191,9 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 
 func (w *Worker) handleFailure(ctx context.Context, job *store.FeedbackJob, err error) error {
 	var failureError *failure.Error
-	if !errors.As(err, &failureError) {
+	if errors.Is(err, store.ErrMemoryVersionConflict) {
+		failureError = &failure.Error{Category: "memory_version_conflict", Retryable: true}
+	} else if !errors.As(err, &failureError) {
 		failureError = &failure.Error{Category: "internal_feedback_failure", Retryable: true}
 	}
 	now := w.now().UTC()

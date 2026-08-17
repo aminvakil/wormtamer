@@ -45,7 +45,7 @@ func TestReadDashboardEmptyAndCountsCurrentState(t *testing.T) {
 	if stateCount(dashboard.ReviewCounts, JobQueued) != 1 || stateCount(dashboard.FeedbackCounts, FeedbackQueued) != 1 {
 		t.Fatalf("dashboard counts = review %+v feedback %+v", dashboard.ReviewCounts, dashboard.FeedbackCounts)
 	}
-	if dashboard.OldestQueuedReview == nil || !dashboard.OldestQueuedReview.Equal(queuedAt) ||
+	if dashboard.OldestQueuedReview == nil || !dashboard.OldestQueuedReview.Equal(queuedAt.Truncate(time.Second)) ||
 		dashboard.OldestQueuedFeedback == nil || len(dashboard.RecentReviews) != 1 || len(dashboard.RecentFeedback) != 1 {
 		t.Fatalf("dashboard = %+v", dashboard)
 	}
@@ -130,7 +130,7 @@ func TestReviewRecordsAndDetail(t *testing.T) {
 		detail.Result == nil || detail.Result.Summary != "summary <script>alert(1)</script>" ||
 		len(detail.Result.Findings) != 1 || detail.Result.Findings[0].ID != findingID ||
 		!detail.Published || detail.GitLabNoteID != 81 || len(detail.Retrievals) != 1 ||
-		detail.Retrievals[0].MemoryID != memoryID || !detail.Retrievals[0].RetrievedAt.Equal(retrieved) {
+		detail.Retrievals[0].MemoryID != memoryID || !detail.Retrievals[0].RetrievedAt.Equal(retrieved.Truncate(time.Second)) {
 		t.Fatalf("review detail = %+v", detail)
 	}
 	external, err := storage.GetReviewRecord(ctx, recovered.ID)

@@ -14,6 +14,42 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func TestTimestampsUseSecondPrecision(t *testing.T) {
+	input := time.Date(2026, 8, 17, 7, 54, 21, 403000000, time.UTC)
+	if got, want := formatTime(input), "2026-08-17T07:54:21Z"; got != want {
+		t.Fatalf("formatTime() = %q, want %q", got, want)
+	}
+	if got, want := formatDeadline(input), "2026-08-17T07:54:22Z"; got != want {
+		t.Fatalf("formatDeadline() = %q, want %q", got, want)
+	}
+	if got, want := formatDeadline(input.Truncate(time.Second)), "2026-08-17T07:54:21Z"; got != want {
+		t.Fatalf("formatDeadline(whole second) = %q, want %q", got, want)
+	}
+
+	storage := openTestStore(t)
+	defer storage.Close()
+	accepted, err := storage.AcceptEvent(context.Background(), readyEvent("second-precision"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receivedAt, createdAt string
+	if err := storage.db.QueryRow(`
+SELECT e.received_at, j.created_at
+FROM webhook_events e
+JOIN review_jobs j ON j.source_event_id = e.id
+WHERE j.id = ?`, accepted.JobID).Scan(&receivedAt, &createdAt); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"received_at": receivedAt, "created_at": createdAt} {
+		if strings.Contains(value, ".") {
+			t.Fatalf("%s = %q, want whole seconds", name, value)
+		}
+		if _, err := time.Parse(timestampLayout, value); err != nil {
+			t.Fatalf("parse %s %q: %v", name, value, err)
+		}
+	}
+}
+
 func TestAcceptEventIsDurableAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
@@ -585,7 +621,7 @@ func TestRetryJobIsDueAndExhaustsAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	now := time.Now().UTC().Add(time.Hour)
+	now := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	for attempt := 1; attempt <= 5; attempt++ {
 		job, err := storage.ClaimJob(ctx, "owner", now, time.Minute, 5)
 		if err != nil || job == nil {
