@@ -5,56 +5,44 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
-	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func TestWorkerEvaluatesCurrentCommentAndActivatesMemory(t *testing.T) {
+func TestWorkerSynthesizesMemoryFromTerminalEvidence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
 	storage, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Add(time.Second)
-	findingID := prepareReviewFinding(t, storage, now)
-	accepted, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
-		DeliveryID: "note", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
-		Action: "create", SourceUpdatedAt: now,
-	}, now)
-	if err != nil || accepted.JobID == 0 {
-		t.Fatalf("AcceptFeedbackEvent() = %+v, %v", accepted, err)
-	}
-	broker := &fakeGitLab{comment: gitlab.FeedbackComment{
-		Body: "This file is generated, so the finding is not valid.", UpdatedAt: now,
-		AccessLevel: 40, Role: "maintainer",
-		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91",
+	now := time.Now().UTC().Add(time.Hour)
+	feedbackID := prepareFeedbackJob(t, storage, now)
+	broker := &fakeGitLab{evidence: gitlab.FeedbackEvidence{
+		Files:     []gitlab.ChangedFile{{OldPath: "generated.go", NewPath: "generated.go", Diff: "@@ -1 +1 @@\n-old\n+new"}},
+		Comments:  []gitlab.FeedbackComment{{AuthorID: 12, Body: "This file must be changed through the generator."}},
+		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7",
 	}}
-	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
-		TargetType: "finding", TargetID: findingID, Outcome: "rejects_finding", Confidence: "high",
-		CreateMemory: true, Lesson: "Generated files should be assessed through their source generator.",
-	}}}}
+	evaluator := &fakeEvaluator{result: memory.Result{
+		CreateMemory: true, Lesson: "Generated files must be changed through their source generator.",
+	}}
 	worker, err := New(storage, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker.now = func() time.Time { return now.Add(time.Second) }
+	worker.now = func() time.Time { return now.Add(10 * time.Second) }
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
 	}
-	if evaluator.input.ActorRole != "maintainer" || evaluator.input.Comment != broker.comment.Body || evaluator.input.Summary != "summary" ||
-		len(evaluator.input.Findings) != 1 || evaluator.input.Findings[0].TargetID != findingID || evaluator.input.ReviewTargetID == "" {
+	if evaluator.input.HeadSHA != strings.Repeat("b", 40) || evaluator.input.ReviewHeadSHA != strings.Repeat("a", 40) ||
+		len(evaluator.input.Files) != 1 || len(evaluator.input.Comments) != 1 || evaluator.input.Summary != "summary" {
 		t.Fatalf("evaluation input = %+v", evaluator.input)
 	}
 	if err := storage.Close(); err != nil {
@@ -65,286 +53,94 @@ func TestWorkerEvaluatesCurrentCommentAndActivatesMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var active int
-	var lesson, role, state string
+	var lesson, state string
+	var storedJobID int64
 	if err := db.QueryRow(`
-SELECT m.active, m.lesson, e.actor_role, j.state
-FROM review_memories m
-JOIN feedback_evaluations e ON e.job_id = m.feedback_job_id
-JOIN feedback_jobs j ON j.id = m.feedback_job_id`).Scan(&active, &lesson, &role, &state); err != nil {
+SELECT m.lesson, j.state, j.id
+FROM review_memories m JOIN feedback_jobs j ON j.id = m.feedback_job_id`).Scan(&lesson, &state, &storedJobID); err != nil {
 		t.Fatal(err)
 	}
-	if active != 1 || role != "maintainer" || lesson != evaluator.result.Decisions[0].Lesson || state != store.FeedbackCompleted {
-		t.Fatalf("memory active=%d role=%q lesson=%q feedback_state=%q", active, role, lesson, state)
-	}
-	databaseBytes, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(databaseBytes), broker.comment.Body) {
-		t.Fatal("SQLite retained the source comment body")
+	if lesson != evaluator.result.Lesson || state != store.FeedbackCompleted || storedJobID != feedbackID {
+		t.Fatalf("lesson=%q state=%q job=%d", lesson, state, storedJobID)
 	}
 }
 
-func TestWorkerRetriesMemoryVersionConflict(t *testing.T) {
+func TestWorkerCompletesWithoutMemoryWhenModelDeclines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
 	storage, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer storage.Close()
-	base := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
-	findingID := prepareReviewFinding(t, storage, base)
-	sourceUpdatedAt := base.Add(3 * time.Second)
-	if _, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
-		DeliveryID: "memory-conflict", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
-		Action: "create", SourceUpdatedAt: sourceUpdatedAt,
-	}, sourceUpdatedAt); err != nil {
-		t.Fatal(err)
-	}
-	broker := &fakeGitLab{comment: gitlab.FeedbackComment{
-		Body: "This file is generated.", UpdatedAt: sourceUpdatedAt,
-		AccessLevel: 40, Role: "maintainer",
-		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91",
+	now := time.Now().UTC().Add(time.Hour)
+	prepareFeedbackJob(t, storage, now)
+	broker := &fakeGitLab{evidence: gitlab.FeedbackEvidence{
+		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7",
 	}}
-	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
-		TargetType: "finding", TargetID: findingID, Outcome: "rejects_finding", Confidence: "high",
-		CreateMemory: true, Lesson: "Generated files should be assessed through their source generator.",
-	}}}}
-	conflictStore := &memoryConflictStore{Store: storage}
-	worker, err := New(conflictStore, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := New(storage, broker, &fakeEvaluator{result: memory.Result{}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerNow := sourceUpdatedAt.Add(time.Second)
-	worker.now = func() time.Time { return workerNow }
-	processed, err := worker.ProcessOne(context.Background())
-	if err != nil || !processed {
-		t.Fatalf("ProcessOne() = %t, %v", processed, err)
-	}
-	db, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var state, category, nextAttempt string
-	var attempts int
-	if err := db.QueryRow(`SELECT state, last_error_category, next_attempt_at, attempt_count FROM feedback_jobs`).
-		Scan(&state, &category, &nextAttempt, &attempts); err != nil {
-		t.Fatal(err)
-	}
-	if conflictStore.completions != 1 || state != store.FeedbackQueued || category != "memory_version_conflict" ||
-		attempts != 1 || nextAttempt != workerNow.Add(5*time.Second).Format(time.RFC3339) {
-		t.Fatalf("completions=%d state=%q category=%q next=%q attempts=%d", conflictStore.completions, state, category, nextAttempt, attempts)
-	}
-}
-
-func TestWorkerEvaluatesNaturalFeedbackAgainstZeroFindingReview(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer storage.Close()
-	now := time.Now().UTC().Add(time.Second)
-	head := strings.Repeat("b", 40)
-	if _, err := storage.AcceptEvent(context.Background(), store.Event{
-		DeliveryID: "zero-review", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, HeadSHA: head, Action: "open",
-		Payload: []byte(`{"object_kind":"merge_request"}`), QueueReview: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	job, err := storage.ClaimJob(context.Background(), "review-owner", now, time.Minute, 5)
-	if err != nil || job == nil {
-		t.Fatalf("ClaimJob() = %+v, %v", job, err)
-	}
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", []byte(`{"summary":"No actionable findings.","findings":[]}`), nil, nil, store.PatchIDUnavailable, "", now); err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.CompletePublication(context.Background(), job.ID, "review-owner", "<!-- zero-review -->", 100, now.Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
-		DeliveryID: "missed-issue", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 92, ActorID: 12,
-		Action: "create", SourceUpdatedAt: now.Add(2 * time.Second),
-	}, now.Add(2*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	targetID := review.ReviewID("http://gitlab.internal", 42, 7, head)
-	broker := &fakeGitLab{comment: gitlab.FeedbackComment{
-		Body:      "Wormtamer missed that generated configuration must be changed through its schema.",
-		UpdatedAt: now.Add(2 * time.Second), AccessLevel: 40, Role: "maintainer",
-		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_92",
-	}}
-	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
-		TargetType: "review", TargetID: targetID, Outcome: "corrects_review", Confidence: "high",
-		CreateMemory: true, Lesson: "Generated configuration must be changed through its schema.",
-	}}}}
-	worker, err := New(storage, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker.now = func() time.Time { return now.Add(3 * time.Second) }
+	worker.now = func() time.Time { return now.Add(10 * time.Second) }
 	if processed, err := worker.ProcessOne(context.Background()); err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
 	}
-	if evaluator.input.ReviewTargetID != targetID || evaluator.input.Summary != "No actionable findings." || len(evaluator.input.Findings) != 0 {
-		t.Fatalf("evaluation input = %+v", evaluator.input)
-	}
-	db, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var targetType, storedTargetID, outcome string
-	if err := db.QueryRow(`SELECT target_type, target_id, outcome FROM review_memories`).Scan(&targetType, &storedTargetID, &outcome); err != nil {
-		t.Fatal(err)
-	}
-	if targetType != "review" || storedTargetID != targetID || outcome != "corrects_review" {
-		t.Fatalf("stored target = %q %q %q", targetType, storedTargetID, outcome)
-	}
-	memories, err := storage.ListActiveReviewMemories(context.Background(), "http://gitlab.internal", 42)
-	if err != nil || len(memories) != 1 || memories[0].TargetType != "review" || memories[0].TargetID != targetID {
-		t.Fatalf("active review memories = %+v, %v", memories, err)
+	memories, err := storage.ListReviewMemories(context.Background(), "http://gitlab.internal", 42)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("memories = %+v, %v", memories, err)
 	}
 }
 
-func TestRunReconcilesDueSourcesWhileFeedbackRemainsQueued(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer storage.Close()
-	now := time.Now().UTC().Add(time.Second)
-	findingID := prepareReviewFinding(t, storage, now)
-	if _, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
-		DeliveryID: "active-note", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
-		Action: "create", SourceUpdatedAt: now,
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	broker := &fakeGitLab{comment: gitlab.FeedbackComment{
-		Body: "The file is generated.", UpdatedAt: now, AccessLevel: 40, Role: "maintainer",
-		SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91",
-	}}
-	evaluator := &fakeEvaluator{result: memory.Result{Decisions: []memory.Decision{{
-		TargetType: "finding", TargetID: findingID, Outcome: "rejects_finding", Confidence: "high",
-		CreateMemory: true, Lesson: "Generated files should be assessed through their source generator.",
-	}}}}
-	initialWorker, err := New(storage, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	initialWorker.now = func() time.Time { return now.Add(time.Second) }
-	if processed, err := initialWorker.ProcessOne(context.Background()); err != nil || !processed {
-		t.Fatalf("initial ProcessOne() = %t, %v", processed, err)
-	}
-
-	for index, noteID := range []int64{92, 93} {
-		if _, err := storage.AcceptFeedbackEvent(context.Background(), store.FeedbackEvent{
-			DeliveryID: "queued-note-" + strconv.FormatInt(noteID, 10), GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-			ProjectPath: "group/project", MergeRequestIID: 7, NoteID: noteID, ActorID: 12,
-			Action: "create", SourceUpdatedAt: now.Add(time.Duration(index+2) * time.Second),
-		}, now.Add(time.Duration(index+2)*time.Second)); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	wrappedStore := &cancelAfterReconciliationStore{Store: storage, cancel: cancel}
-	runWorker, err := New(wrappedStore, broker, evaluator, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dueAt := now.Add(6 * time.Minute)
-	runWorker.now = func() time.Time { return dueAt }
-	if err := runWorker.Run(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if wrappedStore.reconciliations != 1 || broker.sourceChecks != 1 {
-		t.Fatalf("reconciliations=%d source_checks=%d", wrappedStore.reconciliations, broker.sourceChecks)
-	}
-	remaining, err := storage.ClaimFeedbackJob(context.Background(), "remaining-owner", dueAt, time.Minute, 5)
-	if err != nil || remaining == nil {
-		t.Fatalf("remaining queued feedback = %+v, %v", remaining, err)
-	}
-}
-
-func prepareReviewFinding(t *testing.T, storage *store.Store, now time.Time) string {
+func prepareFeedbackJob(t *testing.T, storage *store.Store, now time.Time) int64 {
 	t.Helper()
-	_, err := storage.AcceptEvent(context.Background(), store.Event{
+	ctx := context.Background()
+	reviewHead := strings.Repeat("a", 40)
+	accepted, err := storage.AcceptEvent(ctx, store.Event{
 		DeliveryID: "review", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7,
-		HeadSHA: strings.Repeat("a", 40), Action: "open", Payload: []byte(`{"object_kind":"merge_request"}`), QueueReview: true,
+		ProjectPath: "group/project", MergeRequestIID: 7, HeadSHA: reviewHead,
+		Action: "open", Payload: []byte(`{"object_kind":"merge_request"}`), QueueReview: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := storage.ClaimJob(context.Background(), "review-owner", now, time.Minute, 5)
-	if err != nil || job == nil {
+	job, err := storage.ClaimJob(ctx, "review-owner", now, time.Minute, 5)
+	if err != nil || job == nil || job.ID != accepted.JobID {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	findingID := "WT-F-" + strings.Repeat("A", 26)
-	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "review-owner", result, []string{findingID}, nil, store.PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, "review-owner", []byte(`{"summary":"summary","findings":[]}`), nil, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CompletePublication(context.Background(), job.ID, "review-owner", "<!-- review -->", 99, now.Add(time.Second)); err != nil {
+	if err := storage.CompletePublication(ctx, job.ID, "review-owner", "<!-- review -->", 99, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	return findingID
+	terminal, err := storage.AcceptEvent(ctx, store.Event{
+		DeliveryID: "closed", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
+		ProjectPath: "group/project", MergeRequestIID: 7, HeadSHA: strings.Repeat("b", 40),
+		Action: "close", Payload: []byte(`{"object_kind":"merge_request"}`),
+		QueueFeedback: true, TerminalState: "closed",
+	})
+	if err != nil || terminal.FeedbackJobID == 0 {
+		t.Fatalf("AcceptEvent(terminal) = %+v, %v", terminal, err)
+	}
+	return terminal.FeedbackJobID
 }
 
 type fakeGitLab struct {
-	comment      gitlab.FeedbackComment
-	sourceChecks int
+	evidence gitlab.FeedbackEvidence
+	err      error
 }
 
-func (g *fakeGitLab) LoadFeedbackComment(_ context.Context, _ gitlab.FeedbackRef) (gitlab.FeedbackComment, bool, error) {
-	return g.comment, true, nil
-}
-
-func (g *fakeGitLab) CheckFeedbackSource(_ context.Context, _ gitlab.FeedbackRef) (bool, time.Time, error) {
-	g.sourceChecks++
-	return true, g.comment.UpdatedAt, nil
+func (g *fakeGitLab) LoadFeedback(_ context.Context, _ gitlab.FeedbackRef) (gitlab.FeedbackEvidence, error) {
+	return g.evidence, g.err
 }
 
 type fakeEvaluator struct {
 	input  memory.Input
 	result memory.Result
+	err    error
 }
 
 func (e *fakeEvaluator) Evaluate(_ context.Context, input memory.Input) (memory.Result, error) {
 	e.input = input
-	return e.result, nil
-}
-
-type memoryConflictStore struct {
-	*store.Store
-	completions int
-}
-
-func (s *memoryConflictStore) CompleteFeedbackJob(context.Context, int64, int64, string, int, string, string, []store.FeedbackDecision, time.Time, time.Duration) error {
-	s.completions++
-	return store.ErrMemoryVersionConflict
-}
-
-type cancelAfterReconciliationStore struct {
-	*store.Store
-	cancel          context.CancelFunc
-	reconciliations int
-}
-
-func (s *cancelAfterReconciliationStore) ReconcileFeedbackSource(ctx context.Context, jobID int64, exists bool, sourceUpdatedAt, now time.Time, interval time.Duration) error {
-	if err := s.Store.ReconcileFeedbackSource(ctx, jobID, exists, sourceUpdatedAt, now, interval); err != nil {
-		return err
-	}
-	s.reconciliations++
-	s.cancel()
-	return nil
+	return e.result, e.err
 }

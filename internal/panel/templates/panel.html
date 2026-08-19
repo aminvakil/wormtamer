@@ -67,14 +67,14 @@
 </div>{{end}}
 
 {{define "feedback-records"}}<div class="record-collection feedback-records">
-  <div class="record-head feedback-grid" aria-hidden="true"><span>Feedback / project</span><span>Outcome</span><span>Decisions / lessons</span><span>Attempts</span><span>Updated</span></div>
+  <div class="record-head feedback-grid" aria-hidden="true"><span>Feedback / project</span><span>Outcome</span><span>Memory</span><span>Attempts</span><span>Updated</span></div>
   <ol class="record-list">
   {{range .}}<li>
     <article class="record-row feedback-grid" aria-labelledby="feedback-label-{{.Record.ID}}">
       <div class="record-primary">
         <div class="record-reference"><a id="feedback-label-{{.Record.ID}}" href="/feedback/{{.Record.ID}}">Feedback #{{.Record.ID}}</a>{{if .Record.ReviewJobID}}<a href="/reviews/{{.Record.ReviewJobID}}">Review #{{.Record.ReviewJobID}}</a>{{end}}</div>
         <strong class="record-project">{{.Project}}</strong>
-        <div class="record-meta">{{if .MergeRequestURL}}<a href="{{.MergeRequestURL}}">MR !{{.Record.MergeRequestIID}}</a>{{else}}MR !{{.Record.MergeRequestIID}}{{end}}<span>Note #{{.Record.NoteID}}</span></div>
+        <div class="record-meta">{{if .MergeRequestURL}}<a href="{{.MergeRequestURL}}">MR !{{.Record.MergeRequestIID}}</a>{{else}}MR !{{.Record.MergeRequestIID}}{{end}}<span>{{.Record.TerminalState}}</span><code>{{shortSHA .Record.HeadSHA}}</code></div>
         {{if .Record.ReviewID}}<code class="record-id">{{.Record.ReviewID}}</code>{{end}}
       </div>
       <div class="record-outcome">
@@ -83,7 +83,7 @@
         {{if .Record.LastErrorCategory}}<code class="failure-category">{{.Record.LastErrorCategory}}</code>{{end}}
       </div>
       <div class="record-stat decision-counts">
-        <span class="cell-label">Decisions / lessons</span><strong>{{.Record.DecisionCount}}</strong><span>decisions</span><strong>{{.Record.ActiveLessonCount}}</strong><span>active lessons</span>
+        <span class="cell-label">Memory</span><strong>{{if .Record.MemoryCreated}}Created{{else}}None{{end}}</strong>
       </div>
       <div class="record-stat attempt-count" data-retried="{{if gt .Record.AttemptCount 1}}true{{else}}false{{end}}">
         <span class="cell-label">Attempts</span><strong>{{.Record.AttemptCount}}</strong>
@@ -92,7 +92,7 @@
         <span class="cell-label">Updated</span><time datetime="{{timeAttribute .Record.UpdatedAt}}">{{formatCompactTime .Record.UpdatedAt}}</time>
       </div>
     </article>
-  </li>{{else}}<li class="empty-state"><strong>No feedback jobs match this view.</strong><span>Eligible merge request comments will appear after evaluation.</span></li>{{end}}
+  </li>{{else}}<li class="empty-state"><strong>No feedback jobs match this view.</strong><span>Closed and merged merge requests will appear after terminal webhook ingestion.</span></li>{{end}}
   </ol>
 </div>{{end}}
 
@@ -104,7 +104,7 @@
       <div class="record-primary">
         <div class="record-reference"><a id="generation-link-{{.Record.ID}}" href="/usage/{{.Record.ID}}">Generation #{{.Record.ID}}</a><code>{{.Record.RequestKind}}</code></div>
         <strong class="record-project">{{.Project}}</strong>
-        <div class="record-meta"><span>MR !{{.Record.MergeRequestIID}}</span>{{if .Record.NoteID}}<span>Note #{{.Record.NoteID}}</span>{{end}}</div>
+        <div class="record-meta"><span>MR !{{.Record.MergeRequestIID}}</span></div>
       </div>
       <div class="record-outcome">
         <span class="cell-label">Workflow</span>
@@ -139,7 +139,7 @@
   {{template "state-rail" .ReviewStates}}
 </section>
 <section class="workflow-section" aria-labelledby="feedback-jobs-heading">
-  <div class="section-heading"><div><p class="section-index">02 / FEEDBACK</p><h2 id="feedback-jobs-heading">Feedback jobs</h2></div><span>{{if .OldestFeedback}}Oldest queued <time datetime="{{optionalTimeAttribute .OldestFeedback}}">{{formatCompactOptionalTime .OldestFeedback}}</time>{{else}}No queued feedback{{end}}</span></div>
+  <div class="section-heading"><div><p class="section-index">02 / MEMORY</p><h2 id="feedback-jobs-heading">Memory synthesis jobs</h2></div><span>{{if .OldestFeedback}}Oldest queued <time datetime="{{optionalTimeAttribute .OldestFeedback}}">{{formatCompactOptionalTime .OldestFeedback}}</time>{{else}}No queued synthesis{{end}}</span></div>
   {{template "state-rail" .FeedbackStates}}
 </section>
 
@@ -204,7 +204,7 @@
 {{template "foot" .}}{{end}}
 
 {{define "feedback"}}{{template "head" .}}
-<section class="hero compact"><div class="hero-copy"><p class="eyebrow">Comment evaluation</p><h1>Feedback jobs</h1><p class="lede">Durable evaluation state for eligible merge request comments.</p></div></section>
+<section class="hero compact"><div class="hero-copy"><p class="eyebrow">Terminal merge request evaluation</p><h1>Memory synthesis jobs</h1><p class="lede">Durable evaluation state for closed and merged merge requests.</p></div></section>
 <nav class="filters" aria-label="Feedback state filters">{{range .StateLinks}}<a class="filter {{if .Current}}current{{end}}" {{if .Current}}aria-current="page"{{end}} href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
 {{template "feedback-records" .Records}}
 {{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older feedback →</a></div>{{end}}
@@ -212,13 +212,13 @@
 
 {{define "feedback-detail"}}{{template "head" .}}
 <section class="hero compact detail-hero">
-  <div class="hero-copy"><p class="eyebrow">Feedback #{{.Detail.ID}}</p><div class="detail-title-line"><h1>{{.Project}} · MR !{{.Detail.MergeRequestIID}}</h1><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></div><p>Note #{{.Detail.NoteID}}</p></div>
+  <div class="hero-copy"><p class="eyebrow">Feedback #{{.Detail.ID}}</p><div class="detail-title-line"><h1>{{.Project}} · MR !{{.Detail.MergeRequestIID}}</h1><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></div><p>{{.Detail.TerminalState}} at <code>{{.Detail.HeadSHA}}</code></p></div>
   {{if .MergeRequestURL}}<a class="button" href="{{.MergeRequestURL}}">Open merge request</a>{{end}}
 </section>
-<section aria-labelledby="feedback-record-heading"><div class="section-heading"><div><p class="section-index">DURABLE RECORD</p><h2 id="feedback-record-heading">Feedback record</h2></div></div>
+<section aria-labelledby="feedback-record-heading"><div class="section-heading"><div><p class="section-index">DURABLE RECORD</p><h2 id="feedback-record-heading">Memory synthesis record</h2></div></div>
   <div class="detail-grid">
-    <article class="panel-card"><h3>Workflow</h3><dl><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd>{{.Detail.AttemptCount}}</dd><dt>Decisions</dt><dd>{{.Detail.DecisionCount}}</dd><dt>Active lessons</dt><dd>{{.Detail.ActiveLessonCount}}</dd></dl></article>
-    <article class="panel-card"><h3>Target</h3><dl><dt>Note</dt><dd>#{{.Detail.NoteID}}</dd><dt>Review job</dt><dd>{{if .Detail.ReviewJobID}}<a href="/reviews/{{.Detail.ReviewJobID}}">Review #{{.Detail.ReviewJobID}}</a>{{else}}—{{end}}</dd>{{if .Detail.ReviewID}}<dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd>{{end}}</dl></article>
+    <article class="panel-card"><h3>Workflow</h3><dl><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd>{{.Detail.AttemptCount}}</dd><dt>Memory</dt><dd>{{if .Detail.MemoryCreated}}Created{{else}}None{{end}}</dd></dl></article>
+    <article class="panel-card"><h3>Target</h3><dl><dt>Terminal state</dt><dd>{{.Detail.TerminalState}}</dd><dt>Review job</dt><dd>{{if .Detail.ReviewJobID}}<a href="/reviews/{{.Detail.ReviewJobID}}">Review #{{.Detail.ReviewJobID}}</a>{{else}}—{{end}}</dd>{{if .Detail.ReviewID}}<dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd>{{end}}</dl></article>
     <article class="panel-card"><h3>Timeline</h3><dl><dt>Received</dt><dd><time datetime="{{timeAttribute .Detail.ReceivedAt}}">{{formatTime .Detail.ReceivedAt}}</time></dd><dt>Updated</dt><dd><time datetime="{{timeAttribute .Detail.UpdatedAt}}">{{formatTime .Detail.UpdatedAt}}</time></dd></dl></article>
     {{if .Detail.LastErrorCategory}}<article class="panel-card failure-card"><h3>Failure</h3><code>{{.Detail.LastErrorCategory}}</code></article>{{end}}
   </div>
@@ -285,13 +285,12 @@
 {{template "foot" .}}{{end}}
 
 {{define "memory"}}{{template "head" .}}
-<section class="hero compact"><div class="hero-copy"><p class="eyebrow">Feedback-derived guidance</p><h1>Runtime memory</h1><p class="lede">Advisory lessons derived from evaluated comments. Active does not mean authoritative.</p></div></section>
-<nav class="filters" aria-label="Memory state filters">{{range .FilterLinks}}<a class="filter {{if .Current}}current{{end}}" {{if .Current}}aria-current="page"{{end}} href="{{.URL}}">{{.Label}}</a>{{end}}</nav>
+<section class="hero compact"><div class="hero-copy"><p class="eyebrow">Feedback-derived guidance</p><h1>Runtime memory</h1><p class="lede">Advisory lessons synthesized after merge requests close or merge.</p></div></section>
 <div class="memory-list">{{range .Records}}<article class="memory-card" aria-labelledby="memory-title-{{.Record.RowID}}">
-  <div class="memory-heading"><div><span class="status" data-state="{{if .Record.Active}}active{{else}}inactive{{end}}">{{if .Record.Active}}active{{else}}inactive{{end}}</span><h2 id="memory-title-{{.Record.RowID}}">{{.Project}} · MR !{{.Record.MergeRequestIID}}</h2></div><code>{{.Record.MemoryID}}</code></div>
-  <div class="memory-meta"><span>{{.Record.TargetType}} <code>{{.Record.TargetID}}</code></span><span>{{.Record.Outcome}}</span><span>{{.Record.Confidence}} confidence</span><span>{{.Record.SourceRole}}</span><span>Updated <time datetime="{{timeAttribute .Record.UpdatedAt}}">{{formatCompactTime .Record.UpdatedAt}}</time></span></div>
-  {{if .Record.Lesson}}<div class="narrative lesson">{{.Record.Lesson}}</div>{{else}}<p class="muted">This decision has no reusable lesson.</p>{{end}}
-  <p class="source">Source note #{{.Record.NoteID}}: {{if .SourceLink}}<a href="{{.SourceLink}}">{{.Record.SourceURL}}</a>{{else}}{{.Record.SourceURL}}{{end}}</p>
-</article>{{else}}<div class="empty-state"><strong>No memory records match this view.</strong><span>Reusable lessons appear after eligible feedback produces a durable decision.</span></div>{{end}}</div>
+  <div class="memory-heading"><div><span class="status" data-state="active">active</span><h2 id="memory-title-{{.Record.RowID}}">{{.Project}} · MR !{{.Record.MergeRequestIID}}</h2></div><code>{{.Record.MemoryID}}</code></div>
+  <div class="memory-meta"><span>Created <time datetime="{{timeAttribute .Record.UpdatedAt}}">{{formatCompactTime .Record.UpdatedAt}}</time></span></div>
+  <div class="narrative lesson">{{.Record.Lesson}}</div>
+  <p class="source">Source merge request: {{if .SourceLink}}<a href="{{.SourceLink}}">{{.Record.SourceURL}}</a>{{else}}{{.Record.SourceURL}}{{end}}</p>
+</article>{{else}}<div class="empty-state"><strong>No memory records match this view.</strong><span>Reusable lessons appear after terminal merge request feedback warrants memory.</span></div>{{end}}</div>
 {{if .NextURL}}<div class="pagination"><a href="{{.NextURL}}">Older memory →</a></div>{{end}}
 {{template "foot" .}}{{end}}

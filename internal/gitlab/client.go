@@ -34,6 +34,7 @@ const (
 	notesPerPage                = 100
 	maxNotes                    = 1000
 	maxNoteBodyBytes            = 64 << 10
+	maxCommentContentBytes      = 512 << 10
 	reconciliationResponseLimit = 2 << 20
 	mergeRequestsPerPage        = 100
 	maxSupportedRetryAfter      = 24 * time.Hour
@@ -91,21 +92,19 @@ type ReconciliationMergeRequest struct {
 }
 
 type FeedbackRef struct {
-	GitLabInstance  string
-	ProjectID       int64
-	ProjectPath     string
-	MergeRequestIID int64
-	NoteID          int64
-	ActorID         int64
+	Identity
+	ProjectPath string
+}
+
+type FeedbackEvidence struct {
+	Files     []ChangedFile
+	Comments  []FeedbackComment
+	SourceURL string
 }
 
 type FeedbackComment struct {
-	Body        string
-	UpdatedAt   time.Time
-	AccessLevel int
-	Role        string
-	SourceURL   string
-	Ignored     bool
+	AuthorID int64  `json:"author_id"`
+	Body     string `json:"body"`
 }
 
 type Client struct {
@@ -189,12 +188,6 @@ type noteResponse struct {
 
 type userResponse struct {
 	ID int64 `json:"id"`
-}
-
-type memberResponse struct {
-	ID          int64  `json:"id"`
-	State       string `json:"state"`
-	AccessLevel int    `json:"access_level"`
 }
 
 func New(baseURL, token string, authorizedRepositories []string, repositorySharing map[string][]string, providedClient *http.Client) (*Client, error) {
@@ -474,119 +467,101 @@ func (c *Client) PostNote(ctx context.Context, identity Identity, body string) (
 	return note.ID, nil
 }
 
-func (c *Client) LoadFeedbackComment(ctx context.Context, ref FeedbackRef) (FeedbackComment, bool, error) {
-	if err := c.validateFeedbackRef(ref); err != nil {
-		return FeedbackComment{}, false, err
+func (c *Client) LoadFeedback(ctx context.Context, ref FeedbackRef) (FeedbackEvidence, error) {
+	if err := c.validateIdentity(ref.Identity); err != nil || ref.ProjectPath == "" {
+		return FeedbackEvidence{}, failure.Failed("feedback_identity_mismatch")
 	}
 	projectPath, err := c.checkProject(ctx, ref.ProjectID)
 	if err != nil {
-		return FeedbackComment{}, false, err
+		return FeedbackEvidence{}, err
 	}
 	if projectPath != ref.ProjectPath {
-		return FeedbackComment{}, false, failure.Failed("repository_unauthorized")
+		return FeedbackEvidence{}, failure.Failed("repository_unauthorized")
 	}
-	sourceURL := c.feedbackSourceURL(projectPath, ref)
-	var note noteResponse
-	found, err := c.getOptional(ctx, fmt.Sprintf("/projects/%d/merge_requests/%d/notes/%d", ref.ProjectID, ref.MergeRequestIID, ref.NoteID), metadataResponseLimit, &note)
-	if err != nil || !found {
-		return FeedbackComment{SourceURL: sourceURL}, found, err
-	}
-	if note.ID != ref.NoteID || note.Author.ID != ref.ActorID || len(note.Body) > maxNoteBodyBytes {
-		return FeedbackComment{}, false, failure.Failed("malformed_gitlab_response")
-	}
-	updatedAt, err := time.Parse(time.RFC3339Nano, note.UpdatedAt)
+	mergeRequest, err := c.getMergeRequest(ctx, ref.Identity)
 	if err != nil {
-		return FeedbackComment{}, false, failure.Failed("malformed_gitlab_response")
+		return FeedbackEvidence{}, err
 	}
+	if mergeRequest.ID <= 0 || mergeRequest.ProjectID != ref.ProjectID || mergeRequest.IID != ref.MergeRequestIID ||
+		!strings.EqualFold(mergeRequest.DiffRefs.HeadSHA, ref.HeadSHA) {
+		return FeedbackEvidence{}, failure.Failed("feedback_identity_mismatch")
+	}
+	switch mergeRequest.State {
+	case "closed", "merged":
+	case "opened":
+		return FeedbackEvidence{}, failure.Retry("merge_request_not_terminal", 0)
+	default:
+		return FeedbackEvidence{}, failure.Failed("unknown_merge_request_state")
+	}
+	files, err := c.getDiffs(ctx, ref.Identity)
+	if err != nil {
+		return FeedbackEvidence{}, err
+	}
+	comments, err := c.listFeedbackComments(ctx, ref.Identity)
+	if err != nil {
+		return FeedbackEvidence{}, err
+	}
+	return FeedbackEvidence{Files: files, Comments: comments, SourceURL: c.mergeRequestURL(projectPath, ref.MergeRequestIID)}, nil
+}
+
+func (c *Client) listFeedbackComments(ctx context.Context, identity Identity) ([]FeedbackComment, error) {
 	userID, err := c.currentUserID(ctx)
 	if err != nil {
-		return FeedbackComment{}, false, err
+		return nil, err
 	}
-	comment := FeedbackComment{
-		Body: note.Body, UpdatedAt: updatedAt.UTC(), SourceURL: sourceURL,
-		Ignored: note.System || note.Internal || note.Author.ID == userID,
+	comments := make([]FeedbackComment, 0)
+	totalContent := 0
+	seen := 0
+	for page := 1; page <= maxNotePages; page++ {
+		query := url.Values{
+			"order_by": {"created_at"},
+			"page":     {strconv.Itoa(page)},
+			"per_page": {strconv.Itoa(notesPerPage)},
+			"sort":     {"asc"},
+		}
+		var notes []noteResponse
+		header, err := c.get(ctx, c.mergeRequestPath(identity)+"/notes", query, noteResponseLimit, &notes)
+		if err != nil {
+			return nil, err
+		}
+		seen += len(notes)
+		if seen > maxNotes {
+			return nil, failure.Failed("note_search_limit_exceeded")
+		}
+		for _, note := range notes {
+			if note.ID <= 0 || note.Author.ID <= 0 || len(note.Body) > maxNoteBodyBytes {
+				return nil, failure.Failed("malformed_gitlab_response")
+			}
+			if note.System || note.Internal || note.Author.ID == userID {
+				continue
+			}
+			totalContent += len(note.Body)
+			if totalContent > maxCommentContentBytes {
+				return nil, failure.Failed("merge_request_comment_limit_exceeded")
+			}
+			comments = append(comments, FeedbackComment{AuthorID: note.Author.ID, Body: note.Body})
+		}
+		next, err := nextPage(header, page)
+		if err != nil {
+			return nil, err
+		}
+		if next == 0 {
+			return comments, nil
+		}
+		if page == maxNotePages {
+			return nil, failure.Failed("note_search_limit_exceeded")
+		}
 	}
-	if comment.Ignored {
-		comment.Role = "ignored"
-		return comment, true, nil
-	}
-	var member memberResponse
-	foundMember, err := c.getOptional(ctx, fmt.Sprintf("/projects/%d/members/all/%d", ref.ProjectID, ref.ActorID), metadataResponseLimit, &member)
-	if err != nil {
-		return FeedbackComment{}, false, err
-	}
-	if !foundMember {
-		comment.Role = "non_member"
-		return comment, true, nil
-	}
-	if member.ID != ref.ActorID || member.State != "active" || member.AccessLevel < 0 || member.AccessLevel > 50 {
-		return FeedbackComment{}, false, failure.Failed("malformed_gitlab_response")
-	}
-	comment.AccessLevel = member.AccessLevel
-	comment.Role = accessRole(member.AccessLevel)
-	return comment, true, nil
+	return nil, failure.Failed("note_search_limit_exceeded")
 }
 
-func (c *Client) CheckFeedbackSource(ctx context.Context, ref FeedbackRef) (bool, time.Time, error) {
-	if err := c.validateFeedbackRef(ref); err != nil {
-		return false, time.Time{}, err
-	}
-	projectPath, err := c.checkProject(ctx, ref.ProjectID)
-	if err != nil {
-		return false, time.Time{}, err
-	}
-	if projectPath != ref.ProjectPath {
-		return false, time.Time{}, failure.Failed("repository_unauthorized")
-	}
-	var note noteResponse
-	found, err := c.getOptional(ctx, fmt.Sprintf("/projects/%d/merge_requests/%d/notes/%d", ref.ProjectID, ref.MergeRequestIID, ref.NoteID), metadataResponseLimit, &note)
-	if err != nil || !found {
-		return found, time.Time{}, err
-	}
-	if note.ID != ref.NoteID {
-		return false, time.Time{}, failure.Failed("malformed_gitlab_response")
-	}
-	updatedAt, err := time.Parse(time.RFC3339Nano, note.UpdatedAt)
-	if err != nil {
-		return false, time.Time{}, failure.Failed("malformed_gitlab_response")
-	}
-	return true, updatedAt.UTC(), nil
-}
-
-func (c *Client) validateFeedbackRef(ref FeedbackRef) error {
-	if ref.GitLabInstance != c.baseURL.String() || ref.ProjectID <= 0 || ref.ProjectPath == "" ||
-		ref.MergeRequestIID <= 0 || ref.NoteID <= 0 || ref.ActorID <= 0 {
-		return failure.Failed("feedback_identity_mismatch")
-	}
-	return nil
-}
-
-func (c *Client) feedbackSourceURL(projectPath string, ref FeedbackRef) string {
+func (c *Client) mergeRequestURL(projectPath string, mergeRequestIID int64) string {
 	source := *c.baseURL
-	source.Path = strings.TrimSuffix(c.baseURL.Path, "/") + "/" + projectPath + "/-/merge_requests/" + strconv.FormatInt(ref.MergeRequestIID, 10)
+	source.Path = strings.TrimSuffix(c.baseURL.Path, "/") + "/" + projectPath + "/-/merge_requests/" + strconv.FormatInt(mergeRequestIID, 10)
 	source.RawPath = ""
 	source.RawQuery = ""
-	source.Fragment = "note_" + strconv.FormatInt(ref.NoteID, 10)
+	source.Fragment = ""
 	return source.String()
-}
-
-func accessRole(level int) string {
-	switch {
-	case level >= 50:
-		return "owner"
-	case level >= 40:
-		return "maintainer"
-	case level >= 30:
-		return "developer"
-	case level >= 20:
-		return "reporter"
-	case level >= 10:
-		return "guest"
-	case level > 0:
-		return "minimal_access"
-	default:
-		return "non_member"
-	}
 }
 
 func (c *Client) currentUserID(ctx context.Context) (int64, error) {
@@ -772,34 +747,6 @@ func (c *Client) request(ctx context.Context, method, endpoint string, query url
 		return nil, failure.Failed("malformed_gitlab_response")
 	}
 	return response.Header, nil
-}
-
-func (c *Client) getOptional(ctx context.Context, endpoint string, limit int64, target any) (bool, error) {
-	response, err := c.send(ctx, http.MethodGet, endpoint, nil, nil, "application/json")
-	if err != nil {
-		return false, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		return false, failure.Failed("gitlab_redirect_rejected")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return false, c.statusError(response)
-	}
-	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return false, failure.Retry("gitlab_response_read_failed", 0)
-	}
-	if int64(len(contents)) > limit {
-		return false, failure.Failed("gitlab_response_limit_exceeded")
-	}
-	if err := json.Unmarshal(contents, target); err != nil {
-		return false, failure.Failed("malformed_gitlab_response")
-	}
-	return true, nil
 }
 
 func (c *Client) download(ctx context.Context, endpoint string, query url.Values, limit int64) ([]byte, error) {

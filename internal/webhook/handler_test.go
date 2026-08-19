@@ -84,7 +84,7 @@ func TestWebhookIngress(t *testing.T) {
 	}
 }
 
-func TestNoteHookSchedulesNaturalCommentWithoutRetainingBody(t *testing.T) {
+func TestNoteHookDoesNotScheduleMemory(t *testing.T) {
 	storage := &recordingStore{}
 	var logs bytes.Buffer
 	handler := newTestHandler(storage, &logs).Routes()
@@ -95,25 +95,27 @@ func TestNoteHookSchedulesNaturalCommentWithoutRetainingBody(t *testing.T) {
 	request.Header.Set("X-Gitlab-Event-UUID", "note-event")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || storage.feedbackCalls != 1 {
-		t.Fatalf("note hook status=%d calls=%d", response.Code, storage.feedbackCalls)
-	}
-	if storage.feedbackEvent.NoteID != 91 || storage.feedbackEvent.ActorID != 12 || storage.feedbackEvent.MergeRequestIID != 7 || storage.feedbackEvent.Action != "create" {
-		t.Fatalf("feedback event = %+v", storage.feedbackEvent)
+	if response.Code != http.StatusOK || storage.calls != 0 {
+		t.Fatalf("note hook status=%d store calls=%d", response.Code, storage.calls)
 	}
 	if strings.Contains(logs.String(), "sensitive comment text") {
 		t.Fatalf("note body was logged: %s", logs.String())
 	}
+}
 
-	storage.feedbackCalls = 0
-	internal := notePayloadJSON("group/project", "create", false, true, "internal text")
-	request = httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", bytes.NewReader(internal))
-	request.Header.Set("X-Gitlab-Token", testSecret)
-	request.Header.Set("X-Gitlab-Event", "Note Hook")
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || storage.feedbackCalls != 0 {
-		t.Fatalf("internal note status=%d calls=%d", response.Code, storage.feedbackCalls)
+func TestClosedAndMergedHooksScheduleMemoryEvaluation(t *testing.T) {
+	for _, test := range []struct {
+		action string
+		state  string
+	}{{"close", "closed"}, {"merge", "merged"}} {
+		t.Run(test.action, func(t *testing.T) {
+			storage := &recordingStore{}
+			handler := newTestHandler(storage, io.Discard).Routes()
+			assertWebhookStatus(t, handler, payload("group/project", test.action, false, false, headA), testSecret, test.action, http.StatusOK)
+			if storage.calls != 1 || !storage.event.QueueFeedback || storage.event.QueueReview || storage.event.TerminalState != test.state {
+				t.Fatalf("stored event = %+v", storage.event)
+			}
+		})
 	}
 }
 
@@ -416,28 +418,15 @@ func (s *blockingStore) AcceptEvent(_ context.Context, _ store.Event) (store.Acc
 	return store.AcceptResult{Outcome: store.OutcomeQueued}, nil
 }
 
-func (s *blockingStore) AcceptFeedbackEvent(_ context.Context, _ store.FeedbackEvent, _ time.Time) (store.AcceptFeedbackResult, error) {
-	s.started <- struct{}{}
-	<-s.release
-	return store.AcceptFeedbackResult{Outcome: store.FeedbackOutcomeQueued}, nil
-}
-
 type recordingStore struct {
-	calls         int
-	feedbackCalls int
-	feedbackEvent store.FeedbackEvent
+	calls int
+	event store.Event
 }
 
-func (s *recordingStore) AcceptEvent(_ context.Context, _ store.Event) (store.AcceptResult, error) {
+func (s *recordingStore) AcceptEvent(_ context.Context, event store.Event) (store.AcceptResult, error) {
 	s.calls++
+	s.event = event
 	return store.AcceptResult{}, nil
-}
-
-func (s *recordingStore) AcceptFeedbackEvent(_ context.Context, event store.FeedbackEvent, _ time.Time) (store.AcceptFeedbackResult, error) {
-	s.calls++
-	s.feedbackCalls++
-	s.feedbackEvent = event
-	return store.AcceptFeedbackResult{EventID: 1, JobID: 2, Outcome: store.FeedbackOutcomeQueued}, nil
 }
 
 func assertDatabaseCount(t *testing.T, db *sql.DB, table string, want int) {

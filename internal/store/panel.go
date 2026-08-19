@@ -25,7 +25,7 @@ type Dashboard struct {
 	FeedbackCounts       []StateCount
 	OldestQueuedReview   *time.Time
 	OldestQueuedFeedback *time.Time
-	ActiveMemoryCount    int
+	MemoryCount          int
 	RecentReviews        []ReviewRecord
 	RecentFeedback       []FeedbackRecord
 }
@@ -82,14 +82,14 @@ type FeedbackRecord struct {
 	ProjectID         int64
 	ProjectPath       string
 	MergeRequestIID   int64
-	NoteID            int64
+	HeadSHA           string
+	TerminalState     string
 	State             string
 	AttemptCount      int
 	ReceivedAt        time.Time
 	UpdatedAt         time.Time
 	LastErrorCategory string
-	DecisionCount     int
-	ActiveLessonCount int
+	MemoryCreated     bool
 }
 
 type FeedbackRecordsPage struct {
@@ -103,14 +103,7 @@ type MemoryRecord struct {
 	ProjectID       int64
 	ProjectPath     string
 	MergeRequestIID int64
-	NoteID          int64
-	TargetType      string
-	TargetID        string
-	Outcome         string
-	Confidence      string
 	Lesson          string
-	Active          bool
-	SourceRole      string
 	SourceURL       string
 	UpdatedAt       time.Time
 }
@@ -145,8 +138,8 @@ func (s *Store) ReadDashboard(ctx context.Context, recentLimit int) (Dashboard, 
 		return Dashboard{}, fmt.Errorf("read oldest queued feedback: %w", err)
 	}
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM review_memories WHERE active = 1 AND lesson IS NOT NULL`).Scan(&dashboard.ActiveMemoryCount); err != nil {
-		return Dashboard{}, fmt.Errorf("count active review memories: %w", err)
+		`SELECT count(*) FROM review_memories`).Scan(&dashboard.MemoryCount); err != nil {
+		return Dashboard{}, fmt.Errorf("count review memories: %w", err)
 	}
 	reviews, err := s.ListReviewRecords(ctx, "", 0, recentLimit)
 	if err != nil {
@@ -414,15 +407,13 @@ func (s *Store) ListFeedbackRecords(ctx context.Context, state string, beforeID 
 
 func (s *Store) listFeedbackRecords(ctx context.Context, condition string, arguments []any, limit int) (FeedbackRecordsPage, error) {
 	query := `
-SELECT j.id, COALESCE(j.review_job_id, 0), j.project_id, j.project_path,
-       j.merge_request_iid, j.note_id, j.state, j.attempt_count,
-       e.received_at, j.updated_at, COALESCE(j.last_error_category, ''),
-       (SELECT count(*) FROM review_memories m WHERE m.feedback_job_id = j.id),
-       (SELECT count(*) FROM review_memories m WHERE m.feedback_job_id = j.id AND m.active = 1 AND m.lesson IS NOT NULL),
-       COALESCE(r.gitlab_instance, ''), COALESCE(r.head_sha, '')
+SELECT j.id, j.review_job_id, j.project_id, j.project_path,
+       j.merge_request_iid, j.head_sha, j.terminal_state, j.state, j.attempt_count,
+       j.created_at, j.updated_at, COALESCE(j.last_error_category, ''),
+       EXISTS(SELECT 1 FROM review_memories m WHERE m.feedback_job_id = j.id),
+       r.gitlab_instance, r.head_sha
 FROM feedback_jobs j
-JOIN feedback_events e ON e.id = j.source_event_id
-LEFT JOIN review_jobs r ON r.id = j.review_job_id`
+JOIN review_jobs r ON r.id = j.review_job_id`
 	if condition != "" {
 		query += "\nWHERE " + condition
 	}
@@ -436,11 +427,11 @@ LEFT JOIN review_jobs r ON r.id = j.review_job_id`
 	page := FeedbackRecordsPage{Records: make([]FeedbackRecord, 0, limit)}
 	for rows.Next() {
 		var record FeedbackRecord
-		var received, updated, instance, headSHA string
+		var received, updated, instance, reviewHeadSHA string
+		var memoryCreated int
 		if err := rows.Scan(&record.ID, &record.ReviewJobID, &record.ProjectID, &record.ProjectPath,
-			&record.MergeRequestIID, &record.NoteID, &record.State, &record.AttemptCount,
-			&received, &updated, &record.LastErrorCategory, &record.DecisionCount,
-			&record.ActiveLessonCount, &instance, &headSHA); err != nil {
+			&record.MergeRequestIID, &record.HeadSHA, &record.TerminalState, &record.State, &record.AttemptCount,
+			&received, &updated, &record.LastErrorCategory, &memoryCreated, &instance, &reviewHeadSHA); err != nil {
 			return FeedbackRecordsPage{}, fmt.Errorf("scan feedback record: %w", err)
 		}
 		record.ReceivedAt, err = parseStoredTime(received)
@@ -451,9 +442,8 @@ LEFT JOIN review_jobs r ON r.id = j.review_job_id`
 		if err != nil {
 			return FeedbackRecordsPage{}, fmt.Errorf("parse feedback update time: %w", err)
 		}
-		if record.ReviewJobID > 0 && instance != "" && headSHA != "" {
-			record.ReviewID = review.ReviewID(instance, record.ProjectID, record.MergeRequestIID, headSHA)
-		}
+		record.MemoryCreated = memoryCreated == 1
+		record.ReviewID = review.ReviewID(instance, record.ProjectID, record.MergeRequestIID, reviewHeadSHA)
 		page.Records = append(page.Records, record)
 	}
 	if err := rows.Err(); err != nil {
@@ -466,33 +456,19 @@ LEFT JOIN review_jobs r ON r.id = j.review_job_id`
 	return page, nil
 }
 
-func (s *Store) ListMemoryRecords(ctx context.Context, active *bool, beforeRowID int64, limit int) (MemoryRecordsPage, error) {
+func (s *Store) ListMemoryRecords(ctx context.Context, beforeRowID int64, limit int) (MemoryRecordsPage, error) {
 	if !validPanelLimit(limit) || beforeRowID < 0 {
 		return MemoryRecordsPage{}, errors.New("invalid memory record query")
 	}
 	query := `
 SELECT m.rowid, m.memory_id, j.project_id, j.project_path, j.merge_request_iid,
-       j.note_id, m.target_type, m.target_id, m.outcome, m.confidence,
-       COALESCE(m.lesson, ''), m.active, e.actor_role, m.source_url, m.updated_at
+       m.lesson, m.source_url, m.created_at
 FROM review_memories m
-JOIN feedback_jobs j ON j.id = m.feedback_job_id
-JOIN feedback_evaluations e ON e.job_id = j.id`
-	conditions := make([]string, 0, 2)
-	arguments := make([]any, 0, 3)
-	if active != nil {
-		conditions = append(conditions, "m.active = ?")
-		if *active {
-			arguments = append(arguments, 1)
-		} else {
-			arguments = append(arguments, 0)
-		}
-	}
+JOIN feedback_jobs j ON j.id = m.feedback_job_id`
+	arguments := make([]any, 0, 2)
 	if beforeRowID > 0 {
-		conditions = append(conditions, "m.rowid < ?")
+		query += "\nWHERE m.rowid < ?"
 		arguments = append(arguments, beforeRowID)
-	}
-	if len(conditions) > 0 {
-		query += "\nWHERE " + strings.Join(conditions, " AND ")
 	}
 	query += "\nORDER BY m.rowid DESC\nLIMIT ?"
 	arguments = append(arguments, limit+1)
@@ -504,18 +480,14 @@ JOIN feedback_evaluations e ON e.job_id = j.id`
 	page := MemoryRecordsPage{Records: make([]MemoryRecord, 0, limit)}
 	for rows.Next() {
 		var record MemoryRecord
-		var activeValue int
-		var updated string
+		var created string
 		if err := rows.Scan(&record.RowID, &record.MemoryID, &record.ProjectID, &record.ProjectPath,
-			&record.MergeRequestIID, &record.NoteID, &record.TargetType, &record.TargetID,
-			&record.Outcome, &record.Confidence, &record.Lesson, &activeValue,
-			&record.SourceRole, &record.SourceURL, &updated); err != nil {
+			&record.MergeRequestIID, &record.Lesson, &record.SourceURL, &created); err != nil {
 			return MemoryRecordsPage{}, fmt.Errorf("scan memory record: %w", err)
 		}
-		record.Active = activeValue == 1
-		record.UpdatedAt, err = parseStoredTime(updated)
+		record.UpdatedAt, err = parseStoredTime(created)
 		if err != nil {
-			return MemoryRecordsPage{}, fmt.Errorf("parse memory update time: %w", err)
+			return MemoryRecordsPage{}, fmt.Errorf("parse memory creation time: %w", err)
 		}
 		page.Records = append(page.Records, record)
 	}

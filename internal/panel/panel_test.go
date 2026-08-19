@@ -51,7 +51,7 @@ func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
 	storage := &fakeStore{dashboard: store.Dashboard{
 		ReviewCounts:       []store.StateCount{{State: store.JobQueued, Count: 2}},
 		FeedbackCounts:     []store.StateCount{{State: store.FeedbackFailed, Count: 1}},
-		OldestQueuedReview: &now, ActiveMemoryCount: 3,
+		OldestQueuedReview: &now, MemoryCount: 3,
 		RecentReviews: []store.ReviewRecord{{
 			ID: 9, ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
 			HeadSHA: strings.Repeat("a", 40), State: store.JobQueued, Source: "webhook", CreatedAt: now,
@@ -63,7 +63,7 @@ func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(body, "<title>Overview · Wormtamer</title>") ||
 		!strings.Contains(body, "Skip to content") || !strings.Contains(body, `aria-current="page"`) ||
 		!strings.Contains(body, "Review activity") || !strings.Contains(body, `data-tone="waiting" data-empty="false"><span>Waiting</span><strong>2</strong>`) ||
-		!strings.Contains(body, "No queued feedback") || !strings.Contains(body, "group/project") ||
+		!strings.Contains(body, "No queued synthesis") || !strings.Contains(body, "group/project") ||
 		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "docs.example.com") ||
 		!strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
@@ -194,22 +194,17 @@ func TestFeedbackAndMemoryViewsUseBoundedReadQueries(t *testing.T) {
 	storage := &fakeStore{
 		feedbackPage: store.FeedbackRecordsPage{Records: []store.FeedbackRecord{{
 			ID: 3, ReviewJobID: 9, ProjectID: 42, ProjectPath: "group/project",
-			MergeRequestIID: 7, NoteID: 91, State: store.FeedbackCompleted,
-			ReceivedAt: now, UpdatedAt: now, DecisionCount: 1, ActiveLessonCount: 1,
+			MergeRequestIID: 7, HeadSHA: strings.Repeat("a", 40), TerminalState: "merged",
+			State: store.FeedbackCompleted, ReceivedAt: now, UpdatedAt: now, MemoryCreated: true,
 		}}, NextBefore: 3},
 		memoryPage: store.MemoryRecordsPage{Records: []store.MemoryRecord{{
 			RowID: 4, MemoryID: "WT-M-" + strings.Repeat("A", 26), ProjectID: 42,
-			ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91,
-			TargetType: "review", TargetID: "WT-R-" + strings.Repeat("B", 26),
-			Outcome: "supports_review", Confidence: "high", Lesson: "lesson <b>not html</b>",
-			Active: true, SourceRole: "maintainer",
-			SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7#note_91", UpdatedAt: now,
+			ProjectPath: "group/project", MergeRequestIID: 7, Lesson: "lesson <b>not html</b>",
+			SourceURL: "http://gitlab.internal/group/project/-/merge_requests/7", UpdatedAt: now,
 		}, {
 			RowID: 2, MemoryID: "WT-M-" + strings.Repeat("C", 26), ProjectID: 42,
-			ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 92,
-			TargetType: "finding", TargetID: "WT-F-" + strings.Repeat("D", 26),
-			Outcome: "rejects_finding", Confidence: "low", Active: false,
-			SourceRole: "developer", SourceURL: "javascript:alert(1)", UpdatedAt: now,
+			ProjectPath: "group/project", MergeRequestIID: 7, Lesson: "another lesson",
+			SourceURL: "javascript:alert(1)", UpdatedAt: now,
 		}}, NextBefore: 2},
 	}
 	handler := newTestHandler(t, storage)
@@ -220,15 +215,15 @@ func TestFeedbackAndMemoryViewsUseBoundedReadQueries(t *testing.T) {
 		!strings.Contains(feedback.Body.String(), "Older feedback") {
 		t.Fatalf("feedback status=%d body=%s", feedback.Code, feedback.Body.String())
 	}
-	memory := request(t, handler, http.MethodGet, "/memory?active=true")
+	memory := request(t, handler, http.MethodGet, "/memory")
 	body := memory.Body.String()
-	if memory.Code != http.StatusOK || storage.memoryActive == nil || !*storage.memoryActive ||
-		storage.memoryLimit != pageSize || !strings.Contains(body, "lesson &lt;b&gt;not html&lt;/b&gt;") ||
+	if memory.Code != http.StatusOK || storage.memoryLimit != pageSize ||
+		!strings.Contains(body, "lesson &lt;b&gt;not html&lt;/b&gt;") ||
 		!strings.Contains(body, "http://gitlab.internal/group/project") ||
 		strings.Contains(body, `href="javascript:alert(1)"`) || !strings.Contains(body, "Older memory") {
 		t.Fatalf("memory status=%d calls=%+v body=%s", memory.Code, storage, body)
 	}
-	for _, path := range []string{"/memory?active=yes", "/memory?before=-1", "/memory?active=true&active=false"} {
+	for _, path := range []string{"/memory?active=true", "/memory?before=-1", "/memory?before=1&before=2"} {
 		response := request(t, handler, http.MethodGet, path)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("GET %s status=%d", path, response.Code)
@@ -309,20 +304,21 @@ func TestFeedbackDetailShowsGenerationHistory(t *testing.T) {
 	storage := &fakeStore{feedbackDetail: store.FeedbackRecordDetail{
 		FeedbackRecord: store.FeedbackRecord{
 			ID: 3, ReviewJobID: 9, ReviewID: "WT-R-" + strings.Repeat("A", 26),
-			ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91,
+			ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
+			HeadSHA: strings.Repeat("b", 40), TerminalState: "closed",
 			State: store.FeedbackCompleted, AttemptCount: 2, ReceivedAt: now, UpdatedAt: now,
 		},
 		Generations: []store.GenerationRecord{{
 			ID: 12, RequestKind: "feedback", FeedbackJobID: 3, WorkflowAttempt: 2,
 			ConfiguredModel: "gemini-test", RequestStartedAt: now, CompletionState: "failed",
-			StructuredValidation: "request_failed", ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91,
+			StructuredValidation: "request_failed", ProjectID: 42, ProjectPath: "group/project", MergeRequestIID: 7,
 		}},
 	}}
 	handler := newTestHandler(t, storage)
 	response := request(t, handler, http.MethodGet, "/feedback/3")
 	body := response.Body.String()
 	if response.Code != http.StatusOK || storage.feedbackDetailID != 3 ||
-		!strings.Contains(body, "Feedback record") || !strings.Contains(body, "Generation #12") ||
+		!strings.Contains(body, "Memory synthesis record") || !strings.Contains(body, "Generation #12") ||
 		!strings.Contains(body, "request_failed") || !strings.Contains(body, "/reviews/9") {
 		t.Fatalf("feedback detail status=%d body=%s", response.Code, body)
 	}
@@ -418,7 +414,6 @@ type fakeStore struct {
 	generationErr error
 
 	memoryPage   store.MemoryRecordsPage
-	memoryActive *bool
 	memoryBefore int64
 	memoryLimit  int
 }
@@ -458,13 +453,7 @@ func (s *fakeStore) GetGenerationRecord(_ context.Context, generationID int64) (
 	return s.generation, s.generationErr
 }
 
-func (s *fakeStore) ListMemoryRecords(_ context.Context, active *bool, before int64, limit int) (store.MemoryRecordsPage, error) {
-	if active == nil {
-		s.memoryActive = nil
-	} else {
-		value := *active
-		s.memoryActive = &value
-	}
+func (s *fakeStore) ListMemoryRecords(_ context.Context, before int64, limit int) (store.MemoryRecordsPage, error) {
 	s.memoryBefore, s.memoryLimit = before, limit
 	return s.memoryPage, nil
 }

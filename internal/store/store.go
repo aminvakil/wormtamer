@@ -13,13 +13,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 9
+const schemaVersion = 10
 
 const (
-	OutcomeQueued          = "queued"
-	OutcomeDuplicateReview = "duplicate_review"
-	OutcomeIgnoredDraft    = "ignored_draft"
-	OutcomeIgnoredAction   = "ignored_action"
+	OutcomeQueued                  = "queued"
+	OutcomeFeedbackQueued          = "feedback_queued"
+	OutcomeDuplicateReview         = "duplicate_review"
+	OutcomeDuplicateFeedback       = "duplicate_feedback"
+	OutcomeIgnoredDraft            = "ignored_draft"
+	OutcomeIgnoredAction           = "ignored_action"
+	OutcomeIgnoredFeedbackNoReview = "ignored_feedback_no_review"
 )
 
 const (
@@ -54,12 +57,15 @@ type Event struct {
 	Action          string
 	Payload         []byte
 	QueueReview     bool
+	QueueFeedback   bool
+	TerminalState   string
 	IgnoredOutcome  string
 }
 
 type AcceptResult struct {
 	EventID           int64
 	JobID             int64
+	FeedbackJobID     int64
 	Outcome           string
 	DuplicateDelivery bool
 }
@@ -94,15 +100,10 @@ type Job struct {
 }
 
 type ReviewMemory struct {
-	MemoryID   string
-	TargetType string
-	TargetID   string
-	Outcome    string
-	Confidence string
-	Lesson     string
-	SourceRole string
-	SourceURL  string
-	UpdatedAt  time.Time
+	MemoryID  string
+	Lesson    string
+	SourceURL string
+	UpdatedAt time.Time
 }
 
 type ReviewMemoryRetrieval struct {
@@ -550,6 +551,106 @@ CREATE INDEX model_generations_feedback_idx ON model_generations (feedback_job_i
 
 PRAGMA user_version = 9;
 `
+		case 9:
+			migration = `
+CREATE TEMP TABLE review_model_generations_v9 AS
+SELECT * FROM model_generations WHERE request_kind = 'review';
+
+DROP TABLE model_generations;
+DROP TABLE review_memories;
+DROP TABLE feedback_evaluations;
+DROP TABLE feedback_jobs;
+DROP TABLE feedback_events;
+DELETE FROM review_memory_retrievals;
+
+CREATE TABLE feedback_jobs (
+    id INTEGER PRIMARY KEY,
+    source_event_id INTEGER NOT NULL UNIQUE REFERENCES webhook_events(id),
+    review_job_id INTEGER NOT NULL REFERENCES review_results(job_id),
+    gitlab_instance TEXT NOT NULL,
+    project_id INTEGER NOT NULL CHECK(project_id > 0),
+    project_path TEXT NOT NULL,
+    merge_request_iid INTEGER NOT NULL CHECK(merge_request_iid > 0),
+    head_sha TEXT NOT NULL,
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('closed', 'merged')),
+    state TEXT NOT NULL DEFAULT 'queued',
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error_category TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (gitlab_instance, project_id, merge_request_iid)
+);
+
+CREATE INDEX feedback_jobs_due_idx
+ON feedback_jobs (state, next_attempt_at, lease_expires_at);
+
+CREATE TABLE review_memories (
+    memory_id TEXT PRIMARY KEY
+        CHECK(length(memory_id) = 31)
+        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
+        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
+    feedback_job_id INTEGER NOT NULL UNIQUE REFERENCES feedback_jobs(id) ON DELETE CASCADE,
+    lesson TEXT NOT NULL CHECK(length(lesson) > 0 AND length(lesson) <= 4096),
+    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE model_generations (
+    id INTEGER PRIMARY KEY,
+    request_kind TEXT NOT NULL CHECK(request_kind IN ('review', 'feedback')),
+    review_job_id INTEGER REFERENCES review_jobs(id),
+    feedback_job_id INTEGER REFERENCES feedback_jobs(id),
+    workflow_attempt INTEGER NOT NULL CHECK(workflow_attempt > 0),
+    review_turn INTEGER CHECK(review_turn IS NULL OR (review_turn >= 0 AND review_turn <= 1000)),
+    configured_model TEXT NOT NULL CHECK(length(configured_model) > 0 AND length(configured_model) <= 256),
+    resolved_model TEXT CHECK(resolved_model IS NULL OR length(resolved_model) <= 256),
+    request_started_at TEXT NOT NULL,
+    completed_at TEXT,
+    completion_state TEXT NOT NULL CHECK(completion_state IN ('started', 'response', 'failed', 'unknown')),
+    latency_ms INTEGER CHECK(latency_ms IS NULL OR (latency_ms >= 0 AND latency_ms <= 86400000)),
+    finish_reason TEXT CHECK(finish_reason IS NULL OR length(finish_reason) <= 128),
+    structured_validation TEXT CHECK(structured_validation IS NULL OR length(structured_validation) <= 128),
+    tool_calls_available INTEGER NOT NULL DEFAULT 0 CHECK(tool_calls_available IN (0, 1)),
+    tool_call_count INTEGER CHECK(tool_call_count IS NULL OR (tool_call_count >= 0 AND tool_call_count <= 32768)),
+    tool_names_json BLOB CHECK(tool_names_json IS NULL OR length(tool_names_json) <= 65536),
+    final_only INTEGER NOT NULL CHECK(final_only IN (0, 1)),
+    usage_metadata_available INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_available IN (0, 1)),
+    usage_metadata_valid INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_valid IN (0, 1) AND usage_metadata_valid <= usage_metadata_available),
+    prompt_tokens INTEGER CHECK(prompt_tokens IS NULL OR (prompt_tokens >= 0 AND prompt_tokens <= 2147483647)),
+    cached_tokens INTEGER CHECK(cached_tokens IS NULL OR (cached_tokens >= 0 AND cached_tokens <= 2147483647)),
+    tool_use_prompt_tokens INTEGER CHECK(tool_use_prompt_tokens IS NULL OR (tool_use_prompt_tokens >= 0 AND tool_use_prompt_tokens <= 2147483647)),
+    candidate_tokens INTEGER CHECK(candidate_tokens IS NULL OR (candidate_tokens >= 0 AND candidate_tokens <= 2147483647)),
+    thought_tokens INTEGER CHECK(thought_tokens IS NULL OR (thought_tokens >= 0 AND thought_tokens <= 2147483647)),
+    total_tokens INTEGER CHECK(total_tokens IS NULL OR (total_tokens >= 0 AND total_tokens <= 2147483647)),
+    cost_source TEXT CHECK(cost_source IS NULL OR cost_source IN ('litellm_catalog', 'endpoint_response')),
+    estimated_cost_picos INTEGER CHECK(estimated_cost_picos IS NULL OR estimated_cost_picos >= 0),
+    CHECK(
+        (request_kind = 'review' AND review_job_id IS NOT NULL AND feedback_job_id IS NULL AND review_turn IS NOT NULL) OR
+        (request_kind = 'feedback' AND review_job_id IS NULL AND feedback_job_id IS NOT NULL AND review_turn IS NULL)
+    ),
+    CHECK(completion_state != 'started' OR completed_at IS NULL),
+    CHECK(usage_metadata_valid = 0 OR (
+        prompt_tokens IS NOT NULL AND prompt_tokens > 0 AND cached_tokens IS NOT NULL AND tool_use_prompt_tokens IS NOT NULL AND
+        candidate_tokens IS NOT NULL AND thought_tokens IS NOT NULL AND total_tokens IS NOT NULL AND total_tokens > 0 AND
+        cached_tokens <= prompt_tokens AND
+        total_tokens = prompt_tokens + tool_use_prompt_tokens + candidate_tokens + thought_tokens
+    )),
+    CHECK(estimated_cost_picos IS NULL OR cost_source IS NOT NULL),
+    CHECK(estimated_cost_picos IS NULL OR cost_source != 'litellm_catalog' OR usage_metadata_valid = 1)
+);
+
+CREATE INDEX model_generations_time_idx ON model_generations (request_started_at DESC, id DESC);
+CREATE INDEX model_generations_review_idx ON model_generations (review_job_id, id DESC);
+CREATE INDEX model_generations_feedback_idx ON model_generations (feedback_job_id, id DESC);
+
+INSERT INTO model_generations SELECT * FROM review_model_generations_v9;
+DROP TABLE review_model_generations_v9;
+
+PRAGMA user_version = 10;
+`
 		}
 
 		if _, err := tx.ExecContext(ctx, migration); err != nil {
@@ -575,6 +676,8 @@ func (s *Store) AcceptEvent(ctx context.Context, event Event) (result AcceptResu
 	outcome := event.IgnoredOutcome
 	if event.QueueReview {
 		outcome = OutcomeQueued
+	} else if event.QueueFeedback {
+		outcome = OutcomeFeedbackQueued
 	}
 	insert, err := tx.ExecContext(ctx, `
 INSERT INTO webhook_events (
@@ -593,14 +696,22 @@ ON CONFLICT(delivery_id) DO NOTHING`,
 	}
 	if inserted == 0 {
 		if err := tx.QueryRowContext(ctx, `
-SELECT e.id, e.outcome, COALESCE(j.id, 0)
+SELECT e.id, e.outcome,
+       CASE WHEN e.outcome IN (?, ?) THEN COALESCE(j.id, 0) ELSE 0 END,
+       CASE WHEN e.outcome IN (?, ?) THEN COALESCE(f.id, 0) ELSE 0 END
 FROM webhook_events e
 LEFT JOIN review_jobs j ON
     j.gitlab_instance = e.gitlab_instance AND
     j.project_id = e.project_id AND
     j.merge_request_iid = e.merge_request_iid AND
     j.head_sha = e.head_sha
-WHERE e.delivery_id = ?`, event.DeliveryID).Scan(&result.EventID, &result.Outcome, &result.JobID); err != nil {
+LEFT JOIN feedback_jobs f ON
+    f.gitlab_instance = e.gitlab_instance AND
+    f.project_id = e.project_id AND
+    f.merge_request_iid = e.merge_request_iid
+WHERE e.delivery_id = ?`, OutcomeQueued, OutcomeDuplicateReview,
+			OutcomeFeedbackQueued, OutcomeDuplicateFeedback, event.DeliveryID).
+			Scan(&result.EventID, &result.Outcome, &result.JobID, &result.FeedbackJobID); err != nil {
 			return result, fmt.Errorf("read duplicate webhook event: %w", err)
 		}
 		result.DuplicateDelivery = true
@@ -645,6 +756,66 @@ SELECT id FROM review_jobs
 WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_sha = ?`,
 				event.GitLabInstance, event.ProjectID, event.MergeRequestIID, event.HeadSHA).Scan(&result.JobID); err != nil {
 				return result, fmt.Errorf("read existing review job: %w", err)
+			}
+		}
+	} else if event.QueueFeedback {
+		var reviewJobID int64
+		err := tx.QueryRowContext(ctx, `
+SELECT effective.id
+FROM review_jobs candidate
+JOIN review_jobs effective ON effective.id = COALESCE(candidate.equivalent_to_job_id, candidate.id)
+JOIN review_results r ON r.job_id = effective.id
+JOIN publications p ON p.job_id = effective.id
+WHERE candidate.gitlab_instance = ? AND candidate.project_id = ?
+  AND candidate.merge_request_iid = ? AND candidate.state = ?
+  AND effective.gitlab_instance = candidate.gitlab_instance
+  AND effective.project_id = candidate.project_id
+  AND effective.merge_request_iid = candidate.merge_request_iid
+  AND effective.state = ? AND effective.equivalent_to_job_id IS NULL
+ORDER BY candidate.id DESC
+LIMIT 1`, event.GitLabInstance, event.ProjectID, event.MergeRequestIID,
+			JobCompleted, JobCompleted).Scan(&reviewJobID)
+		if errors.Is(err, sql.ErrNoRows) {
+			result.Outcome = OutcomeIgnoredFeedbackNoReview
+			if _, err := tx.ExecContext(ctx, `UPDATE webhook_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {
+				return result, fmt.Errorf("ignore terminal event without review: %w", err)
+			}
+		} else if err != nil {
+			return result, fmt.Errorf("select feedback review: %w", err)
+		} else {
+			now := formatTime(time.Now().UTC())
+			jobInsert, err := tx.ExecContext(ctx, `
+INSERT INTO feedback_jobs (
+    source_event_id, review_job_id, gitlab_instance, project_id, project_path,
+    merge_request_iid, head_sha, terminal_state, state, next_attempt_at,
+    created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(gitlab_instance, project_id, merge_request_iid) DO NOTHING`,
+				result.EventID, reviewJobID, event.GitLabInstance, event.ProjectID, event.ProjectPath,
+				event.MergeRequestIID, event.HeadSHA, event.TerminalState, FeedbackQueued, now, now, now)
+			if err != nil {
+				return result, fmt.Errorf("insert feedback job: %w", err)
+			}
+			inserted, err := jobInsert.RowsAffected()
+			if err != nil {
+				return result, fmt.Errorf("inspect feedback job insertion: %w", err)
+			}
+			if inserted == 1 {
+				result.FeedbackJobID, err = jobInsert.LastInsertId()
+				if err != nil {
+					return result, fmt.Errorf("read feedback job ID: %w", err)
+				}
+			} else {
+				result.Outcome = OutcomeDuplicateFeedback
+				if _, err := tx.ExecContext(ctx, `UPDATE webhook_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {
+					return result, fmt.Errorf("mark duplicate feedback event: %w", err)
+				}
+				if err := tx.QueryRowContext(ctx, `
+SELECT id FROM feedback_jobs
+WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ?`,
+					event.GitLabInstance, event.ProjectID, event.MergeRequestIID).Scan(&result.FeedbackJobID); err != nil {
+					return result, fmt.Errorf("read existing feedback job: %w", err)
+				}
 			}
 		}
 	}

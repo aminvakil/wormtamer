@@ -79,7 +79,7 @@ Read-only web panel ---------------------------------------> SQLite
 
 ### Webhook ingress
 
-Validates and durably records merge request webhooks, and records bounded Note Hook identifiers without comment bodies. It creates separate idempotent review or feedback jobs and acknowledges eligible events only after the applicable transaction commits.
+Validates and durably records merge request webhooks. Ready openings create idempotent review jobs. Close and merge actions create at most one feedback synthesis job for the merge request when a completed, locally validated and published Wormtamer review is available. Eligible work is acknowledged only after the applicable transaction commits; Note Hooks create no work.
 
 ### Review worker
 
@@ -99,7 +99,7 @@ Findings use ordered priorities `P0` through `P3`. `P0` is an immediate deployme
 
 Model-invocable tool brokers enforce repository allowlists, directional sharing rules, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy. The repository broker provides bounded file listing, text-file range reads, and case-sensitive literal search in the current repository and sharing-eligible related repositories. Every request names an exact repository exposed in the review input, and every result identifies its repository and immutable revision.
 
-The memory broker provides bounded lexical search over active comment-derived lessons for the exact GitLab instance and numeric project under review. The model supplies only a query, not scope. Directional repository sharing does not broaden memory access. Results identify their repository scope, memory identity, typed review or finding target, source reference and role, outcome, confidence, and memory update time, and label lessons as untrusted advisory guidance.
+The memory broker provides bounded lexical search over merge-request-derived lessons for the exact GitLab instance and numeric project under review. The model supplies only a query, not scope. Directional repository sharing does not broaden memory access. Results identify their repository scope, memory identity, merge request source reference, lesson, and creation time, and label lessons as untrusted advisory guidance.
 
 The public-source broker fetches one independently authorized HTTPS text URL at a time and provides file listing and range reads from exact configured GitHub repositories. It performs no search or automatic crawling. A GitHub repository's default-branch HEAD is resolved and pinned on first access in each review; content is extracted under the same hostile-archive rules as internal repositories. Results are labeled as untrusted public evidence and attributed with a final URL and retrieval time or an exact repository and commit.
 
@@ -122,9 +122,9 @@ Validates findings, assigns each ordered finding a deterministic application-own
 
 ### Feedback evaluator
 
-The feedback worker fetches the current text of each eligible merge request comment transiently, resolves the actor's effective project role through GitLab, and asks Gemini to assess the natural-language comment against the exact published Wormtamer review bound when that source note was first accepted. The evaluator receives the persisted summary, complete supplied findings, immutable review metadata, and application-owned review and finding targets. It may return no decision for ordinary or ambiguous discussion, classify the overall review or supplied findings as supported, rejected, or corrected, and optionally select a concise reusable lesson. People do not need to mention internal identifiers or use special syntax. Trusted code validates every selected target and the structured result before replacing that comment's current decisions and repository-scoped active memory.
+The feedback worker runs only after an authorized merge request close or merge webhook created a job. It transiently fetches the terminal head's bounded diff and current comments, excludes internal, system, and Wormtamer-authored notes, and combines them with the bound locally persisted Wormtamer review. Gemini decides whether that complete evidence supports one concise, reusable, project-specific review lesson. It may decline to create memory; empty diffs receive no application-specific handling.
 
-Comments, summaries, findings, and active memory remain untrusted evidence. Maintainer and Owner status is stronger provenance for project-specific claims, not authority to override code, explicit policy, or application instructions. Developer and lower-role feedback is presented critically. A feedback decision does not automatically create memory; one-off defects and non-reusable reactions retain no active lesson. No source comment body or revision history is retained.
+Diffs, comments, summaries, findings, and model output remain untrusted evidence. Closing or merging is a trigger, not proof that a comment or the Wormtamer review was correct. Trusted code validates input bounds, secret exclusion, the structured one-or-none result, and fixed repository scope before atomically completing the job and optionally storing one lesson. Diff and comment text are not persisted, and later merge request or comment activity does not update or deactivate the memory.
 
 ### Model usage diagnostics
 
@@ -140,7 +140,7 @@ The GitLab integration supports GitLab 17 and newer. The reconciler scans each a
 
 ### Read-only web panel
 
-The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, `GET /feedback/{job-id}`, `GET /memory`, `GET /usage`, and `GET /usage/{generation-id}`. It shows committed review and feedback job state, patch-ID availability, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, and an explicit non-secret configuration summary. Equivalent jobs link to their canonical review instead of presenting its result, findings, publication, or feedback targets as their own. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
+The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, `GET /feedback/{job-id}`, `GET /memory`, `GET /usage`, and `GET /usage/{generation-id}`. It shows committed review and feedback job state, patch-ID availability, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, and an explicit non-secret configuration summary. Equivalent jobs link to their canonical review instead of presenting its result, findings, publication, or feedback synthesis as their own. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
 
 Usage reporting covers rolling 24-hour, 7-day, and 30-day windows with validated request-kind, configured-model, resolved-model, and numeric-project filters. It shows observed token-category totals, model, repository, and request-kind breakdowns, generation histories, and aggregate estimated cost in USD. It never presents an estimate as provider billing and does not expose per-generation cost, formulas, or pricing rates.
 
@@ -154,11 +154,11 @@ SQLite stores webhook, job, publication, patch-equivalence, merge request progre
 
 Git patch IDs intentionally ignore whitespace and can remain equal after a target-branch update changes surrounding repository context. Wormtamer accepts both consequences when suppressing equivalent reviews. Equivalence is installation-local and is not reconstructed from GitLab notes: after SQLite state loss, exact-head markers still recover unchanged revisions, but a rebased head is reviewed and published normally.
 
-Runtime memory is installation-specific and separate from workflow state. A comment-derived record preserves its repository scope, typed review or finding target, GitLab source identifiers, actor role snapshot, model-selected lesson, outcome, confidence, active state, and timestamps. Source comment text and arbitrary model conversation are not persisted.
+Runtime memory is installation-specific and separate from workflow state. A record preserves its repository scope, source merge request and bound feedback job, model-selected lesson, source URL, and creation time. Diff and comment text and arbitrary model conversation are not persisted.
 
 For a newly generated successful review, SQLite records each unique memory identity and version returned to Gemini and its retrieval time in the same checkpoint as the validated result. This establishes which memory was exposed, not which memory affected model reasoning. The audit shares the review result's lifetime and stores no query, lesson copy, prompt, tool response, or failed-attempt history. An external-only publication recovered after local state loss stores its marker and GitLab note identity without a fabricated review result or memory audit and is therefore unavailable to feedback evaluation.
 
-Gemini may activate a repository-scoped lesson automatically after assessing the attributed comment and persisted finding context. Active means eligible for future bounded retrieval, not trusted policy: current code and explicit project policy override it. Comment edits replace current derived state. Periodic source checks deactivate memory after comment deletion or an update whose webhook was missed; GitLab emits Note Hooks for creation and updates but not deletion.
+Gemini may create one repository-scoped lesson after assessing the terminal diff, current comments, and bound Wormtamer review. Stored lessons remain eligible for future bounded retrieval without later source reconciliation and are advisory rather than trusted policy: current code and explicit project policy override them.
 
 Runtime review memory is separate from contributor guidance in `AGENTS.md` and `docs/agents/`.
 

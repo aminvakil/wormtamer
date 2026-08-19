@@ -84,11 +84,12 @@ func TestExecuteJobsCommandRetriesFeedback(t *testing.T) {
 	if err := storage.CompletePublication(ctx, accepted.JobID, "review-owner", "<!-- review -->", 99, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	feedbackResult, err := storage.AcceptFeedbackEvent(ctx, store.FeedbackEvent{
+	feedbackResult, err := storage.AcceptEvent(ctx, store.Event{
 		DeliveryID: "feedback", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
-		Action: "create", SourceUpdatedAt: now.Add(2 * time.Second),
-	}, now.Add(2*time.Second))
+		ProjectPath: "group/project", MergeRequestIID: 7, HeadSHA: strings.Repeat("a", 40),
+		Action: "close", Payload: []byte(`{"object_kind":"merge_request"}`),
+		QueueFeedback: true, TerminalState: "closed",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,23 +97,23 @@ func TestExecuteJobsCommandRetriesFeedback(t *testing.T) {
 	if err != nil || feedbackJob == nil {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", feedbackJob, err)
 	}
-	if err := storage.FinishFeedbackJob(ctx, feedbackJob.ID, feedbackJob.SourceEventID,
+	if err := storage.FinishFeedbackJob(ctx, feedbackJob.ID,
 		"feedback-owner", "gitlab_authorization_failed", now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
 	var output bytes.Buffer
 	if err := executeJobsCommand(ctx, storage, jobsCommand{
-		action: jobsActionRetry, kind: store.FailedJobKindFeedback, jobID: feedbackResult.JobID,
+		action: jobsActionRetry, kind: store.FailedJobKindFeedback, jobID: feedbackResult.FeedbackJobID,
 	}, &output); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"kind":"feedback","job_id":` + strconv.FormatInt(feedbackResult.JobID, 10) + `,"retried":true}`
+	want := `{"kind":"feedback","job_id":` + strconv.FormatInt(feedbackResult.FeedbackJobID, 10) + `,"retried":true}`
 	if strings.TrimSpace(output.String()) != want {
 		t.Fatalf("retry output = %s", output.String())
 	}
 	resumed, err := storage.ClaimFeedbackJob(ctx, "resumed-owner", time.Now().UTC(), time.Minute, 5)
-	if err != nil || resumed == nil || resumed.ID != feedbackResult.JobID {
+	if err != nil || resumed == nil || resumed.ID != feedbackResult.FeedbackJobID {
 		t.Fatalf("resumed feedback = %+v, %v", resumed, err)
 	}
 }

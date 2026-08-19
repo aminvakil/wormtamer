@@ -27,7 +27,6 @@ type FailedJob struct {
 	ProjectID         int64
 	MergeRequestIID   int64
 	HeadSHA           string
-	NoteID            int64
 }
 
 func (s *Store) ListFailedJobs(ctx context.Context, limit int) ([]FailedJob, bool, error) {
@@ -36,17 +35,17 @@ func (s *Store) ListFailedJobs(ctx context.Context, limit int) ([]FailedJob, boo
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT kind, job_id, attempt_count, last_error_category, updated_at,
-       project_id, merge_request_iid, head_sha, note_id
+       project_id, merge_request_iid, head_sha
 FROM (
     SELECT 'review' AS kind, id AS job_id, attempt_count, last_error_category,
-           updated_at, project_id, merge_request_iid, head_sha, NULL AS note_id
+           updated_at, project_id, merge_request_iid, head_sha
     FROM review_jobs
     WHERE state = 'failed'
 
     UNION ALL
 
     SELECT 'feedback' AS kind, id AS job_id, attempt_count, last_error_category,
-           updated_at, project_id, merge_request_iid, NULL AS head_sha, note_id
+           updated_at, project_id, merge_request_iid, head_sha
     FROM feedback_jobs
     WHERE state = 'failed'
 )
@@ -61,13 +60,11 @@ LIMIT ?`, limit+1)
 	for rows.Next() {
 		var job FailedJob
 		var headSHA sql.NullString
-		var noteID sql.NullInt64
 		if err := rows.Scan(&job.Kind, &job.JobID, &job.AttemptCount, &job.LastErrorCategory,
-			&job.UpdatedAt, &job.ProjectID, &job.MergeRequestIID, &headSHA, &noteID); err != nil {
+			&job.UpdatedAt, &job.ProjectID, &job.MergeRequestIID, &headSHA); err != nil {
 			return nil, false, fmt.Errorf("scan failed job: %w", err)
 		}
 		job.HeadSHA = headSHA.String
-		job.NoteID = noteID.Int64
 		jobs = append(jobs, job)
 	}
 	if err := rows.Err(); err != nil {

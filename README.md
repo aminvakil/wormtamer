@@ -6,11 +6,11 @@
 
 ## What it does
 
-- Accepts authenticated GitLab merge request and comment webhooks
+- Accepts authenticated GitLab merge request webhooks
 - Reconciles open merge requests periodically so missed webhooks do not lose reviews
 - Starts reviews with bounded merge request metadata and changed-file diffs
 - Lets Gemini inspect bounded text snapshots from the current repository and explicitly shared related repositories
-- Lets Gemini consult repository-scoped advisory lessons derived from eligible review comments
+- After an MR closes or merges, lets Gemini derive at most one repository-scoped advisory lesson from its diff, comments, and Wormtamer review
 - Lets Gemini retrieve bounded public text from approved domains and exact configured GitHub repositories
 - Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
 - Persists webhook, job, patch-equivalence, result, publication, feedback, advisory-memory, and model-usage state in SQLite
@@ -60,11 +60,11 @@ Create a persistent Docker volume:
 
 ### 4. Add the webhook
 
-Configure each authorized GitLab project to send both merge request and comment webhooks to:
+Configure each authorized GitLab project to send merge request webhooks to:
 
     https://wormtamer.example/webhooks/gitlab
 
-Comment events let Wormtamer evaluate eligible new and edited merge request comments against published findings and retain concise advisory lessons for later reviews of the same repository.
+Close and merge events let Wormtamer evaluate the terminal diff, current comments, and its locally persisted review, then retain one concise advisory lesson when the combined evidence warrants memory.
 
 ### 5. View the panel
 

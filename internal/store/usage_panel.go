@@ -59,7 +59,6 @@ type GenerationRecord struct {
 	ProjectID              int64
 	ProjectPath            string
 	MergeRequestIID        int64
-	NoteID                 int64
 }
 
 type GenerationRecordsPage struct {
@@ -379,7 +378,7 @@ const generationSelect = `SELECT
     g.prompt_tokens, g.cached_tokens, g.tool_use_prompt_tokens,
     g.candidate_tokens, g.thought_tokens, g.total_tokens,
     COALESCE(rj.project_id, fj.project_id), COALESCE(re.project_path, fj.project_path, ''),
-    COALESCE(rj.merge_request_iid, fj.merge_request_iid), COALESCE(fj.note_id, 0)`
+    COALESCE(rj.merge_request_iid, fj.merge_request_iid)`
 
 func scanGenerationRecord(row rowScanner) (GenerationRecord, error) {
 	var record GenerationRecord
@@ -395,7 +394,7 @@ func scanGenerationRecord(row rowScanner) (GenerationRecord, error) {
 		&started, &completed, &record.CompletionState, &latency,
 		&record.FinishReason, &record.StructuredValidation, &toolCallsAvailable, &toolNames, &finalOnly,
 		&usageAvailable, &usageValid, &prompt, &cached, &toolPrompt, &candidates, &thoughts, &total,
-		&record.ProjectID, &record.ProjectPath, &record.MergeRequestIID, &record.NoteID); err != nil {
+		&record.ProjectID, &record.ProjectPath, &record.MergeRequestIID); err != nil {
 		return GenerationRecord{}, err
 	}
 	var err error

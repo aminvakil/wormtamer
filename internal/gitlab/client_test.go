@@ -159,53 +159,64 @@ func TestLoadReviewClassifiesPatchID(t *testing.T) {
 	}
 }
 
-func TestLoadFeedbackCommentUsesEffectiveRoleAndCurrentSource(t *testing.T) {
-	deleted := false
+func TestLoadFeedbackReturnsDiffAndHumanComments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v4/projects/42":
 			writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
-		case "/api/v4/projects/42/merge_requests/7/notes/91":
-			if deleted {
-				http.NotFound(w, r)
-				return
-			}
-			note := noteResponse{ID: 91, Body: "This finding is incorrect.", UpdatedAt: "2026-07-31T12:00:00Z"}
-			note.Author.ID = 12
-			writeJSON(t, w, note)
+		case "/api/v4/projects/42/merge_requests/7":
+			writeMergeRequest(t, w, "closed", testHead)
+		case "/api/v4/projects/42/merge_requests/7/diffs":
+			writeJSON(t, w, []diffResponse{{OldPath: "old.go", NewPath: "new.go", Diff: "+new"}})
 		case "/api/v4/user":
 			writeJSON(t, w, userResponse{ID: 77})
-		case "/api/v4/projects/42/members/all/12":
-			writeJSON(t, w, memberResponse{ID: 12, State: "active", AccessLevel: 40})
+		case "/api/v4/projects/42/merge_requests/7/notes":
+			if r.URL.Query().Get("sort") != "asc" || r.URL.Query().Get("order_by") != "created_at" {
+				t.Errorf("notes query = %q", r.URL.RawQuery)
+			}
+			human := testNote(91, "This warning does not apply to generated output.", 12)
+			bot := testNote(92, "Wormtamer review", 77)
+			system := testNote(93, "changed state", 13)
+			system.System = true
+			internal := testNote(94, "private", 14)
+			internal.Internal = true
+			writeJSON(t, w, []noteResponse{human, bot, system, internal})
 		default:
-			http.NotFound(w, r)
+			t.Fatal("unexpected request: " + r.URL.String())
 		}
 	}))
 	defer server.Close()
-	client, err := New(server.URL, "token", []string{"group/project"}, nil, server.Client())
-	if err != nil {
-		t.Fatal(err)
+	client := newTestClient(t, server.URL, "token", server.Client())
+	evidence, err := client.LoadFeedback(context.Background(), FeedbackRef{
+		Identity: testIdentity(server.URL), ProjectPath: "group/project",
+	})
+	if err != nil || len(evidence.Files) != 1 || evidence.Files[0].NewPath != "new.go" ||
+		len(evidence.Comments) != 1 || evidence.Comments[0].AuthorID != 12 ||
+		evidence.Comments[0].Body != "This warning does not apply to generated output." {
+		t.Fatalf("LoadFeedback() = %+v, %v", evidence, err)
 	}
-	ref := FeedbackRef{
-		GitLabInstance: server.URL, ProjectID: 42, ProjectPath: "group/project",
-		MergeRequestIID: 7, NoteID: 91, ActorID: 12,
+	if evidence.SourceURL != server.URL+"/group/project/-/merge_requests/7" {
+		t.Fatalf("source URL = %q", evidence.SourceURL)
 	}
-	comment, found, err := client.LoadFeedbackComment(context.Background(), ref)
-	if err != nil || !found || comment.Role != "maintainer" || comment.AccessLevel != 40 || comment.Body != "This finding is incorrect." {
-		t.Fatalf("LoadFeedbackComment() = %+v, %t, %v", comment, found, err)
-	}
-	if comment.SourceURL != server.URL+"/group/project/-/merge_requests/7#note_91" {
-		t.Fatalf("source URL = %q", comment.SourceURL)
-	}
-	exists, updatedAt, err := client.CheckFeedbackSource(context.Background(), ref)
-	if err != nil || !exists || !updatedAt.Equal(time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("CheckFeedbackSource() = %t, %v, %v", exists, updatedAt, err)
-	}
-	deleted = true
-	comment, found, err = client.LoadFeedbackComment(context.Background(), ref)
-	if err != nil || found || comment.SourceURL == "" {
-		t.Fatalf("deleted LoadFeedbackComment() = %+v, %t, %v", comment, found, err)
-	}
+}
+
+func TestLoadFeedbackRequiresCurrentTerminalState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/projects/42":
+			writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+		case "/api/v4/projects/42/merge_requests/7":
+			writeMergeRequest(t, w, "opened", testHead)
+		default:
+			t.Fatal("unexpected request: " + r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, "token", server.Client())
+	_, err := client.LoadFeedback(context.Background(), FeedbackRef{
+		Identity: testIdentity(server.URL), ProjectPath: "group/project",
+	})
+	assertFailure(t, err, "merge_request_not_terminal", true, false)
 }
 
 func TestLoadRelatedRepositoryArchivePinsDefaultBranchHead(t *testing.T) {

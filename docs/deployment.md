@@ -30,13 +30,13 @@ Use a GitLab personal access token with `api` scope whose user has at least the 
 
 `public_sources.allowed_domains` must include `github.com`. Each entry authorizes bounded model-directed HTTPS retrieval from that exact domain and its subdomains; for example, `syncthing.net` also permits `docs.syncthing.net`. `public_sources.github_repositories` lists exact public GitHub repositories as `<owner>/<repository>` slugs, such as `nginx/nginx`, that the model may inspect through bounded snapshot file tools. These public sources are available to every review, so add only domains to which the team permits bounded request paths to be disclosed. Public access is unauthenticated, ignores environment proxy settings, and remains subject to GitHub's public rate limits. Deployment-level egress filtering is recommended in addition to application checks.
 
-Configure each authorized GitLab project to send both merge request and comment webhooks to:
+Configure each authorized GitLab project to send merge request webhooks to:
 
 ```text
 https://wormtamer.example/webhooks/gitlab
 ```
 
-The webhook secret in GitLab must equal `gitlab.webhook_secret`. Comment events let Wormtamer evaluate new and edited merge request comments after findings exist; internal and system notes are ignored.
+The webhook secret in GitLab must equal `gitlab.webhook_secret`. Close and merge events let Wormtamer evaluate the terminal diff, current comments, and its locally persisted review. Note Hook deliveries are ignored.
 
 The configuration contains plaintext credentials. Keep it outside version control, restrict host access, and mount it read-only. The process runs as the image's `nobody` user; the mounted file must be readable by that identity. Do not pass credentials through command arguments or bake them into another image.
 
@@ -81,7 +81,7 @@ curl --fail --silent --show-error http://127.0.0.1:8080/healthcheck
 
 A successful response confirms that startup completed and the HTTP server is live. It does not check GitLab, Gemini, or queued jobs.
 
-Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, feedback processing, active and inactive runtime memory, model usage, and non-secret effective configuration. Review, feedback, memory, and generation history use bounded pagination. The panel reflects local SQLite state and does not probe GitLab, Gemini, repositories, or public sources while rendering.
+Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, terminal feedback processing, runtime memory, model usage, and non-secret effective configuration. Review, feedback, memory, and generation history use bounded pagination. The panel reflects local SQLite state and does not probe GitLab, Gemini, repositories, or public sources while rendering.
 
 The panel also exposes `/reviews`, `/feedback`, `/memory`, and `/usage`, with review, feedback, and generation detail routes; it has no controls or request methods for changing application state. `/usage` reports rolling 24-hour, 7-day, and 30-day application-observed token totals and bounded model, repository, and request-kind breakdowns. When pricing or response cost is retrieved it shows aggregate estimated cost in USD, not per-generation prices, formulas, or rates. Review summaries and memory lessons may contain private project information.
 

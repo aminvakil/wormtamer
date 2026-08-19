@@ -37,7 +37,6 @@ type failedJobOutput struct {
 	ProjectID         int64  `json:"project_id"`
 	MergeRequestIID   int64  `json:"merge_request_iid"`
 	HeadSHA           string `json:"head_sha,omitempty"`
-	NoteID            int64  `json:"note_id,omitempty"`
 }
 
 type retriedJobOutput struct {
@@ -62,7 +61,7 @@ func executeJobsCommand(ctx context.Context, storage *store.Store, command jobsC
 				Kind: job.Kind, JobID: job.JobID, AttemptCount: job.AttemptCount,
 				LastErrorCategory: job.LastErrorCategory, UpdatedAt: job.UpdatedAt,
 				ProjectID: job.ProjectID, MergeRequestIID: job.MergeRequestIID,
-				HeadSHA: job.HeadSHA, NoteID: job.NoteID,
+				HeadSHA: job.HeadSHA,
 			}
 		}
 		return writeJobsOutput(output, response)

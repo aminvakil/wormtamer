@@ -32,7 +32,7 @@ type Store interface {
 	GetReviewRecord(context.Context, int64) (store.ReviewRecordDetail, error)
 	ListFeedbackRecords(context.Context, string, int64, int) (store.FeedbackRecordsPage, error)
 	GetFeedbackRecord(context.Context, int64) (store.FeedbackRecordDetail, error)
-	ListMemoryRecords(context.Context, *bool, int64, int) (store.MemoryRecordsPage, error)
+	ListMemoryRecords(context.Context, int64, int) (store.MemoryRecordsPage, error)
 	ReadUsageReport(context.Context, store.UsageQuery) (store.UsageReport, error)
 	GetGenerationRecord(context.Context, int64) (store.GenerationRecord, error)
 }
@@ -209,12 +209,10 @@ type generationDetailPage struct {
 }
 
 type memoryPage struct {
-	Page        string
-	Title       string
-	Records     []memoryView
-	Active      string
-	NextURL     string
-	FilterLinks []filterLink
+	Page    string
+	Title   string
+	Records []memoryView
+	NextURL string
 }
 
 type filterLink struct {
@@ -508,27 +506,22 @@ func (h *Handler) generationDetail(w http.ResponseWriter, request *http.Request)
 }
 
 func (h *Handler) memory(w http.ResponseWriter, request *http.Request) {
-	activeText, active, before, ok := parseMemoryQuery(request.URL.Query())
+	before, ok := parseMemoryQuery(request.URL.Query())
 	if !ok {
 		h.badRequest(w)
 		return
 	}
-	pageRecords, err := h.store.ListMemoryRecords(request.Context(), active, before, pageSize)
+	pageRecords, err := h.store.ListMemoryRecords(request.Context(), before, pageSize)
 	if err != nil {
 		h.internalError(w, "memory")
 		return
 	}
 	page := memoryPage{
 		Page: "memory", Title: "Runtime memory · Wormtamer",
-		Records: h.memoryViews(pageRecords.Records), Active: activeText,
-		FilterLinks: []filterLink{
-			{Label: "All", URL: "/memory", Current: activeText == ""},
-			{Label: "Active", URL: "/memory?active=true", Current: activeText == "true"},
-			{Label: "Inactive", URL: "/memory?active=false", Current: activeText == "false"},
-		},
+		Records: h.memoryViews(pageRecords.Records),
 	}
 	if pageRecords.NextBefore > 0 {
-		page.NextURL = listURL("/memory", activeText, pageRecords.NextBefore, "active")
+		page.NextURL = listURL("/memory", "", pageRecords.NextBefore, "")
 	}
 	h.render(w, "memory", page)
 }
@@ -638,7 +631,7 @@ func overviewMetrics(dashboard store.Dashboard) []metricView {
 		{Label: "Waiting", Tone: "waiting", Count: reviews[store.JobQueued] + feedback[store.FeedbackQueued]},
 		{Label: "In progress", Tone: "active", Count: reviews[store.JobRunning] + reviews[store.JobPublishing] + feedback[store.FeedbackRunning]},
 		{Label: "Failed", Tone: "failed", Count: reviews[store.JobFailed] + feedback[store.FeedbackFailed]},
-		{Label: "Active lessons", Tone: "memory", Count: dashboard.ActiveMemoryCount},
+		{Label: "Lessons", Tone: "memory", Count: dashboard.MemoryCount},
 	}
 }
 
@@ -681,25 +674,11 @@ func parseListQuery(values url.Values, states []string) (string, int64, bool) {
 	return state, before, ok
 }
 
-func parseMemoryQuery(values url.Values) (string, *bool, int64, bool) {
-	if !onlyQueryKeys(values, "active", "before") || len(values["active"]) > 1 || len(values["before"]) > 1 {
-		return "", nil, 0, false
+func parseMemoryQuery(values url.Values) (int64, bool) {
+	if !onlyQueryKeys(values, "before") || len(values["before"]) > 1 {
+		return 0, false
 	}
-	activeText := values.Get("active")
-	var active *bool
-	switch activeText {
-	case "":
-	case "true":
-		value := true
-		active = &value
-	case "false":
-		value := false
-		active = &value
-	default:
-		return "", nil, 0, false
-	}
-	before, ok := parseBefore(values.Get("before"))
-	return activeText, active, before, ok
+	return parseBefore(values.Get("before"))
 }
 
 func parseUsageQuery(values url.Values) (usageFilters, bool) {

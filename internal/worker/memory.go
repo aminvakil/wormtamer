@@ -63,7 +63,7 @@ func (t *reviewTools) Call(ctx context.Context, name string, arguments map[strin
 
 	requestCtx, cancel := context.WithTimeout(ctx, memoryRetrievalTimeout)
 	defer cancel()
-	candidates, err := t.store.ListActiveReviewMemories(requestCtx, t.snapshot.Identity.GitLabInstance, t.snapshot.Identity.ProjectID)
+	candidates, err := t.store.ListReviewMemories(requestCtx, t.snapshot.Identity.GitLabInstance, t.snapshot.Identity.ProjectID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -78,15 +78,9 @@ func (t *reviewTools) Call(ctx context.Context, name string, arguments map[strin
 			"scope": map[string]any{
 				"type": "repository", "project_id": t.snapshot.Identity.ProjectID, "project_path": t.snapshot.ProjectPath,
 			},
-			"target": map[string]any{
-				"type": memory.TargetType, "id": memory.TargetID,
-			},
-			"outcome":            memory.Outcome,
-			"confidence":         memory.Confidence,
 			"lesson":             memory.Lesson,
-			"source_role":        memory.SourceRole,
 			"evidence_reference": memory.SourceURL,
-			"updated_at":         memory.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"created_at":         memory.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		})
 		key := memory.MemoryID + "\x00" + memory.UpdatedAt.UTC().Format(time.RFC3339Nano)
 		if _, exists := t.retrieved[key]; !exists {

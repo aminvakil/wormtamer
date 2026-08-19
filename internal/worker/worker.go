@@ -37,7 +37,7 @@ type JobStore interface {
 	FindCanonicalReviewJob(context.Context, int64, string) (int64, bool, error)
 	CompleteEquivalentReview(context.Context, int64, string, int64, string, time.Time) error
 	SaveReviewResult(context.Context, int64, string, []byte, []string, []store.ReviewMemoryRetrieval, string, string, time.Time) error
-	ListActiveReviewMemories(context.Context, string, int64) ([]store.ReviewMemory, error)
+	ListReviewMemories(context.Context, string, int64) ([]store.ReviewMemory, error)
 	RetryJob(context.Context, int64, string, time.Time, time.Time, int, string, string) (string, error)
 	FinishJob(context.Context, int64, string, string, string, string, time.Time) error
 	CompletePublication(context.Context, int64, string, string, int64, time.Time) error

@@ -7,45 +7,20 @@ import (
 	"time"
 )
 
-func TestListActiveReviewMemoriesEnforcesCurrentScopeAndState(t *testing.T) {
+func TestListReviewMemoriesEnforcesRepositoryScope(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 	now := time.Now().UTC().Add(time.Hour)
+	currentID := activateMemory(t, storage, "http://gitlab.internal", 42, "group/project", 7,
+		"WT-M-"+strings.Repeat("A", 26), "Generated files are changed through their source generator.", now)
+	activateMemory(t, storage, "http://gitlab.internal", 43, "group/other", 8,
+		"WT-M-"+strings.Repeat("B", 26), "Other project guidance.", now.Add(time.Minute))
+	activateMemory(t, storage, "http://other.internal", 42, "group/project", 9,
+		"WT-M-"+strings.Repeat("C", 26), "Other installation guidance.", now.Add(2*time.Minute))
 
-	current := activateReviewMemory(t, storage, memoryFixture{
-		delivery: "current-review", feedbackDelivery: "current-feedback", instance: "http://gitlab.internal",
-		projectID: 42, projectPath: "group/project", head: strings.Repeat("a", 40), noteID: 91,
-		findingID: "WT-F-" + strings.Repeat("A", 26), memoryID: "WT-M-" + strings.Repeat("A", 26),
-		lesson: "Generated files should be assessed through their source generator.",
-	}, now)
-	inactive := activateReviewMemory(t, storage, memoryFixture{
-		delivery: "inactive-review", feedbackDelivery: "inactive-feedback", instance: "http://gitlab.internal",
-		projectID: 42, projectPath: "group/project", head: strings.Repeat("b", 40), noteID: 92,
-		findingID: "WT-F-" + strings.Repeat("B", 26), memoryID: "WT-M-" + strings.Repeat("B", 26),
-		lesson: "Inactive generated-file guidance.",
-	}, now.Add(time.Second))
-	if _, err := storage.db.Exec(`UPDATE review_memories SET active = 0 WHERE memory_id = ?`, inactive.MemoryID); err != nil {
-		t.Fatal(err)
-	}
-	activateReviewMemory(t, storage, memoryFixture{
-		delivery: "other-project-review", feedbackDelivery: "other-project-feedback", instance: "http://gitlab.internal",
-		projectID: 43, projectPath: "group/other", head: strings.Repeat("c", 40), noteID: 93,
-		findingID: "WT-F-" + strings.Repeat("C", 26), memoryID: "WT-M-" + strings.Repeat("C", 26),
-		lesson: "Other project generated-file guidance.",
-	}, now.Add(2*time.Second))
-	activateReviewMemory(t, storage, memoryFixture{
-		delivery: "other-instance-review", feedbackDelivery: "other-instance-feedback", instance: "http://other.internal",
-		projectID: 42, projectPath: "group/project", head: strings.Repeat("d", 40), noteID: 94,
-		findingID: "WT-F-" + strings.Repeat("D", 26), memoryID: "WT-M-" + strings.Repeat("D", 26),
-		lesson: "Other installation generated-file guidance.",
-	}, now.Add(3*time.Second))
-
-	memories, err := storage.ListActiveReviewMemories(context.Background(), "http://gitlab.internal", 42)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(memories) != 1 || memories[0].MemoryID != current.MemoryID || memories[0].SourceRole != "maintainer" || memories[0].SourceURL == "" {
-		t.Fatalf("scoped memories = %+v", memories)
+	memories, err := storage.ListReviewMemories(context.Background(), "http://gitlab.internal", 42)
+	if err != nil || len(memories) != 1 || memories[0].MemoryID != currentID || memories[0].SourceURL == "" {
+		t.Fatalf("scoped memories = %+v, %v", memories, err)
 	}
 }
 
@@ -76,60 +51,44 @@ func TestSaveReviewResultPersistsVersionedMemoryRetrieval(t *testing.T) {
 	}
 }
 
-type memoryFixture struct {
-	delivery         string
-	feedbackDelivery string
-	instance         string
-	projectID        int64
-	projectPath      string
-	head             string
-	noteID           int64
-	findingID        string
-	memoryID         string
-	lesson           string
-}
-
-func activateReviewMemory(t *testing.T, storage *Store, fixture memoryFixture, now time.Time) ReviewMemory {
+func activateMemory(t *testing.T, storage *Store, instance string, projectID int64, projectPath string, iid int64, memoryID, lesson string, now time.Time) string {
 	t.Helper()
-	ctx := context.Background()
-	event := readyEvent(fixture.delivery)
-	event.GitLabInstance = fixture.instance
-	event.ProjectID = fixture.projectID
-	event.ProjectPath = fixture.projectPath
-	event.HeadSHA = fixture.head
-	if _, err := storage.AcceptEvent(ctx, event); err != nil {
+	head := strings.Repeat(string(rune('a'+iid%6)), 40)
+	reviewEvent := readyEvent("review-" + memoryID)
+	reviewEvent.GitLabInstance, reviewEvent.ProjectID, reviewEvent.ProjectPath = instance, projectID, projectPath
+	reviewEvent.MergeRequestIID, reviewEvent.HeadSHA = iid, head
+	accepted, err := storage.AcceptEvent(context.Background(), reviewEvent)
+	if err != nil {
 		t.Fatal(err)
 	}
-	owner := "review-" + fixture.delivery
-	job, err := storage.ClaimJob(ctx, owner, now, 2*time.Minute, 5)
-	if err != nil || job == nil {
+	owner := "review-owner-" + memoryID
+	job, err := storage.ClaimJob(context.Background(), owner, now, time.Minute, 5)
+	if err != nil || job == nil || job.ID != accepted.JobID {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	result := []byte(`{"summary":"summary","findings":[{"priority":"P2","title":"title","explanation":"explanation","recommendation":"recommendation","path":"file.go"}]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, owner, result, []string{fixture.findingID}, nil, PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, owner, []byte(`{"summary":"summary","findings":[]}`), nil, nil, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CompletePublication(ctx, job.ID, owner, "<!-- "+fixture.delivery+" -->", job.ID, now.Add(time.Second)); err != nil {
+	if err := storage.CompletePublication(context.Background(), job.ID, owner, "<!-- "+memoryID+" -->", job.ID, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := storage.AcceptFeedbackEvent(ctx, FeedbackEvent{
-		DeliveryID: fixture.feedbackDelivery, GitLabInstance: fixture.instance, ProjectID: fixture.projectID,
-		ProjectPath: fixture.projectPath, MergeRequestIID: 7, NoteID: fixture.noteID, ActorID: 12,
-		Action: "create", SourceUpdatedAt: now,
-	}, now)
-	if err != nil || accepted.JobID == 0 {
-		t.Fatalf("AcceptFeedbackEvent() = %+v, %v", accepted, err)
+	terminal := Event{
+		DeliveryID: "close-" + memoryID, GitLabInstance: instance, ProjectID: projectID,
+		ProjectPath: projectPath, MergeRequestIID: iid, HeadSHA: head, Action: "close",
+		Payload: []byte(`{"object_kind":"merge_request"}`), QueueFeedback: true, TerminalState: "closed",
 	}
-	feedbackOwner := "feedback-" + fixture.feedbackDelivery
-	feedbackJob, err := storage.ClaimFeedbackJob(ctx, feedbackOwner, now, 3*time.Minute, 5)
-	if err != nil || feedbackJob == nil {
+	feedback, err := storage.AcceptEvent(context.Background(), terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedbackJob, err := storage.ClaimFeedbackJob(context.Background(), "feedback-owner-"+memoryID, now.Add(2*time.Second), time.Minute, 5)
+	if err != nil || feedbackJob == nil || feedbackJob.ID != feedback.FeedbackJobID {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", feedbackJob, err)
 	}
-	sourceURL := fixture.instance + "/" + fixture.projectPath + "/-/merge_requests/7#note_" + fixture.feedbackDelivery
-	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, feedbackJob.SourceEventID, feedbackOwner, 40, "maintainer", sourceURL,
-		[]FeedbackDecision{{MemoryID: fixture.memoryID, TargetType: "finding", TargetID: fixture.findingID, Outcome: "corrects_finding", Confidence: "high", Lesson: fixture.lesson}},
-		now, 5*time.Minute); err != nil {
+	source := instance + "/" + projectPath + "/-/merge_requests/" + string(rune('0'+iid))
+	if err := storage.CompleteFeedbackJob(context.Background(), feedbackJob.ID, "feedback-owner-"+memoryID,
+		memoryID, lesson, source, now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	return ReviewMemory{MemoryID: fixture.memoryID, TargetType: "finding", TargetID: fixture.findingID, Lesson: fixture.lesson, UpdatedAt: now}
+	return memoryID
 }

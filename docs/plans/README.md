@@ -5,12 +5,6 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 ## Proposed
 
 - [Add diagnostic conversation and log views](add-diagnostic-content-views.md): show bounded process-local model conversations and structured logs without creating a durable private-content archive.
-- [Define feedback classification and memory policy](define-feedback-policy.md): resolve aggregate source, outcome, conflict, confidence, target-selection, and active-memory rules before further feedback behavior changes.
-- [Synthesize review feedback memory](synthesize-review-feedback.md): after the policy is approved, replace independently active comment lessons with bounded revision-level synthesis over attributed feedback and the exact reviewed diff.
-
-## Deferred
-
-- [Evaluate feedback-driven reviews](evaluate-feedback-driven-reviews.md): revisit after a deployed installation has accumulated enough meaningful structured feedback to define useful measures and sample sizes from evidence.
 
 ## KISS
 

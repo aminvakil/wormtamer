@@ -137,7 +137,7 @@ func TestWorkerRetrievesScopedMemoryAndPersistsSuccessfulAudit(t *testing.T) {
 	defer storage.Close()
 	defer db.Close()
 	now := time.Now().UTC().Add(time.Hour)
-	memoryID := prepareActiveMemoryForWorker(t, storage, now)
+	memoryID := prepareMemoryForWorker(t, storage, now)
 	queueNewWorkerRevision(t, storage, "memory-review", strings.Repeat("b", 40))
 
 	reviewer := &fakeReviewer{
@@ -154,9 +154,8 @@ func TestWorkerRetrievesScopedMemoryAndPersistsSuccessfulAudit(t *testing.T) {
 	if !ok || len(memories) != 1 || memories[0]["memory_id"] != memoryID || reviewer.memoryResult["authority"] != "untrusted_advisory" {
 		t.Fatalf("memory result = %+v", reviewer.memoryResult)
 	}
-	target, ok := memories[0]["target"].(map[string]any)
-	if !ok || target["type"] != "finding" || target["id"] == "" {
-		t.Fatalf("memory target = %+v", memories[0]["target"])
+	if memories[0]["lesson"] == "" || memories[0]["evidence_reference"] == "" {
+		t.Fatalf("memory evidence = %+v", memories[0])
 	}
 	var auditMemoryID string
 	if err := db.QueryRow(`SELECT memory_id FROM review_memory_retrievals`).Scan(&auditMemoryID); err != nil {
@@ -760,7 +759,7 @@ func queueNewWorkerRevision(t *testing.T, storage *store.Store, deliveryID, head
 	}
 }
 
-func prepareActiveMemoryForWorker(t *testing.T, storage *store.Store, now time.Time) string {
+func prepareMemoryForWorker(t *testing.T, storage *store.Store, now time.Time) string {
 	t.Helper()
 	ctx := context.Background()
 	queueJob(t, storage)
@@ -776,23 +775,23 @@ func prepareActiveMemoryForWorker(t *testing.T, storage *store.Store, now time.T
 	if err := storage.CompletePublication(ctx, job.ID, "memory-source-review", "<!-- memory-source-review -->", 99, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := storage.AcceptFeedbackEvent(ctx, store.FeedbackEvent{
+	accepted, err := storage.AcceptEvent(ctx, store.Event{
 		DeliveryID: "memory-feedback", GitLabInstance: "http://gitlab.internal", ProjectID: 42,
-		ProjectPath: "group/project", MergeRequestIID: 7, NoteID: 91, ActorID: 12,
-		Action: "create", SourceUpdatedAt: now,
-	}, now)
-	if err != nil || accepted.JobID == 0 {
-		t.Fatalf("AcceptFeedbackEvent() = %+v, %v", accepted, err)
+		ProjectPath: "group/project", MergeRequestIID: 7, HeadSHA: workerHead,
+		Action: "close", Payload: []byte(`{"object_kind":"merge_request"}`),
+		QueueFeedback: true, TerminalState: "closed",
+	})
+	if err != nil || accepted.FeedbackJobID == 0 {
+		t.Fatalf("AcceptEvent(feedback) = %+v, %v", accepted, err)
 	}
-	feedbackJob, err := storage.ClaimFeedbackJob(ctx, "memory-feedback-owner", now, 3*time.Minute, 5)
+	feedbackJob, err := storage.ClaimFeedbackJob(ctx, "memory-feedback-owner", now.Add(2*time.Second), 3*time.Minute, 5)
 	if err != nil || feedbackJob == nil {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", feedbackJob, err)
 	}
 	memoryID := "WT-M-" + strings.Repeat("A", 26)
-	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, feedbackJob.SourceEventID, "memory-feedback-owner", 40, "maintainer",
-		"http://gitlab.internal/group/project/-/merge_requests/7#note_91",
-		[]store.FeedbackDecision{{MemoryID: memoryID, TargetType: "finding", TargetID: findingID, Outcome: "corrects_finding", Confidence: "high", Lesson: "Generated source must be fixed through its generator."}},
-		now, 5*time.Minute); err != nil {
+	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, "memory-feedback-owner", memoryID,
+		"Generated source must be fixed through its generator.",
+		"http://gitlab.internal/group/project/-/merge_requests/7", now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	return memoryID
@@ -994,7 +993,7 @@ type failingMemoryStore struct {
 	*store.Store
 }
 
-func (s *failingMemoryStore) ListActiveReviewMemories(context.Context, string, int64) ([]store.ReviewMemory, error) {
+func (s *failingMemoryStore) ListReviewMemories(context.Context, string, int64) ([]store.ReviewMemory, error) {
 	return nil, errors.New("simulated memory failure")
 }
 

@@ -17,28 +17,24 @@ import (
 )
 
 const (
-	pollInterval        = time.Second
-	leaseDuration       = 3 * time.Minute
-	leaseRenewInterval  = 30 * time.Second
-	maxAttempts         = 5
-	initialBackoff      = 5 * time.Second
-	maxLocalBackoff     = 5 * time.Minute
-	sourceCheckInterval = 5 * time.Minute
+	pollInterval       = time.Second
+	leaseDuration      = 3 * time.Minute
+	leaseRenewInterval = 30 * time.Second
+	maxAttempts        = 5
+	initialBackoff     = 5 * time.Second
+	maxLocalBackoff    = 5 * time.Minute
 )
 
 type JobStore interface {
 	ClaimFeedbackJob(context.Context, string, time.Time, time.Duration, int) (*store.FeedbackJob, error)
 	RenewFeedbackLease(context.Context, int64, string, time.Time, time.Duration) (bool, error)
-	CompleteFeedbackJob(context.Context, int64, int64, string, int, string, string, []store.FeedbackDecision, time.Time, time.Duration) error
-	RetryFeedbackJob(context.Context, int64, int64, string, time.Time, time.Time, int, string) (string, error)
-	FinishFeedbackJob(context.Context, int64, int64, string, string, time.Time) error
-	DueFeedbackSources(context.Context, time.Time, int) ([]store.FeedbackSource, error)
-	ReconcileFeedbackSource(context.Context, int64, bool, time.Time, time.Time, time.Duration) error
+	CompleteFeedbackJob(context.Context, int64, string, string, string, string, time.Time) error
+	RetryFeedbackJob(context.Context, int64, string, time.Time, time.Time, int, string) (string, error)
+	FinishFeedbackJob(context.Context, int64, string, string, time.Time) error
 }
 
 type GitLabBroker interface {
-	LoadFeedbackComment(context.Context, gitlab.FeedbackRef) (gitlab.FeedbackComment, bool, error)
-	CheckFeedbackSource(context.Context, gitlab.FeedbackRef) (bool, time.Time, error)
+	LoadFeedback(context.Context, gitlab.FeedbackRef) (gitlab.FeedbackEvidence, error)
 }
 
 type Evaluator interface {
@@ -73,9 +69,6 @@ func (w *Worker) Run(ctx context.Context) error {
 		processed, err := w.ProcessOne(ctx)
 		if err != nil {
 			w.logger.Error("feedback processing failed", "reason", "persistence_failed")
-		}
-		if ctx.Err() == nil {
-			w.reconcileSources(ctx)
 		}
 		if !processed && !wait(ctx, pollInterval) {
 			return nil
@@ -126,7 +119,7 @@ func (w *Worker) processClaimed(ctx context.Context, job *store.FeedbackJob) err
 		return store.ErrLeaseLost
 	default:
 	}
-	if errors.Is(err, store.ErrFeedbackSuperseded) || errors.Is(err, store.ErrLeaseLost) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, store.ErrLeaseLost) || errors.Is(err, context.Canceled) {
 		return nil
 	}
 	if err != nil {
@@ -137,23 +130,16 @@ func (w *Worker) processClaimed(ctx context.Context, job *store.FeedbackJob) err
 }
 
 func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
-	ref := gitlab.FeedbackRef{
-		GitLabInstance: job.GitLabInstance, ProjectID: job.ProjectID, ProjectPath: job.ProjectPath,
-		MergeRequestIID: job.MergeRequestIID, NoteID: job.NoteID, ActorID: job.ActorID,
-	}
-	comment, found, err := w.gitlab.LoadFeedbackComment(ctx, ref)
+	evidence, err := w.gitlab.LoadFeedback(ctx, gitlab.FeedbackRef{
+		Identity: gitlab.Identity{
+			GitLabInstance: job.GitLabInstance, ProjectID: job.ProjectID,
+			MergeRequestIID: job.MergeRequestIID, HeadSHA: job.HeadSHA,
+		},
+		ProjectPath: job.ProjectPath,
+	})
 	if err != nil {
 		return err
 	}
-	if !found || comment.Ignored {
-		role := comment.Role
-		if role == "" {
-			role = "source_unavailable"
-		}
-		return w.store.CompleteFeedbackJob(ctx, job.ID, job.SourceEventID, w.owner, comment.AccessLevel,
-			role, comment.SourceURL, nil, w.now().UTC(), sourceCheckInterval)
-	}
-
 	result, err := review.DecodeStored(job.ValidatedResultJSON)
 	if err != nil || len(result.Findings) != len(job.FindingIDs) {
 		return failure.Failed("invalid_stored_review_result")
@@ -170,38 +156,28 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 	})
 	assessment, err := w.evaluator.Evaluate(evaluationCtx, memory.Input{
 		ProjectID: job.ProjectID, ProjectPath: job.ProjectPath, MergeRequestIID: job.MergeRequestIID,
-		ReviewTargetID: job.ReviewTargetID, HeadSHA: job.HeadSHA, Summary: result.Summary,
-		ActorID: job.ActorID, ActorAccess: comment.AccessLevel, ActorRole: comment.Role,
-		Comment: comment.Body, Findings: findings,
+		HeadSHA: job.HeadSHA, ReviewHeadSHA: job.ReviewHeadSHA, Files: evidence.Files,
+		Comments: evidence.Comments, Summary: result.Summary, Findings: findings,
 	})
 	if err != nil {
 		return err
 	}
-	decisions := make([]store.FeedbackDecision, len(assessment.Decisions))
-	for index, decision := range assessment.Decisions {
-		decisions[index] = store.FeedbackDecision{
-			MemoryID:   memory.ID(job.GitLabInstance, job.ProjectID, job.NoteID, decision.TargetType, decision.TargetID),
-			TargetType: decision.TargetType, TargetID: decision.TargetID, Outcome: decision.Outcome,
-			Confidence: decision.Confidence, Lesson: decision.Lesson,
-		}
+	memoryID, lesson := "", ""
+	if assessment.CreateMemory {
+		memoryID = memory.ID(job.GitLabInstance, job.ProjectID, job.MergeRequestIID)
+		lesson = assessment.Lesson
 	}
-	return w.store.CompleteFeedbackJob(ctx, job.ID, job.SourceEventID, w.owner, comment.AccessLevel,
-		comment.Role, comment.SourceURL, decisions, w.now().UTC(), sourceCheckInterval)
+	return w.store.CompleteFeedbackJob(ctx, job.ID, w.owner, memoryID, lesson, evidence.SourceURL, w.now().UTC())
 }
 
 func (w *Worker) handleFailure(ctx context.Context, job *store.FeedbackJob, err error) error {
 	var failureError *failure.Error
-	if errors.Is(err, store.ErrMemoryVersionConflict) {
-		failureError = &failure.Error{Category: "memory_version_conflict", Retryable: true}
-	} else if !errors.As(err, &failureError) {
+	if !errors.As(err, &failureError) {
 		failureError = &failure.Error{Category: "internal_feedback_failure", Retryable: true}
 	}
 	now := w.now().UTC()
 	if !failureError.Retryable {
-		if err := w.store.FinishFeedbackJob(ctx, job.ID, job.SourceEventID, w.owner, failureError.Category, now); err != nil {
-			if errors.Is(err, store.ErrFeedbackSuperseded) {
-				return nil
-			}
+		if err := w.store.FinishFeedbackJob(ctx, job.ID, w.owner, failureError.Category, now); err != nil {
 			return err
 		}
 		w.logger.Warn("feedback job failed", append(logFields(job), "outcome", store.FeedbackFailed, "reason", failureError.Category)...)
@@ -211,46 +187,12 @@ func (w *Worker) handleFailure(ctx context.Context, job *store.FeedbackJob, err 
 	if failureError.RetryAfter > delay {
 		delay = failureError.RetryAfter
 	}
-	state, retryErr := w.store.RetryFeedbackJob(ctx, job.ID, job.SourceEventID, w.owner, now, now.Add(delay), maxAttempts, failureError.Category)
+	state, retryErr := w.store.RetryFeedbackJob(ctx, job.ID, w.owner, now, now.Add(delay), maxAttempts, failureError.Category)
 	if retryErr != nil {
-		if errors.Is(retryErr, store.ErrFeedbackSuperseded) {
-			return nil
-		}
 		return retryErr
 	}
 	w.logger.Info("feedback job deferred", append(logFields(job), "outcome", state, "reason", failureError.Category)...)
 	return nil
-}
-
-func (w *Worker) reconcileSources(ctx context.Context) {
-	now := w.now().UTC()
-	sources, err := w.store.DueFeedbackSources(ctx, now, 10)
-	if err != nil {
-		w.logger.Error("feedback source reconciliation failed", "reason", "persistence_failed")
-		return
-	}
-	for _, source := range sources {
-		ref := gitlab.FeedbackRef{
-			GitLabInstance: source.GitLabInstance, ProjectID: source.ProjectID, ProjectPath: source.ProjectPath,
-			MergeRequestIID: source.MergeRequestIID, NoteID: source.NoteID, ActorID: source.ActorID,
-		}
-		exists, updatedAt, checkErr := w.gitlab.CheckFeedbackSource(ctx, ref)
-		if checkErr != nil {
-			w.logger.Warn("feedback source check deferred", "feedback_job_id", source.JobID, "reason", failureCategory(checkErr))
-			exists, updatedAt = true, source.SourceUpdatedAt
-		}
-		if err := w.store.ReconcileFeedbackSource(ctx, source.JobID, exists, updatedAt, now, sourceCheckInterval); err != nil {
-			w.logger.Error("feedback source reconciliation failed", "feedback_job_id", source.JobID, "reason", "persistence_failed")
-		}
-	}
-}
-
-func failureCategory(err error) string {
-	var failureError *failure.Error
-	if errors.As(err, &failureError) {
-		return failureError.Category
-	}
-	return "feedback_source_check_failed"
 }
 
 func localBackoff(attempt int) time.Duration {
@@ -283,8 +225,8 @@ func logFields(job *store.FeedbackJob) []any {
 		"feedback_job_id", job.ID,
 		"project_id", job.ProjectID,
 		"merge_request_iid", job.MergeRequestIID,
-		"note_id", job.NoteID,
-		"actor_id", job.ActorID,
+		"head_sha", job.HeadSHA,
+		"terminal_state", job.TerminalState,
 		"attempt", job.AttemptCount,
 	}
 }
