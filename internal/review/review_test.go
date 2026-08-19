@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/publicsource"
@@ -238,7 +239,7 @@ func TestGeminiReviewerUsesConfiguredBaseURLAndRetriesRateLimit(t *testing.T) {
 	defer server.Close()
 
 	recorder := &fakeUsageRecorder{}
-	reviewer, err := NewGeminiReviewer(context.Background(), "gateway-key", server.URL, "gemini-proxy", "default", nil, nil, recorder)
+	reviewer, err := NewGeminiReviewer(context.Background(), "gateway-key", server.URL, "gemini-proxy", "default", nil, nil, recorder, nil)
 	if err != nil {
 		t.Fatalf("NewGeminiReviewer() error = %v", err)
 	}
@@ -353,6 +354,48 @@ func TestGeminiReviewerDebugLogsModelTranscript(t *testing.T) {
 		if event["turn"] != float64(turn) || event["project_id"] != float64(42) || event["merge_request_iid"] != float64(7) || event["head_sha"] != strings.Repeat("a", 40) {
 			t.Fatalf("generation event lacks review correlation: %+v", event)
 		}
+	}
+}
+
+func TestGeminiReviewerRecordsApplicationVisibleConversationWithoutThoughts(t *testing.T) {
+	toolTurn := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{Text: "hidden thought", Thought: true},
+		{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: repository.ToolReadFile, Args: map[string]any{
+			"repository": "group/project", "path": "README.md",
+		}}},
+	}}
+	finalTurn := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{Thought: true, ThoughtSignature: []byte("sdk-signature")},
+		{Text: `{"summary":"captured review","findings":[]}`},
+	}}
+	generator := &fakeGenerator{turns: []*genai.Content{toolTurn, finalTurn}, modelVersion: "resolved-test"}
+	usageRecorder := &fakeUsageRecorder{}
+	conversationRecorder := diagnostics.New(true, nil)
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.recorder = diagnostics.ObserveGenerations(usageRecorder, conversationRecorder)
+	reviewer.conversations = conversationRecorder
+	ctx := usage.WithScope(context.Background(), usage.Scope{
+		RequestKind: usage.RequestReview, ReviewJobID: 77, Attempt: 3,
+	})
+	result, _, err := reviewer.Review(ctx, testSnapshot(), &fakeToolBroker{result: map[string]any{"content": "visible tool result"}})
+	if err != nil || result.Summary != "captured review" {
+		t.Fatalf("Review() = %+v, %v", result, err)
+	}
+	conversation, ok := conversationRecorder.ConversationByGeneration(2)
+	if !ok || len(conversation.Generations) != 2 || len(conversation.Events) != 3 {
+		t.Fatalf("conversation = %+v, %v", conversation, ok)
+	}
+	if conversation.Events[0].Kind != "model" || len(conversation.Events[0].Calls) != 1 ||
+		conversation.Events[1].Kind != "tool" || !strings.Contains(conversation.Events[1].Responses[0].Response, "visible tool result") ||
+		conversation.Events[2].Kind != "model" || !strings.Contains(conversation.Events[2].Text, "captured review") {
+		t.Fatalf("conversation events = %+v", conversation.Events)
+	}
+	encoded, err := json.Marshal(conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "hidden thought") || strings.Contains(string(encoded), "sdk-signature") {
+		t.Fatalf("conversation exposed hidden SDK content: %s", encoded)
 	}
 }
 
@@ -523,6 +566,15 @@ func TestGeminiReviewerRejectsSuccessfulRepositoryToolCallWithoutRepository(t *t
 	}
 	if broker.calls != 1 || len(jsonLogEvents(t, logs.String(), "Gemini review repository accessed")) != 0 {
 		t.Fatalf("broker calls=%d logs=%s", broker.calls, logs.String())
+	}
+}
+
+func TestReviewDiagnosticValueUsesSharedRedaction(t *testing.T) {
+	secret := "configured\nsecret"
+	for _, value := range []string{"prefix " + secret, `{"value":"configured\nsecret"}`, "safe"} {
+		if got, want := diagnosticValue(value, []string{secret}), diagnostics.Redact(value, []string{secret}); got != want {
+			t.Fatalf("diagnosticValue(%q) = %q, want %q", value, got, want)
+		}
 	}
 }
 

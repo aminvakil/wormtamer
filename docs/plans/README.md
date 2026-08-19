@@ -2,10 +2,6 @@
 
 Use a plan for substantial work that changes architecture, security boundaries, persistent state, public contracts, or several components. Routine fixes, contained implementation work, and documentation cleanup do not need permanent plan files.
 
-## Proposed
-
-- [Add diagnostic conversation and log views](add-diagnostic-content-views.md): show bounded process-local model conversations and structured logs without creating a durable private-content archive.
-
 ## KISS
 
 Every roadmap item follows the repository-wide [KISS rules](../../AGENTS.md#kiss). A plan defines direction, not an obligation to handle every conceivable condition. Before approval, narrow it to the smallest safe, complete outcome supported by current requirements and evidence. Risks and open questions do not expand implementation scope unless they block that outcome.

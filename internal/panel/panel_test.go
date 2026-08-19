@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
+	"github.com/aminvakil/wormtamer/internal/usage"
 )
 
 func TestTimeFormattersRejectUnsupportedTemplateValues(t *testing.T) {
@@ -299,6 +301,133 @@ func TestUsageAndGenerationViewsAreBoundedReadOnlyReports(t *testing.T) {
 	}
 }
 
+func TestDiagnosticConversationViewsAreBoundedEscapedAndCorrelated(t *testing.T) {
+	now := time.Now().UTC()
+	turn := 0
+	completed := now.Add(time.Second)
+	latency := int64(1000)
+	generation := store.GenerationRecord{
+		ID: 1, RequestKind: "review", ReviewJobID: 9, WorkflowAttempt: 2, ReviewTurn: &turn,
+		ConfiguredModel: "gemini-test", ResolvedModel: "resolved-test", RequestStartedAt: now,
+		CompletedAt: &completed, CompletionState: "response", LatencyMS: &latency,
+		FinishReason: "STOP", StructuredValidation: "valid", ProjectID: 42,
+		ProjectPath: "group/project", MergeRequestIID: 7,
+	}
+	storage := &fakeStore{generation: generation, reviewGenerations: []store.GenerationRecord{generation}}
+	recorder := diagnostics.New(true, []string{"configured-secret"})
+	observed := diagnostics.ObserveGenerations(&panelUsageRecorder{}, recorder)
+	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 9, Attempt: 2})
+	generationID, err := observed.Start(ctx, usage.GenerationStart{
+		Scope: usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: 9, Attempt: 2},
+		Turn:  &turn, ConfiguredModel: "gemini-test", StartedAt: now,
+	})
+	if err != nil || generationID != 1 {
+		t.Fatalf("generation start = %d, %v", generationID, err)
+	}
+	recorder.BeginConversation(ctx, diagnostics.ConversationStart{
+		GenerationID: generationID, ProjectID: 42, ProjectPath: "group/project", MergeRequestID: 7,
+		SystemInstruction: "system <b>plain</b>", Prompt: "configured-secret",
+	})
+	recorder.RecordModelTurn(ctx, diagnostics.ModelTurn{
+		GenerationID: generationID, ReviewTurn: &turn, Text: "response <script>alert(1)</script> **markdown**",
+	})
+	if err := observed.Complete(ctx, generationID, usage.GenerationCompletion{
+		State: usage.CompletionResponse, CompletedAt: completed, Latency: time.Second,
+		ResolvedModel: "resolved-test", FinishReason: "STOP", StructuredValidation: "valid",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandlerWithDiagnostics(t, storage, recorder)
+
+	list := request(t, handler, http.MethodGet, "/diagnostics/conversations?kind=review&project_id=42&merge_request_iid=7&generation_id=1")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "review conversation · attempt 2") ||
+		!strings.Contains(list.Body.String(), "Content captured") || !strings.Contains(list.Body.String(), "/reviews/9") {
+		t.Fatalf("conversation list status=%d body=%s", list.Code, list.Body.String())
+	}
+	detail := request(t, handler, http.MethodGet, "/diagnostics/conversations/1")
+	body := detail.Body.String()
+	if detail.Code != http.StatusOK || !strings.Contains(body, "system &lt;b&gt;plain&lt;/b&gt;") ||
+		!strings.Contains(body, "response &lt;script&gt;alert(1)&lt;/script&gt; **markdown**") ||
+		!strings.Contains(body, "[redacted sensitive content]") || strings.Contains(body, "<script>") ||
+		!strings.Contains(body, "Generation #1") || !strings.Contains(body, "/usage/1") {
+		t.Fatalf("conversation detail status=%d body=%s", detail.Code, body)
+	}
+	for _, target := range []string{
+		"/diagnostics/conversations?kind=other", "/diagnostics/conversations?project_id=0",
+		"/diagnostics/conversations?generation_id=1&generation_id=2",
+	} {
+		if response := request(t, handler, http.MethodGet, target); response.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status=%d", target, response.Code)
+		}
+	}
+	if response := request(t, handler, http.MethodPost, "/diagnostics/conversations"); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST conversations status=%d", response.Code)
+	}
+	assertPanelHeaders(t, detail)
+}
+
+func TestConversationCorrelationSplitsResetWorkflowAttemptNumbers(t *testing.T) {
+	turn0, turn1 := 0, 1
+	records := []store.GenerationRecord{
+		{ID: 4, RequestKind: "review", ReviewJobID: 9, WorkflowAttempt: 1, ReviewTurn: &turn1},
+		{ID: 3, RequestKind: "review", ReviewJobID: 9, WorkflowAttempt: 1, ReviewTurn: &turn0},
+		{ID: 2, RequestKind: "review", ReviewJobID: 9, WorkflowAttempt: 1, ReviewTurn: &turn1},
+		{ID: 1, RequestKind: "review", ReviewJobID: 9, WorkflowAttempt: 1, ReviewTurn: &turn0},
+	}
+	handler := &Handler{store: &fakeStore{reviewGenerations: records}}
+	for _, test := range []struct {
+		target int
+		want   []int64
+	}{
+		{target: 2, want: []int64{1, 2}},
+		{target: 0, want: []int64{3, 4}},
+	} {
+		got, err := handler.workflowAttemptGenerations(context.Background(), records[test.target], diagnostics.Conversation{}, false)
+		if err != nil || len(got) != len(test.want) {
+			t.Fatalf("target=%d generations=%+v error=%v", records[test.target].ID, got, err)
+		}
+		for index := range got {
+			if got[index].ID != test.want[index] {
+				t.Fatalf("target=%d generations=%+v want=%v", records[test.target].ID, got, test.want)
+			}
+		}
+	}
+}
+
+func TestDiagnosticLogsKeepContentInertAndSupportStructuredFilters(t *testing.T) {
+	storage := &fakeStore{}
+	recorder := diagnostics.New(true, nil)
+	logger := slog.New(diagnostics.NewTeeHandler(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}), recorder)).With(
+		"component", "review", "job_kind", "review", "project_id", int64(42),
+		"merge_request_iid", int64(7), "generation_id", int64(3),
+	)
+	logger.Info("hostile <img src=x> **markdown**", "source", "https://model.example/private")
+	logger.Debug("Gemini review prompt", "prompt", "private prompt content")
+	handler := newTestHandlerWithDiagnostics(t, storage, recorder)
+
+	response := request(t, handler, http.MethodGet, "/diagnostics/logs?level=info&component=review&kind=review&project_id=42&merge_request_iid=7&generation_id=3")
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "hostile &lt;img src=x&gt; **markdown**") ||
+		!strings.Contains(body, "https://model.example/private") || strings.Contains(body, `href="https://model.example/private"`) ||
+		!strings.Contains(body, "Generation #3") || !strings.Contains(body, "Buffer started") {
+		t.Fatalf("logs status=%d body=%s", response.Code, body)
+	}
+	all := request(t, handler, http.MethodGet, "/diagnostics/logs")
+	if strings.Contains(all.Body.String(), "private prompt content") || !strings.Contains(all.Body.String(), "see correlated conversation") {
+		t.Fatalf("content-bearing debug log was duplicated: %s", all.Body.String())
+	}
+	for _, target := range []string{
+		"/diagnostics/logs?level=trace", "/diagnostics/logs?before=0", "/diagnostics/logs?component=a&component=b",
+	} {
+		if invalid := request(t, handler, http.MethodGet, target); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status=%d", target, invalid.Code)
+		}
+	}
+	if post := request(t, handler, http.MethodPost, "/diagnostics/logs"); post.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST logs status=%d", post.Code)
+	}
+}
+
 func TestFeedbackDetailShowsGenerationHistory(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	storage := &fakeStore{feedbackDetail: store.FeedbackRecordDetail{
@@ -350,6 +479,11 @@ func TestPanelErrorsAreGenericAndStylesheetIsEmbedded(t *testing.T) {
 
 func newTestHandler(t *testing.T, storage Store) http.Handler {
 	t.Helper()
+	return newTestHandlerWithDiagnostics(t, storage, diagnostics.New(false, nil))
+}
+
+func newTestHandlerWithDiagnostics(t *testing.T, storage Store, diagnosticReader Diagnostics) http.Handler {
+	t.Helper()
 	handler, err := New(storage, Config{
 		GitLabBaseURL:  "http://gitlab.internal",
 		GeminiEndpoint: "http://gemini.internal",
@@ -358,7 +492,7 @@ func newTestHandler(t *testing.T, storage Store) http.Handler {
 		RepositorySharing:        map[string][]string{"group/project": {"group/shared"}},
 		AllowedPublicDomains:     []string{"github.com", "docs.example.com"},
 		PublicGitHubRepositories: []string{"owner/repository"},
-	}, slog.New(slog.DiscardHandler))
+	}, slog.New(slog.DiscardHandler), diagnosticReader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,12 +540,14 @@ type fakeStore struct {
 	feedbackDetailID  int64
 	feedbackDetailErr error
 
-	usageReport   store.UsageReport
-	usageQuery    store.UsageQuery
-	usageErr      error
-	generation    store.GenerationRecord
-	generationID  int64
-	generationErr error
+	usageReport         store.UsageReport
+	usageQuery          store.UsageQuery
+	usageErr            error
+	generation          store.GenerationRecord
+	generationID        int64
+	generationErr       error
+	reviewGenerations   []store.GenerationRecord
+	feedbackGenerations []store.GenerationRecord
 
 	memoryPage   store.MemoryRecordsPage
 	memoryBefore int64
@@ -453,7 +589,28 @@ func (s *fakeStore) GetGenerationRecord(_ context.Context, generationID int64) (
 	return s.generation, s.generationErr
 }
 
+func (s *fakeStore) ListReviewGenerations(_ context.Context, _ int64, _ int) ([]store.GenerationRecord, bool, error) {
+	return s.reviewGenerations, false, nil
+}
+
+func (s *fakeStore) ListFeedbackGenerations(_ context.Context, _ int64, _ int) ([]store.GenerationRecord, bool, error) {
+	return s.feedbackGenerations, false, nil
+}
+
 func (s *fakeStore) ListMemoryRecords(_ context.Context, before int64, limit int) (store.MemoryRecordsPage, error) {
 	s.memoryBefore, s.memoryLimit = before, limit
 	return s.memoryPage, nil
+}
+
+type panelUsageRecorder struct {
+	nextID int64
+}
+
+func (r *panelUsageRecorder) Start(_ context.Context, _ usage.GenerationStart) (int64, error) {
+	r.nextID++
+	return r.nextID, nil
+}
+
+func (r *panelUsageRecorder) Complete(_ context.Context, _ int64, _ usage.GenerationCompletion) error {
+	return nil
 }

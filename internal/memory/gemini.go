@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/review"
@@ -64,20 +65,21 @@ type Generator interface {
 }
 
 type Evaluator struct {
-	generator Generator
-	model     string
-	forbidden []string
-	logger    *slog.Logger
-	recorder  usage.GenerationRecorder
-	now       func() time.Time
-	since     func(time.Time) time.Duration
+	generator     Generator
+	model         string
+	forbidden     []string
+	logger        *slog.Logger
+	recorder      usage.GenerationRecorder
+	conversations diagnostics.ConversationRecorder
+	now           func() time.Time
+	since         func(time.Time) time.Duration
 }
 
 type sdkGenerator struct {
 	client *genai.Client
 }
 
-func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder) (*Evaluator, error) {
+func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder, conversations diagnostics.ConversationRecorder) (*Evaluator, error) {
 	httpClient := &http.Client{
 		Timeout: requestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -96,6 +98,7 @@ func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden 
 	}
 	evaluator := newEvaluator(&sdkGenerator{client: client}, model, forbidden, logger)
 	evaluator.recorder = recorder
+	evaluator.conversations = conversations
 	return evaluator, nil
 }
 
@@ -140,15 +143,22 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
 		"project_id", input.ProjectID,
 		"merge_request_iid", input.MergeRequestIID,
 		"head_sha", diagnosticValue(input.HeadSHA, e.forbidden))
-	if logger.Enabled(requestCtx, slog.LevelDebug) {
-		logger.DebugContext(requestCtx, "Gemini feedback prompt",
-			"system_instruction", diagnosticValue(systemInstruction, e.forbidden),
-			"prompt", diagnosticValue(prompt, e.forbidden))
-	}
 	requestStartedAt := e.now().UTC()
 	generationID, err := e.startGeneration(ctx, requestStartedAt)
 	if err != nil {
 		return Result{}, failure.Retry("persistence_failed", 0)
+	}
+	if e.conversations != nil {
+		e.conversations.BeginConversation(ctx, diagnostics.ConversationStart{
+			GenerationID: generationID, ProjectID: input.ProjectID, ProjectPath: input.ProjectPath,
+			MergeRequestID: input.MergeRequestIID, SystemInstruction: systemInstruction, Prompt: prompt,
+		})
+	}
+	if logger.Enabled(requestCtx, slog.LevelDebug) {
+		logger.DebugContext(requestCtx, "Gemini feedback prompt",
+			"generation_id", generationID,
+			"system_instruction", diagnosticValue(systemInstruction, e.forbidden),
+			"prompt", diagnosticValue(prompt, e.forbidden))
 	}
 	requestContents := []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)}
 	requestConfig := generationConfig()
@@ -176,13 +186,22 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
 		if completeErr := e.completeReturnedGeneration(ctx, generationID, generation, latency, true, "invalid"); completeErr != nil {
 			return Result{}, failure.Retry("persistence_failed", 0)
 		}
+		if e.conversations != nil {
+			e.conversations.RecordModelTurn(ctx, diagnostics.ModelTurn{GenerationID: generationID, Text: text})
+		}
 		return Result{}, err
 	}
 	if err := e.completeReturnedGeneration(ctx, generationID, generation, latency, true, "valid"); err != nil {
 		return Result{}, failure.Retry("persistence_failed", 0)
 	}
+	if e.conversations != nil {
+		e.conversations.RecordModelTurn(ctx, diagnostics.ModelTurn{GenerationID: generationID, Text: text})
+		if decision, encodeErr := json.Marshal(result); encodeErr == nil {
+			e.conversations.RecordDecision(ctx, generationID, string(decision))
+		}
+	}
 	if logger.Enabled(requestCtx, slog.LevelDebug) {
-		logger.DebugContext(requestCtx, "Gemini feedback response", "response", result)
+		logger.DebugContext(requestCtx, "Gemini feedback response", "generation_id", generationID, "response", result)
 	}
 	return result, nil
 }
@@ -233,19 +252,7 @@ func (e *Evaluator) completeReturnedGeneration(ctx context.Context, generationID
 }
 
 func diagnosticValue(value string, forbidden []string) string {
-	if containsForbidden([]string{value}, forbidden) {
-		return "[redacted sensitive content]"
-	}
-	for _, secret := range forbidden {
-		if secret == "" {
-			continue
-		}
-		escaped, err := json.Marshal(secret)
-		if err == nil && len(escaped) >= 2 && strings.Contains(value, string(escaped[1:len(escaped)-1])) {
-			return "[redacted sensitive content]"
-		}
-	}
-	return value
+	return diagnostics.Redact(value, forbidden)
 }
 
 func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (review.Generation, error) {

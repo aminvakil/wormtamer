@@ -14,7 +14,7 @@
 - Lets Gemini retrieve bounded public text from approved domains and exact configured GitHub repositories
 - Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
 - Persists webhook, job, patch-equivalence, result, publication, feedback, advisory-memory, and model-usage state in SQLite
-- Shows persisted review, feedback, runtime-memory, and model-usage state in a built-in read-only web panel
+- Shows persisted workflow state and bounded current-process conversations and logs in a built-in read-only web panel
 
 Wormtamer supports GitLab 17 and newer. Each deployment serves one team and runs as one process and one replica.
 
@@ -68,7 +68,7 @@ Close and merge events let Wormtamer evaluate the terminal diff, current comment
 
 ### 5. View the panel
 
-Open `https://wormtamer.example/` to inspect persisted review activity, findings, feedback processing, runtime memory, application-observed model usage, and non-secret effective configuration. The panel is read-only and does not probe external services while rendering. Panel access and request limiting are deployment concerns described in [Container deployment](docs/deployment.md).
+Open `https://wormtamer.example/` to inspect persisted review activity, findings, feedback processing, runtime memory, application-observed model usage, non-secret effective configuration, and bounded current-process diagnostics. Conversation content is available only at debug log level and may contain private source or unknown secrets. The panel is read-only and does not probe external services while rendering. Panel access and request limiting are deployment concerns described in [Container deployment](docs/deployment.md).
 
 See [Container deployment](docs/deployment.md) for complete configuration, webhook, permissions, TLS termination, health checking, shutdown, persistence, backup, and restore guidance.
 

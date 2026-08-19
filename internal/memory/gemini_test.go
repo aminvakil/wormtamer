@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/review"
@@ -35,7 +36,7 @@ func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
 	defer server.Close()
 
 	recorder := &fakeUsageRecorder{}
-	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil, recorder)
+	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil, recorder, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +86,15 @@ func TestEvaluatorModelContract(t *testing.T) {
 	}
 }
 
+func TestFeedbackDiagnosticValueUsesSharedRedaction(t *testing.T) {
+	secret := "configured\nsecret"
+	for _, value := range []string{"prefix " + secret, `{"value":"configured\nsecret"}`, "safe"} {
+		if got, want := diagnosticValue(value, []string{secret}), diagnostics.Redact(value, []string{secret}); got != want {
+			t.Fatalf("diagnosticValue(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
+
 func TestEvaluatorRejectsInvalidOrSensitiveEvidenceAndOutput(t *testing.T) {
 	for _, output := range []string{
 		`{"create_memory":true,"lesson":""}`,
@@ -124,6 +134,27 @@ func TestEvaluatorRecordsFeedbackGenerationMetadata(t *testing.T) {
 	if len(recorder.starts) != 1 || recorder.starts[0].FeedbackJobID != 91 || len(recorder.completions) != 1 ||
 		recorder.completions[0].StructuredValidation != "valid" || recorder.completions[0].ResolvedModel != "resolved-test" {
 		t.Fatalf("starts=%+v completions=%+v", recorder.starts, recorder.completions)
+	}
+}
+
+func TestEvaluatorRecordsReturnedContentAndValidatedDecision(t *testing.T) {
+	generator := &fakeGenerator{output: `{"create_memory":true,"lesson":"Use the schema source."}`}
+	usageRecorder := &fakeUsageRecorder{}
+	conversationRecorder := diagnostics.New(true, nil)
+	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
+	evaluator.recorder = diagnostics.ObserveGenerations(usageRecorder, conversationRecorder)
+	evaluator.conversations = conversationRecorder
+	ctx := usage.WithScope(context.Background(), usage.Scope{
+		RequestKind: usage.RequestFeedback, FeedbackJobID: 91, Attempt: 4,
+	})
+	if _, err := evaluator.Evaluate(ctx, testInput()); err != nil {
+		t.Fatal(err)
+	}
+	conversation, ok := conversationRecorder.ConversationByGeneration(1)
+	if !ok || conversation.FeedbackJobID != 91 || len(conversation.Events) != 2 ||
+		conversation.Events[0].Kind != "model" || !strings.Contains(conversation.Events[0].Text, "Use the schema source") ||
+		conversation.Events[1].Kind != "decision" || conversation.Events[1].Text != `{"create_memory":true,"lesson":"Use the schema source."}` {
+		t.Fatalf("feedback conversation = %+v, %v", conversation, ok)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aminvakil/wormtamer/internal/config"
+	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/feedback"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
@@ -58,11 +59,15 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		return err
 	}
 	logger = slog.New(logLevelHandler{Handler: logger.Handler(), level: configuredLogLevel(cfg.LogLevel)})
+	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
+	diagnosticRecorder := diagnostics.New(cfg.LogLevel == "debug", forbidden)
+	logger = slog.New(diagnostics.NewTeeHandler(logger.Handler(), diagnosticRecorder))
+	serviceLogger := logger.With("component", "service")
 	if cfg.LogLevel == "debug" {
-		logger.Warn("debug logging enabled; logs include private model prompts, responses, and tool content")
+		serviceLogger.Warn("debug logging enabled; logs include private model prompts, responses, and tool content")
 	}
 	if cfg.ConfigFileBroadlyRead {
-		logger.Warn("configuration file is readable by group or other users")
+		serviceLogger.Warn("configuration file is readable by group or other users")
 	}
 
 	storage, err := store.Open(ctx, cfg.DatabasePath)
@@ -76,14 +81,13 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err := storage.MarkStartedModelGenerationsUnknown(ctx); err != nil {
 		return err
 	}
-	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
 	var modelPricing *usage.Pricing
 	if cfg.Gemini.BaseURL == "" {
 		pricingCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 		modelPricing, err = usage.FetchGeminiPricing(pricingCtx, cfg.Gemini.Model)
 		cancel()
 		if err != nil {
-			logger.Warn("Gemini pricing unavailable; cost estimates disabled", "error", bounded(err.Error()))
+			serviceLogger.Warn("Gemini pricing unavailable; cost estimates disabled", "error", bounded(err.Error()))
 			modelPricing = nil
 		}
 	}
@@ -91,6 +95,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err != nil {
 		return err
 	}
+	generationRecorder := diagnostics.ObserveGenerations(usageRecorder, diagnosticRecorder)
 
 	webPanel, err := panel.New(storage, panel.Config{
 		GitLabBaseURL:                  cfg.GitLab.BaseURL,
@@ -103,7 +108,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		RepositorySharing:              cfg.RepositorySharing,
 		AllowedPublicDomains:           cfg.PublicSources.AllowedDomains,
 		PublicGitHubRepositories:       cfg.PublicSources.GitHubRepositories,
-	}, logger)
+	}, logger.With("component", "panel"), diagnosticRecorder)
 	if err != nil {
 		return err
 	}
@@ -118,7 +123,8 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err != nil {
 		return err
 	}
-	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden, logger, usageRecorder)
+	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden,
+		logger.With("component", "review", "job_kind", "review"), generationRecorder, diagnosticRecorder)
 	if err != nil {
 		return err
 	}
@@ -128,25 +134,26 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	}
 	reviewWorker, err := worker.New(storage, gitLabClient, publicClient,
 		cfg.PublicSources.AllowedDomains, cfg.PublicSources.GitHubRepositories,
-		workspaceManager, geminiReviewer, logger, forbidden)
+		workspaceManager, geminiReviewer, logger.With("component", "review_worker", "job_kind", "review"), forbidden)
 	if err != nil {
 		return err
 	}
-	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden, logger, usageRecorder)
+	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden,
+		logger.With("component", "feedback", "job_kind", "feedback"), generationRecorder, diagnosticRecorder)
 	if err != nil {
 		return err
 	}
-	feedbackWorker, err := feedback.New(storage, gitLabClient, memoryEvaluator, logger)
+	feedbackWorker, err := feedback.New(storage, gitLabClient, memoryEvaluator, logger.With("component", "feedback_worker", "job_kind", "feedback"))
 	if err != nil {
 		return err
 	}
-	reconciler := reconcile.New(storage, gitLabClient, cfg.GitLab.BaseURL, cfg.AuthorizedRepositories, logger)
+	reconciler := reconcile.New(storage, gitLabClient, cfg.GitLab.BaseURL, cfg.AuthorizedRepositories, logger.With("component", "reconciler"))
 
 	ingressHandler := webhook.New(webhook.Config{
 		GitLabInstance:         cfg.GitLab.BaseURL,
 		WebhookSecret:          cfg.GitLab.WebhookSecret,
 		AuthorizedRepositories: cfg.AuthorizedRepositories,
-	}, storage, logger)
+	}, storage, logger.With("component", "webhook"))
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           serviceRoutes(ingressHandler.Routes(), webPanel.Routes()),
@@ -155,14 +162,14 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
-		ErrorLog:          log.New(httpErrorWriter{logger: logger}, "", 0),
+		ErrorLog:          log.New(httpErrorWriter{logger: serviceLogger}, "", 0),
 	}
 
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("listen for HTTP traffic: %w", err)
 	}
-	logger.Info("HTTP server started", "listen_address", bounded(listener.Addr().String()))
+	serviceLogger.Info("HTTP server started", "listen_address", bounded(listener.Addr().String()))
 
 	serveErrors := make(chan error, 1)
 	go func() {
@@ -218,7 +225,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	case <-ctx.Done():
 	}
 
-	logger.Info("HTTP server shutting down")
+	serviceLogger.Info("HTTP server shutting down")
 	stopComponents()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -248,7 +255,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 			processError = fmt.Errorf("stop feedback worker: %w", err)
 		}
 	}
-	logger.Info("HTTP server stopped")
+	serviceLogger.Info("HTTP server stopped")
 	return processError
 }
 

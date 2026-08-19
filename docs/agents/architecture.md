@@ -75,6 +75,7 @@ GitLab -> webhook ingress -> SQLite review jobs -> review worker -> review agent
                          +-> SQLite feedback jobs -> feedback evaluator -> runtime memory
 Periodic reconciler -----+
 Read-only web panel ---------------------------------------> SQLite
+                   \----------------------------------------> process-local diagnostics buffers
 ```
 
 ### Webhook ingress
@@ -134,17 +135,27 @@ The SDK distinguishes a missing usage-metadata object but represents omitted num
 
 For direct Gemini Developer API use, startup retrieves the configured Gemini model's USD token rates from LiteLLM's bounded public pricing catalog; retrieval failure does not block review service and leaves costs unavailable. The catalog is application data, not model evidence or authority. Standard and above-200k rates are converted to integer picos and applied to consistent observed token categories. For a custom endpoint, Wormtamer does not assume upstream Gemini prices. It instead accepts LiteLLM's validated USD `x-litellm-response-cost` response header when present and otherwise leaves cost unavailable. Only the source category and resulting per-generation cost are persisted, so later catalog changes do not rewrite history.
 
+### Process-local diagnostics
+
+A concurrency-safe in-memory recorder observes enabled structured `slog` events and application-visible review and feedback conversations. It is additional to normal JSON stderr logging and performs no file, container, or external logging-service reads. Conversation content is captured only when `log_level` is `debug`; at other levels the recorder observes only generation metadata from the durable usage-recording path. One review conversation covers one workflow attempt and all of its generations; a feedback attempt has one generation. Any contained generation ID resolves to that conversation, with the first generation ID used for canonical navigation.
+
+Conversation buffering is limited to 64 records, 4 MiB per record, and 32 MiB total. Log buffering is limited to 2,000 events, 16 KiB per event, 8 MiB total, and 64 attributes per event. Logs evict the oldest event; conversations evict the oldest completed record before any record whose latest generation is still started. If an impossible all-active workload reaches a hard ceiling, the newest active conversation is omitted so the ceiling remains enforced. An individually oversized record retains bounded identity or event metadata with an explicit `limit_exceeded` marker rather than partial private content. Buffer start time and eviction counts remain visible, and every buffer resets on process restart.
+
+Known configured credentials are replaced using whole-value diagnostic redaction before content enters either buffer. This does not detect unknown secrets or remove private source. Conversation events contain the system instruction, initial prompt, accepted non-thought model turns and their declared function calls, admitted tool responses, fixed application denial responses, and validated feedback decisions in application-visible order. Thought text, thought signatures, and other SDK protocol data are excluded. Content-bearing stderr debug events are represented in the panel log buffer by a bounded reference to the correlated conversation rather than a duplicate prompt, argument, result, or response.
+
+Recorder operations perform only bounded memory work. Readers receive snapshots and do not hold the recorder lock while HTML is rendered. Recorder omission or eviction never changes durable generation checkpoints, workflow retries, tool dispatch, publication, feedback decisions, logging delivery, or shutdown.
+
 ### Reconciler
 
 The GitLab integration supports GitLab 17 and newer. The reconciler scans each authorized project immediately after startup and five minutes after each completed cycle. It lists bounded pages of open merge requests, skips drafts and work-in-progress entries as observed, and idempotently enqueues missing review identities. Scans have no durable cursor or schedule; restart repeats the scan safely.
 
 ### Read-only web panel
 
-The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, `GET /feedback/{job-id}`, `GET /memory`, `GET /usage`, and `GET /usage/{generation-id}`. It shows committed review and feedback job state, patch-ID availability, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, and an explicit non-secret configuration summary. Equivalent jobs link to their canonical review instead of presenting its result, findings, publication, or feedback synthesis as their own. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
+The built-in panel provides server-rendered HTML at `GET /`, with bounded history and detail views at `GET /reviews`, `GET /reviews/{job-id}`, `GET /feedback`, `GET /feedback/{job-id}`, `GET /memory`, `GET /usage`, `GET /usage/{generation-id}`, `GET /diagnostics/conversations`, `GET /diagnostics/conversations/{generation-id}`, and `GET /diagnostics/logs`. It shows committed review and feedback job state, patch-ID availability, validated review results and finding identities, publication status, memory-retrieval identities, feedback-derived memory, an explicit non-secret configuration summary, and current-process diagnostic buffers. Equivalent jobs link to their canonical review instead of presenting its result, findings, publication, or feedback synthesis as their own. A publication recovered externally without a local result is labeled external-only rather than reconstructed. A reconciled job without an associated webhook path is shown by numeric project ID.
 
 Usage reporting covers rolling 24-hour, 7-day, and 30-day windows with validated request-kind, configured-model, resolved-model, and numeric-project filters. It shows observed token-category totals, model, repository, and request-kind breakdowns, generation histories, and aggregate estimated cost in USD. It never presents an estimate as provider billing and does not expose per-generation cost, formulas, or pricing rates.
 
-Panel handlers query SQLite through fixed-size cursor pagination and bounded aggregate groups and do not make GitLab, Gemini, repository, or public-source requests. They expose no state-changing methods and cannot retry work, create reviews, or edit configuration or memory. The panel does not require presentation-only persistent state. Panel access and traffic controls deliberately remain at the deployment boundary described in [Security](security.md#read-only-web-panel).
+Durable panel handlers query SQLite through fixed-size cursor pagination and bounded aggregate groups. Diagnostic handlers read bounded in-memory snapshots and use SQLite only for correlated durable generation and workflow metadata. No panel handler makes GitLab, Gemini, repository, public-source, file, container, or external logging-service requests. The panel exposes no state-changing methods and cannot retry work, create reviews, change logging, delete or export diagnostics, or edit configuration or memory. It requires no presentation-only persistent state. Panel access and traffic controls deliberately remain at the deployment boundary described in [Security](security.md#read-only-web-panel).
 
 ## Context and State
 
