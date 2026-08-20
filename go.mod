@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/mattn/go-sqlite3 v1.14.49
 	golang.org/x/sys v0.47.0
-	google.golang.org/genai v1.67.0
+	google.golang.org/genai v1.68.0
 )
 
 require (
