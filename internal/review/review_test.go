@@ -233,7 +233,7 @@ func TestGeminiReviewerUsesConfiguredBaseURLAndRetriesRateLimit(t *testing.T) {
 			_, _ = response.Write([]byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`))
 			return
 		}
-		response.Header().Set("X-Litellm-Response-Cost", "0.000604")
+		response.Header().Set("X-Litellm-Response-Cost", "0.0035887500000000004")
 		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"proxied\",\"findings\":[]}"}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-proxy","usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,"toolUsePromptTokenCount":10,"candidatesTokenCount":30,"thoughtsTokenCount":5,"totalTokenCount":145}}`))
 	}))
 	defer server.Close()
@@ -255,7 +255,7 @@ func TestGeminiReviewerUsesConfiguredBaseURLAndRetriesRateLimit(t *testing.T) {
 		recorder.completions[0].Tokens.Prompt != 100 || recorder.completions[0].Tokens.Cached != 20 ||
 		recorder.completions[0].Tokens.ToolUsePrompt != 10 || recorder.completions[0].Tokens.Candidates != 30 ||
 		recorder.completions[0].Tokens.Thoughts != 5 || recorder.completions[0].Tokens.Total != 145 ||
-		recorder.completions[0].EndpointCostPicos == nil || *recorder.completions[0].EndpointCostPicos != 604_000_000 {
+		recorder.completions[0].EndpointCostPicos == nil || *recorder.completions[0].EndpointCostPicos != 3_588_750_000 {
 		t.Fatalf("SDK usage metadata = %+v", recorder.completions)
 	}
 }

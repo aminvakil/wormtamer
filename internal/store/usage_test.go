@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"net/http"
 	"testing"
 	"time"
 
@@ -82,39 +83,78 @@ FROM model_generations WHERE id = ?`, generationID).Scan(
 	}
 }
 
-func TestModelGenerationStoresEndpointCostWithoutUsageMetadata(t *testing.T) {
+func TestRoundedEndpointCostPersistsAndAggregates(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 	accepted, err := storage.AcceptEvent(context.Background(), readyEvent("usage-endpoint-cost"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	recorder, err := usage.NewRecorder(storage, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	turn := 0
 	started := time.Now().UTC()
-	generationID, err := storage.CreateModelGeneration(context.Background(), usage.GenerationStart{
+	generationID, err := recorder.Start(context.Background(), usage.GenerationStart{
 		Scope: usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: accepted.JobID, Attempt: 1},
 		Turn:  &turn, ConfiguredModel: "gemini-proxy", StartedAt: started,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cost := int64(123_000_000)
-	if err := storage.CompleteModelGeneration(context.Background(), generationID, usage.StoredCompletion{
-		GenerationCompletion: usage.GenerationCompletion{
-			State: usage.CompletionResponse, CompletedAt: started.Add(time.Second), StructuredValidation: "valid",
-		},
-		CostSource: usage.CostSourceEndpoint, EstimatedCostPicos: &cost,
+	headers := http.Header{}
+	headers.Set("X-Litellm-Response-Cost", "0.0049949999999999994")
+	cost := usage.LiteLLMResponseCostPicos(headers)
+	if err := recorder.Complete(context.Background(), generationID, usage.GenerationCompletion{
+		State: usage.CompletionResponse, CompletedAt: started.Add(time.Second), StructuredValidation: "valid",
+		EndpointCostPicos: cost,
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	unpricedID, err := recorder.Start(context.Background(), usage.GenerationStart{
+		Scope: usage.Scope{RequestKind: usage.RequestReview, ReviewJobID: accepted.JobID, Attempt: 1},
+		Turn:  &turn, ConfiguredModel: "gemini-proxy", StartedAt: started.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers.Set("X-Litellm-Response-Cost", "invalid")
+	if err := recorder.Complete(context.Background(), unpricedID, usage.GenerationCompletion{
+		State: usage.CompletionResponse, CompletedAt: started.Add(3 * time.Second), StructuredValidation: "valid",
+		EndpointCostPicos: usage.LiteLLMResponseCostPicos(headers),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	var source string
 	var storedCost int64
 	if err := storage.db.QueryRow(`SELECT cost_source, estimated_cost_picos FROM model_generations WHERE id = ?`, generationID).
 		Scan(&source, &storedCost); err != nil {
 		t.Fatal(err)
 	}
-	if source != usage.CostSourceEndpoint || storedCost != cost {
-		t.Fatalf("stored cost = %q %d", source, storedCost)
+	if source != usage.CostSourceEndpoint || cost == nil || storedCost != *cost || storedCost != 4_995_000_000 {
+		t.Fatalf("stored cost = %q %d (parsed %v)", source, storedCost, cost)
+	}
+	var unpricedSource sql.NullString
+	var unpricedCost sql.NullInt64
+	if err := storage.db.QueryRow(`SELECT cost_source, estimated_cost_picos FROM model_generations WHERE id = ?`, unpricedID).
+		Scan(&unpricedSource, &unpricedCost); err != nil {
+		t.Fatal(err)
+	}
+	if unpricedSource.Valid || unpricedCost.Valid {
+		t.Fatalf("unpriced response stored source=%+v cost=%+v", unpricedSource, unpricedCost)
+	}
+	report, err := storage.ReadUsageReport(context.Background(), UsageQuery{
+		Since: started.Add(-time.Hour), Until: started.Add(time.Hour), Limit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.GenerationCount != 2 || report.ResponseCount != 2 || report.PricedCount != 1 || report.NoCostDataCount != 1 ||
+		len(report.Costs) != 1 || report.Costs[0].EstimatedCostPicos != storedCost || report.Costs[0].GenerationCount != 1 {
+		t.Fatalf("usage report = %+v", report)
 	}
 }
 
@@ -191,11 +231,12 @@ func TestModelGenerationFailureAndInterruptionRemainExplicit(t *testing.T) {
 	for id, want := range map[int64]string{failedID: usage.CompletionFailed, unknownID: usage.CompletionUnknown} {
 		var state string
 		var completed sql.NullString
-		if err := storage.db.QueryRow(`SELECT completion_state, completed_at FROM model_generations WHERE id = ?`, id).Scan(&state, &completed); err != nil {
+		var cost sql.NullInt64
+		if err := storage.db.QueryRow(`SELECT completion_state, completed_at, estimated_cost_picos FROM model_generations WHERE id = ?`, id).Scan(&state, &completed, &cost); err != nil {
 			t.Fatal(err)
 		}
-		if state != want || (want == usage.CompletionUnknown && completed.Valid) {
-			t.Fatalf("generation %d state=%q completed=%+v, want %q", id, state, completed, want)
+		if state != want || cost.Valid || (want == usage.CompletionUnknown && completed.Valid) {
+			t.Fatalf("generation %d state=%q completed=%+v cost=%+v, want %q", id, state, completed, cost, want)
 		}
 	}
 }

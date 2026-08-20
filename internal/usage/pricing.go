@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -136,7 +137,7 @@ func LiteLLMResponseCostPicos(headers http.Header) *int64 {
 	if len(values) != 1 {
 		return nil
 	}
-	cost, ok := decimalPicos(values[0])
+	cost, ok := roundedDecimalPicos(values[0])
 	if !ok {
 		return nil
 	}
@@ -144,6 +145,14 @@ func LiteLLMResponseCostPicos(headers http.Header) *int64 {
 }
 
 func decimalPicos(value string) (int64, bool) {
+	return convertDecimalPicos(value, false)
+}
+
+func roundedDecimalPicos(value string) (int64, bool) {
+	return convertDecimalPicos(value, true)
+}
+
+func convertDecimalPicos(value string, round bool) (int64, bool) {
 	if value == "" || len(value) > 64 || strings.TrimSpace(value) != value || strings.HasPrefix(value, "+") || strings.HasPrefix(value, "-") {
 		return 0, false
 	}
@@ -184,18 +193,39 @@ func decimalPicos(value string) (int64, bool) {
 		return 0, true
 	}
 	scale := 12 + exponent - fractionDigits
+	roundUp := false
 	if scale < 0 {
 		remove := -scale
-		if remove >= len(digits) || strings.TrimRight(digits[len(digits)-remove:], "0") != "" {
-			return 0, false
+		if !round {
+			if remove >= len(digits) || strings.TrimRight(digits[len(digits)-remove:], "0") != "" {
+				return 0, false
+			}
+			digits = digits[:len(digits)-remove]
+		} else if remove > len(digits) {
+			digits = ""
+		} else {
+			cutoff := len(digits) - remove
+			roundUp = digits[cutoff] >= '5'
+			digits = digits[:cutoff]
 		}
-		digits = digits[:len(digits)-remove]
 		scale = 0
+	}
+	if digits == "" {
+		if roundUp {
+			return 1, true
+		}
+		return 0, true
 	}
 	if len(digits)+scale > 19 {
 		return 0, false
 	}
 	digits += strings.Repeat("0", scale)
 	parsed, err := strconv.ParseInt(digits, 10, 64)
-	return parsed, err == nil
+	if err != nil || (roundUp && parsed == math.MaxInt64) {
+		return 0, false
+	}
+	if roundUp {
+		parsed++
+	}
+	return parsed, true
 }

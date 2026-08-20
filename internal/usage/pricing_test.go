@@ -42,10 +42,11 @@ func TestFetchGeminiPricingUsesLiteLLMGeminiEntry(t *testing.T) {
 	}
 }
 
-func TestFetchGeminiPricingRejectsNonGeminiAndMissingRates(t *testing.T) {
+func TestFetchGeminiPricingRejectsInvalidMetadataAndRates(t *testing.T) {
 	for _, body := range []string{
 		`{"gemini/gemini-test":{"litellm_provider":"vertex_ai","mode":"chat","input_cost_per_token":1e-6,"output_cost_per_token":2e-6}}`,
 		`{"gemini/gemini-test":{"litellm_provider":"gemini","mode":"chat","input_cost_per_token":1e-6}}`,
+		`{"gemini/gemini-test":{"litellm_provider":"gemini","mode":"chat","input_cost_per_token":5e-13,"output_cost_per_token":2e-6}}`,
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 			_, _ = response.Write([]byte(body))
@@ -83,23 +84,48 @@ func TestLiteLLMResponseCostPicos(t *testing.T) {
 		{value: "0.000604", want: int64Pointer(604_000_000)},
 		{value: "2e-6", want: int64Pointer(2_000_000)},
 		{value: "0", want: int64Pointer(0)},
+		{value: "0.0035887500000000004", want: int64Pointer(3_588_750_000)},
+		{value: "0.0049949999999999994", want: int64Pointer(4_995_000_000)},
+		{value: "0.0000000000014999999999999999", want: int64Pointer(1)},
+		{value: "0.0000000000015", want: int64Pointer(2)},
+		{value: "0.0000000000015000000000000001", want: int64Pointer(2)},
+		{value: "0.0000000000005", want: int64Pointer(1)},
+		{value: "1e-100", want: int64Pointer(0)},
+		{value: "9223372.036854775807", want: int64Pointer(9_223_372_036_854_775_807)},
+		{value: "9223372.0368547758074", want: int64Pointer(9_223_372_036_854_775_807)},
+		{value: "9223372.0368547758075", want: nil},
+		{value: "9223372.036854775808", want: nil},
 		{value: "-1", want: nil},
-		{value: "0.0000000000001", want: nil},
 		{value: "not-a-cost", want: nil},
 		{value: "1e", want: nil},
 		{value: "1ee2", want: nil},
+		{value: "1e101", want: nil},
+		{value: "1e-101", want: nil},
 	}
 	for _, test := range tests {
 		headers := http.Header{}
 		headers.Set("X-Litellm-Response-Cost", test.value)
 		got := LiteLLMResponseCostPicos(headers)
 		if (got == nil) != (test.want == nil) || (got != nil && *got != *test.want) {
-			t.Errorf("LiteLLMResponseCostPicos(%q) = %v, want %v", test.value, got, test.want)
+			t.Errorf("LiteLLMResponseCostPicos(%q) = %v, want %v", test.value, pointerValue(got), pointerValue(test.want))
 		}
 	}
 	if got := LiteLLMResponseCostPicos(http.Header{}); got != nil {
 		t.Fatalf("missing cost = %d", *got)
 	}
+	repeated := http.Header{}
+	repeated.Add("X-Litellm-Response-Cost", "0.001")
+	repeated.Add("X-Litellm-Response-Cost", "0.002")
+	if got := LiteLLMResponseCostPicos(repeated); got != nil {
+		t.Fatalf("repeated cost = %d", *got)
+	}
+}
+
+func pointerValue(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func int64Pointer(value int64) *int64 {
