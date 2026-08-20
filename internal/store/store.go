@@ -15,6 +15,11 @@ import (
 
 const schemaVersion = 10
 
+var (
+	ErrUnsupportedSchemaVersion  = errors.New("database schema version is unsupported")
+	ErrNonemptyVersionZeroSchema = errors.New("version 0 database schema is not empty")
+)
+
 const (
 	OutcomeQueued                  = "queued"
 	OutcomeFeedbackQueued          = "feedback_queued"
@@ -184,484 +189,42 @@ func (s *Store) applySchema(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version > schemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
+	if version == schemaVersion {
+		return nil
+	}
+	if version != 0 {
+		return fmt.Errorf("%w: got version %d, expected version %d", ErrUnsupportedSchemaVersion, version, schemaVersion)
 	}
 
-	for version < schemaVersion {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin schema transaction: %w", err)
-		}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema initialization: %w", err)
+	}
+	defer tx.Rollback()
 
-		var migration string
-		switch version {
-		case 0:
-			migration = `
-CREATE TABLE webhook_events (
-    id INTEGER PRIMARY KEY,
-    delivery_id TEXT NOT NULL UNIQUE,
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    project_path TEXT NOT NULL,
-    merge_request_iid INTEGER NOT NULL,
-    head_sha TEXT NOT NULL,
-    action TEXT NOT NULL,
-    outcome TEXT NOT NULL,
-    payload_json BLOB NOT NULL CHECK(length(payload_json) <= 1048576),
-    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
+	var objectType, objectName string
+	err = tx.QueryRowContext(ctx, `
+SELECT type, name
+FROM sqlite_schema
+WHERE type IN ('table', 'index', 'view', 'trigger')
+  AND name NOT GLOB 'sqlite_*'
+ORDER BY name
+LIMIT 1`).Scan(&objectType, &objectName)
+	if err == nil {
+		return fmt.Errorf("%w: contains %s %q", ErrNonemptyVersionZeroSchema, objectType, objectName)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("inspect version 0 database schema: %w", err)
+	}
 
-CREATE TABLE review_jobs (
-    id INTEGER PRIMARY KEY,
-    source_event_id INTEGER NOT NULL REFERENCES webhook_events(id),
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    merge_request_iid INTEGER NOT NULL,
-    head_sha TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'queued',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
-);
-
-PRAGMA user_version = 1;
-`
-		case 1:
-			migration = `
-ALTER TABLE review_jobs ADD COLUMN lease_owner TEXT;
-ALTER TABLE review_jobs ADD COLUMN lease_expires_at TEXT;
-ALTER TABLE review_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE review_jobs ADD COLUMN started_at TEXT;
-ALTER TABLE review_jobs ADD COLUMN next_attempt_at TEXT;
-ALTER TABLE review_jobs ADD COLUMN last_error_category TEXT;
-ALTER TABLE review_jobs ADD COLUMN last_error_message TEXT;
-ALTER TABLE review_jobs ADD COLUMN updated_at TEXT;
-
-UPDATE review_jobs
-SET next_attempt_at = created_at, updated_at = created_at;
-
-CREATE INDEX review_jobs_due_idx
-ON review_jobs (state, next_attempt_at, lease_expires_at);
-
-CREATE TABLE review_results (
-    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
-    result_json BLOB NOT NULL CHECK(length(result_json) <= 65536),
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE publications (
-    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
-    marker TEXT NOT NULL UNIQUE CHECK(length(marker) <= 256),
-    gitlab_note_id INTEGER NOT NULL CHECK(gitlab_note_id > 0),
-    created_at TEXT NOT NULL
-);
-
-PRAGMA user_version = 2;
-`
-		case 2:
-			migration = `
-CREATE TABLE review_jobs_v3 (
-    id INTEGER PRIMARY KEY,
-    source_event_id INTEGER REFERENCES webhook_events(id),
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    merge_request_iid INTEGER NOT NULL,
-    head_sha TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'queued',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    lease_owner TEXT,
-    lease_expires_at TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    started_at TEXT,
-    next_attempt_at TEXT,
-    last_error_category TEXT,
-    last_error_message TEXT,
-    updated_at TEXT,
-    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
-);
-
-CREATE TABLE review_results_v3 (
-    job_id INTEGER PRIMARY KEY REFERENCES review_jobs_v3(id) ON DELETE CASCADE,
-    result_json BLOB NOT NULL CHECK(length(result_json) <= 65536),
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE publications_v3 (
-    job_id INTEGER PRIMARY KEY REFERENCES review_jobs_v3(id) ON DELETE CASCADE,
-    marker TEXT NOT NULL UNIQUE CHECK(length(marker) <= 256),
-    gitlab_note_id INTEGER NOT NULL CHECK(gitlab_note_id > 0),
-    created_at TEXT NOT NULL
-);
-
-INSERT INTO review_jobs_v3
-SELECT id, source_event_id, gitlab_instance, project_id, merge_request_iid,
-       head_sha, state, created_at, lease_owner, lease_expires_at, attempt_count,
-       started_at, next_attempt_at, last_error_category, last_error_message, updated_at
-FROM review_jobs;
-
-INSERT INTO review_results_v3 SELECT job_id, result_json, created_at FROM review_results;
-INSERT INTO publications_v3 SELECT job_id, marker, gitlab_note_id, created_at FROM publications;
-
-DROP TABLE review_results;
-DROP TABLE publications;
-DROP TABLE review_jobs;
-ALTER TABLE review_jobs_v3 RENAME TO review_jobs;
-ALTER TABLE review_results_v3 RENAME TO review_results;
-ALTER TABLE publications_v3 RENAME TO publications;
-
-CREATE INDEX review_jobs_due_idx
-ON review_jobs (state, next_attempt_at, lease_expires_at);
-
-PRAGMA user_version = 3;
-`
-		case 3:
-			migration = `
-CREATE TABLE review_findings (
-    finding_id TEXT PRIMARY KEY
-        CHECK(length(finding_id) = 31)
-        CHECK(substr(finding_id, 1, 5) = 'WT-F-')
-        CHECK(substr(finding_id, 6) NOT GLOB '*[^A-Z2-7]*'),
-    job_id INTEGER NOT NULL REFERENCES review_results(job_id) ON DELETE CASCADE,
-    finding_index INTEGER NOT NULL CHECK(finding_index >= 0 AND finding_index < 20),
-    UNIQUE (job_id, finding_index)
-);
-
-PRAGMA user_version = 4;
-`
-		case 4:
-			migration = `
-CREATE TABLE feedback_events (
-    id INTEGER PRIMARY KEY,
-    delivery_id TEXT NOT NULL UNIQUE,
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL CHECK(project_id > 0),
-    project_path TEXT NOT NULL,
-    merge_request_iid INTEGER NOT NULL CHECK(merge_request_iid > 0),
-    note_id INTEGER NOT NULL CHECK(note_id > 0),
-    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
-    action TEXT NOT NULL CHECK(action IN ('create', 'update')),
-    source_updated_at TEXT NOT NULL,
-    outcome TEXT NOT NULL,
-    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-CREATE TABLE feedback_jobs (
-    id INTEGER PRIMARY KEY,
-    source_event_id INTEGER NOT NULL REFERENCES feedback_events(id),
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL CHECK(project_id > 0),
-    project_path TEXT NOT NULL,
-    merge_request_iid INTEGER NOT NULL CHECK(merge_request_iid > 0),
-    note_id INTEGER NOT NULL CHECK(note_id > 0),
-    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
-    state TEXT NOT NULL DEFAULT 'queued',
-    lease_owner TEXT,
-    lease_expires_at TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT NOT NULL,
-    last_error_category TEXT,
-    updated_at TEXT NOT NULL,
-    next_source_check_at TEXT,
-    UNIQUE (gitlab_instance, project_id, note_id)
-);
-
-CREATE INDEX feedback_jobs_due_idx
-ON feedback_jobs (state, next_attempt_at, lease_expires_at);
-
-CREATE INDEX feedback_jobs_source_check_idx
-ON feedback_jobs (next_source_check_at, state);
-
-CREATE TABLE feedback_evaluations (
-    job_id INTEGER PRIMARY KEY REFERENCES feedback_jobs(id) ON DELETE CASCADE,
-    source_event_id INTEGER NOT NULL REFERENCES feedback_events(id),
-    actor_access_level INTEGER NOT NULL CHECK(actor_access_level >= 0 AND actor_access_level <= 50),
-    actor_role TEXT NOT NULL,
-    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
-    evaluated_at TEXT NOT NULL
-);
-
-CREATE TABLE review_memories (
-    memory_id TEXT PRIMARY KEY
-        CHECK(length(memory_id) = 31)
-        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
-        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
-    feedback_job_id INTEGER NOT NULL REFERENCES feedback_jobs(id) ON DELETE CASCADE,
-    finding_id TEXT NOT NULL REFERENCES review_findings(finding_id),
-    outcome TEXT NOT NULL CHECK(outcome IN ('supports_finding', 'rejects_finding', 'corrects_finding')),
-    confidence TEXT NOT NULL CHECK(confidence IN ('low', 'medium', 'high')),
-    lesson TEXT CHECK(lesson IS NULL OR (length(lesson) > 0 AND length(lesson) <= 4096)),
-    active INTEGER NOT NULL CHECK(active IN (0, 1)),
-    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
-    actor_access_level INTEGER NOT NULL CHECK(actor_access_level >= 0 AND actor_access_level <= 50),
-    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
-    updated_at TEXT NOT NULL,
-    UNIQUE (feedback_job_id, finding_id)
-);
-
-PRAGMA user_version = 5;
-`
-		case 5:
-			migration = `
-CREATE TABLE review_memory_retrievals (
-    job_id INTEGER NOT NULL REFERENCES review_results(job_id) ON DELETE CASCADE,
-    memory_id TEXT NOT NULL
-        CHECK(length(memory_id) = 31)
-        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
-        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
-    memory_updated_at TEXT NOT NULL,
-    retrieved_at TEXT NOT NULL,
-    PRIMARY KEY (job_id, memory_id, memory_updated_at)
-);
-
-PRAGMA user_version = 6;
-`
-		case 6:
-			migration = `
-ALTER TABLE feedback_jobs ADD COLUMN review_job_id INTEGER REFERENCES review_results(job_id);
-
-UPDATE feedback_jobs
-SET review_job_id = (
-    SELECT j.id
-    FROM review_jobs j
-    JOIN review_results r ON r.job_id = j.id
-    WHERE j.gitlab_instance = feedback_jobs.gitlab_instance
-      AND j.project_id = feedback_jobs.project_id
-      AND j.merge_request_iid = feedback_jobs.merge_request_iid
-      AND EXISTS (SELECT 1 FROM review_findings f WHERE f.job_id = j.id)
-    ORDER BY j.id DESC
-    LIMIT 1
-);
-
-CREATE TABLE review_memories_v7 (
-    memory_id TEXT PRIMARY KEY
-        CHECK(length(memory_id) = 31)
-        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
-        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
-    feedback_job_id INTEGER NOT NULL REFERENCES feedback_jobs(id) ON DELETE CASCADE,
-    target_type TEXT NOT NULL CHECK(target_type IN ('review', 'finding')),
-    target_id TEXT NOT NULL
-        CHECK(length(target_id) = 31)
-        CHECK(substr(target_id, 6) NOT GLOB '*[^A-Z2-7]*'),
-    finding_id TEXT REFERENCES review_findings(finding_id),
-    outcome TEXT NOT NULL CHECK(outcome IN (
-        'supports_review', 'rejects_review', 'corrects_review',
-        'supports_finding', 'rejects_finding', 'corrects_finding'
-    )),
-    confidence TEXT NOT NULL CHECK(confidence IN ('low', 'medium', 'high')),
-    lesson TEXT CHECK(lesson IS NULL OR (length(lesson) > 0 AND length(lesson) <= 4096)),
-    active INTEGER NOT NULL CHECK(active IN (0, 1)),
-    actor_id INTEGER NOT NULL CHECK(actor_id > 0),
-    actor_access_level INTEGER NOT NULL CHECK(actor_access_level >= 0 AND actor_access_level <= 50),
-    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
-    updated_at TEXT NOT NULL,
-    CHECK(
-        (target_type = 'finding' AND finding_id = target_id AND substr(target_id, 1, 5) = 'WT-F-') OR
-        (target_type = 'review' AND finding_id IS NULL AND substr(target_id, 1, 5) = 'WT-R-')
-    ),
-    UNIQUE (feedback_job_id, target_type, target_id)
-);
-
-INSERT INTO review_memories_v7 (
-    memory_id, feedback_job_id, target_type, target_id, finding_id, outcome,
-    confidence, lesson, active, actor_id, actor_access_level, source_url, updated_at
-)
-SELECT memory_id, feedback_job_id, 'finding', finding_id, finding_id, outcome,
-       confidence, lesson, active, actor_id, actor_access_level, source_url, updated_at
-FROM review_memories;
-
-DROP TABLE review_memories;
-ALTER TABLE review_memories_v7 RENAME TO review_memories;
-
-PRAGMA user_version = 7;
-`
-		case 7:
-			migration = `
-ALTER TABLE review_jobs ADD COLUMN patch_id_sha TEXT
-    CHECK(
-        patch_id_sha IS NULL OR (
-            length(patch_id_sha) IN (40, 64) AND
-            patch_id_sha = lower(patch_id_sha) AND
-            patch_id_sha NOT GLOB '*[^0-9a-f]*'
-        )
-    );
-ALTER TABLE review_jobs ADD COLUMN patch_id_status TEXT NOT NULL DEFAULT 'unknown'
-    CHECK(patch_id_status IN ('unknown', 'pending', 'available', 'unavailable'))
-    CHECK((patch_id_status = 'available') = (patch_id_sha IS NOT NULL));
-ALTER TABLE review_jobs ADD COLUMN equivalent_to_job_id INTEGER REFERENCES review_jobs(id)
-    CHECK(equivalent_to_job_id IS NULL OR equivalent_to_job_id != id)
-    CHECK(equivalent_to_job_id IS NULL OR patch_id_status = 'available');
-
-CREATE INDEX review_jobs_patch_id_idx
-ON review_jobs (
-    gitlab_instance, project_id, merge_request_iid,
-    patch_id_status, patch_id_sha, id DESC
-);
-
-PRAGMA user_version = 8;
-`
-		case 8:
-			migration = `
-CREATE TABLE model_generations (
-    id INTEGER PRIMARY KEY,
-    request_kind TEXT NOT NULL CHECK(request_kind IN ('review', 'feedback')),
-    review_job_id INTEGER REFERENCES review_jobs(id),
-    feedback_job_id INTEGER REFERENCES feedback_jobs(id),
-    workflow_attempt INTEGER NOT NULL CHECK(workflow_attempt > 0),
-    review_turn INTEGER CHECK(review_turn IS NULL OR (review_turn >= 0 AND review_turn <= 1000)),
-    configured_model TEXT NOT NULL CHECK(length(configured_model) > 0 AND length(configured_model) <= 256),
-    resolved_model TEXT CHECK(resolved_model IS NULL OR length(resolved_model) <= 256),
-    request_started_at TEXT NOT NULL,
-    completed_at TEXT,
-    completion_state TEXT NOT NULL CHECK(completion_state IN ('started', 'response', 'failed', 'unknown')),
-    latency_ms INTEGER CHECK(latency_ms IS NULL OR (latency_ms >= 0 AND latency_ms <= 86400000)),
-    finish_reason TEXT CHECK(finish_reason IS NULL OR length(finish_reason) <= 128),
-    structured_validation TEXT CHECK(structured_validation IS NULL OR length(structured_validation) <= 128),
-    tool_calls_available INTEGER NOT NULL DEFAULT 0 CHECK(tool_calls_available IN (0, 1)),
-    tool_call_count INTEGER CHECK(tool_call_count IS NULL OR (tool_call_count >= 0 AND tool_call_count <= 32768)),
-    tool_names_json BLOB CHECK(tool_names_json IS NULL OR length(tool_names_json) <= 65536),
-    final_only INTEGER NOT NULL CHECK(final_only IN (0, 1)),
-    usage_metadata_available INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_available IN (0, 1)),
-    usage_metadata_valid INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_valid IN (0, 1) AND usage_metadata_valid <= usage_metadata_available),
-    prompt_tokens INTEGER CHECK(prompt_tokens IS NULL OR (prompt_tokens >= 0 AND prompt_tokens <= 2147483647)),
-    cached_tokens INTEGER CHECK(cached_tokens IS NULL OR (cached_tokens >= 0 AND cached_tokens <= 2147483647)),
-    tool_use_prompt_tokens INTEGER CHECK(tool_use_prompt_tokens IS NULL OR (tool_use_prompt_tokens >= 0 AND tool_use_prompt_tokens <= 2147483647)),
-    candidate_tokens INTEGER CHECK(candidate_tokens IS NULL OR (candidate_tokens >= 0 AND candidate_tokens <= 2147483647)),
-    thought_tokens INTEGER CHECK(thought_tokens IS NULL OR (thought_tokens >= 0 AND thought_tokens <= 2147483647)),
-    total_tokens INTEGER CHECK(total_tokens IS NULL OR (total_tokens >= 0 AND total_tokens <= 2147483647)),
-    cost_source TEXT CHECK(cost_source IS NULL OR cost_source IN ('litellm_catalog', 'endpoint_response')),
-    estimated_cost_picos INTEGER CHECK(estimated_cost_picos IS NULL OR estimated_cost_picos >= 0),
-    CHECK(
-        (request_kind = 'review' AND review_job_id IS NOT NULL AND feedback_job_id IS NULL AND review_turn IS NOT NULL) OR
-        (request_kind = 'feedback' AND review_job_id IS NULL AND feedback_job_id IS NOT NULL AND review_turn IS NULL)
-    ),
-    CHECK(completion_state != 'started' OR completed_at IS NULL),
-    CHECK(usage_metadata_valid = 0 OR (
-        prompt_tokens IS NOT NULL AND prompt_tokens > 0 AND cached_tokens IS NOT NULL AND tool_use_prompt_tokens IS NOT NULL AND
-        candidate_tokens IS NOT NULL AND thought_tokens IS NOT NULL AND total_tokens IS NOT NULL AND total_tokens > 0 AND
-        cached_tokens <= prompt_tokens AND
-        total_tokens = prompt_tokens + tool_use_prompt_tokens + candidate_tokens + thought_tokens
-    )),
-    CHECK(estimated_cost_picos IS NULL OR cost_source IS NOT NULL),
-    CHECK(estimated_cost_picos IS NULL OR cost_source != 'litellm_catalog' OR usage_metadata_valid = 1)
-);
-
-CREATE INDEX model_generations_time_idx ON model_generations (request_started_at DESC, id DESC);
-CREATE INDEX model_generations_review_idx ON model_generations (review_job_id, id DESC);
-CREATE INDEX model_generations_feedback_idx ON model_generations (feedback_job_id, id DESC);
-
-PRAGMA user_version = 9;
-`
-		case 9:
-			migration = `
-CREATE TEMP TABLE review_model_generations_v9 AS
-SELECT * FROM model_generations WHERE request_kind = 'review';
-
-DROP TABLE model_generations;
-DROP TABLE review_memories;
-DROP TABLE feedback_evaluations;
-DROP TABLE feedback_jobs;
-DROP TABLE feedback_events;
-DELETE FROM review_memory_retrievals;
-
-CREATE TABLE feedback_jobs (
-    id INTEGER PRIMARY KEY,
-    source_event_id INTEGER NOT NULL UNIQUE REFERENCES webhook_events(id),
-    review_job_id INTEGER NOT NULL REFERENCES review_results(job_id),
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL CHECK(project_id > 0),
-    project_path TEXT NOT NULL,
-    merge_request_iid INTEGER NOT NULL CHECK(merge_request_iid > 0),
-    head_sha TEXT NOT NULL,
-    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('closed', 'merged')),
-    state TEXT NOT NULL DEFAULT 'queued',
-    lease_owner TEXT,
-    lease_expires_at TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT NOT NULL,
-    last_error_category TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (gitlab_instance, project_id, merge_request_iid)
-);
-
-CREATE INDEX feedback_jobs_due_idx
-ON feedback_jobs (state, next_attempt_at, lease_expires_at);
-
-CREATE TABLE review_memories (
-    memory_id TEXT PRIMARY KEY
-        CHECK(length(memory_id) = 31)
-        CHECK(substr(memory_id, 1, 5) = 'WT-M-')
-        CHECK(substr(memory_id, 6) NOT GLOB '*[^A-Z2-7]*'),
-    feedback_job_id INTEGER NOT NULL UNIQUE REFERENCES feedback_jobs(id) ON DELETE CASCADE,
-    lesson TEXT NOT NULL CHECK(length(lesson) > 0 AND length(lesson) <= 4096),
-    source_url TEXT NOT NULL CHECK(length(source_url) <= 2048),
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE model_generations (
-    id INTEGER PRIMARY KEY,
-    request_kind TEXT NOT NULL CHECK(request_kind IN ('review', 'feedback')),
-    review_job_id INTEGER REFERENCES review_jobs(id),
-    feedback_job_id INTEGER REFERENCES feedback_jobs(id),
-    workflow_attempt INTEGER NOT NULL CHECK(workflow_attempt > 0),
-    review_turn INTEGER CHECK(review_turn IS NULL OR (review_turn >= 0 AND review_turn <= 1000)),
-    configured_model TEXT NOT NULL CHECK(length(configured_model) > 0 AND length(configured_model) <= 256),
-    resolved_model TEXT CHECK(resolved_model IS NULL OR length(resolved_model) <= 256),
-    request_started_at TEXT NOT NULL,
-    completed_at TEXT,
-    completion_state TEXT NOT NULL CHECK(completion_state IN ('started', 'response', 'failed', 'unknown')),
-    latency_ms INTEGER CHECK(latency_ms IS NULL OR (latency_ms >= 0 AND latency_ms <= 86400000)),
-    finish_reason TEXT CHECK(finish_reason IS NULL OR length(finish_reason) <= 128),
-    structured_validation TEXT CHECK(structured_validation IS NULL OR length(structured_validation) <= 128),
-    tool_calls_available INTEGER NOT NULL DEFAULT 0 CHECK(tool_calls_available IN (0, 1)),
-    tool_call_count INTEGER CHECK(tool_call_count IS NULL OR (tool_call_count >= 0 AND tool_call_count <= 32768)),
-    tool_names_json BLOB CHECK(tool_names_json IS NULL OR length(tool_names_json) <= 65536),
-    final_only INTEGER NOT NULL CHECK(final_only IN (0, 1)),
-    usage_metadata_available INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_available IN (0, 1)),
-    usage_metadata_valid INTEGER NOT NULL DEFAULT 0 CHECK(usage_metadata_valid IN (0, 1) AND usage_metadata_valid <= usage_metadata_available),
-    prompt_tokens INTEGER CHECK(prompt_tokens IS NULL OR (prompt_tokens >= 0 AND prompt_tokens <= 2147483647)),
-    cached_tokens INTEGER CHECK(cached_tokens IS NULL OR (cached_tokens >= 0 AND cached_tokens <= 2147483647)),
-    tool_use_prompt_tokens INTEGER CHECK(tool_use_prompt_tokens IS NULL OR (tool_use_prompt_tokens >= 0 AND tool_use_prompt_tokens <= 2147483647)),
-    candidate_tokens INTEGER CHECK(candidate_tokens IS NULL OR (candidate_tokens >= 0 AND candidate_tokens <= 2147483647)),
-    thought_tokens INTEGER CHECK(thought_tokens IS NULL OR (thought_tokens >= 0 AND thought_tokens <= 2147483647)),
-    total_tokens INTEGER CHECK(total_tokens IS NULL OR (total_tokens >= 0 AND total_tokens <= 2147483647)),
-    cost_source TEXT CHECK(cost_source IS NULL OR cost_source IN ('litellm_catalog', 'endpoint_response')),
-    estimated_cost_picos INTEGER CHECK(estimated_cost_picos IS NULL OR estimated_cost_picos >= 0),
-    CHECK(
-        (request_kind = 'review' AND review_job_id IS NOT NULL AND feedback_job_id IS NULL AND review_turn IS NOT NULL) OR
-        (request_kind = 'feedback' AND review_job_id IS NULL AND feedback_job_id IS NOT NULL AND review_turn IS NULL)
-    ),
-    CHECK(completion_state != 'started' OR completed_at IS NULL),
-    CHECK(usage_metadata_valid = 0 OR (
-        prompt_tokens IS NOT NULL AND prompt_tokens > 0 AND cached_tokens IS NOT NULL AND tool_use_prompt_tokens IS NOT NULL AND
-        candidate_tokens IS NOT NULL AND thought_tokens IS NOT NULL AND total_tokens IS NOT NULL AND total_tokens > 0 AND
-        cached_tokens <= prompt_tokens AND
-        total_tokens = prompt_tokens + tool_use_prompt_tokens + candidate_tokens + thought_tokens
-    )),
-    CHECK(estimated_cost_picos IS NULL OR cost_source IS NOT NULL),
-    CHECK(estimated_cost_picos IS NULL OR cost_source != 'litellm_catalog' OR usage_metadata_valid = 1)
-);
-
-CREATE INDEX model_generations_time_idx ON model_generations (request_started_at DESC, id DESC);
-CREATE INDEX model_generations_review_idx ON model_generations (review_job_id, id DESC);
-CREATE INDEX model_generations_feedback_idx ON model_generations (feedback_job_id, id DESC);
-
-INSERT INTO model_generations SELECT * FROM review_model_generations_v9;
-DROP TABLE review_model_generations_v9;
-
-PRAGMA user_version = 10;
-`
-		}
-
-		if _, err := tx.ExecContext(ctx, migration); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("apply schema version %d: %w", version+1, err)
-		}
-		if err := tx.Commit(); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("commit schema version %d: %w", version+1, err)
-		}
-		version++
+	if _, err := tx.ExecContext(ctx, currentSchema); err != nil {
+		return fmt.Errorf("initialize database schema: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("set schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema initialization: %w", err)
 	}
 	return nil
 }

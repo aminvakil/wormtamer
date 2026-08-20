@@ -14,7 +14,7 @@ One installation runs as one process and replica because SQLite and local reposi
 - Gemini through `google.golang.org/genai`, using the Developer API directly or a configured Gemini Developer API-compatible endpoint, as the only model backend
 - A small explicit Gemini function-calling loop with no general agent framework or automatic tool execution
 
-A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite migrations advance sequentially through `PRAGMA user_version`. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
+A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite compatibility has a hard stop at [v0.28.0](https://github.com/aminvakil/wormtamer/releases/tag/v0.28.0); state created by earlier releases is unsupported. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
 
 ## Compatibility Baseline
 

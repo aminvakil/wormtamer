@@ -255,21 +255,86 @@ VALUES (999, 'http://gitlab.internal', 1, 1, 'abc', 'queued')`)
 	}
 }
 
-func TestOpenRejectsNewerSchema(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := storage.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion+1)); err != nil {
-		t.Fatal(err)
-	}
-	storage.Close()
+func TestOpenInitializesCurrentSchema(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
 
-	_, err = Open(ctx, path)
-	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
-		t.Fatalf("Open() error = %v", err)
+	var version int
+	if err := storage.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+
+	got := strings.Join(schemaObjects(t, storage.db), "\n")
+	want := strings.Join([]string{
+		"index feedback_jobs_due_idx",
+		"index model_generations_feedback_idx",
+		"index model_generations_review_idx",
+		"index model_generations_time_idx",
+		"index review_jobs_due_idx",
+		"index review_jobs_patch_id_idx",
+		"table feedback_jobs",
+		"table model_generations",
+		"table publications",
+		"table review_findings",
+		"table review_jobs",
+		"table review_memories",
+		"table review_memory_retrievals",
+		"table review_results",
+		"table webhook_events",
+	}, "\n")
+	if got != want {
+		t.Fatalf("schema objects:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOpenRejectsUnsupportedSchema(t *testing.T) {
+	for _, version := range []int{1, 9, schemaVersion + 1} {
+		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "wormtamer.db")
+			db, err := sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(fmt.Sprintf(`
+CREATE TABLE preserved (value TEXT NOT NULL);
+INSERT INTO preserved VALUES ('unchanged');
+PRAGMA user_version = %d;`, version)); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			before := strings.Join(schemaObjects(t, db), "\n")
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = Open(ctx, path)
+			if !errors.Is(err, ErrUnsupportedSchemaVersion) {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			db, err = sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var gotVersion int
+			var value string
+			if err := db.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT value FROM preserved`).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			after := strings.Join(schemaObjects(t, db), "\n")
+			if gotVersion != version || value != "unchanged" || after != before {
+				t.Fatalf("database changed: version=%d value=%q objects=%q, want version=%d value=unchanged objects=%q",
+					gotVersion, value, after, version, before)
+			}
+		})
 	}
 }
 
@@ -648,131 +713,55 @@ func TestRetryJobIsDueAndExhaustsAttempts(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesVersionOne(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	db, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
+func TestOpenRejectsNonemptyVersionZeroSchema(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{name: "unrelated table", sql: `CREATE TABLE unrelated (value TEXT)`},
+		{name: "partial application schema", sql: `CREATE TABLE webhook_events (id INTEGER PRIMARY KEY)`},
+		{name: "removed historical table", sql: `CREATE TABLE feedback_events (id INTEGER PRIMARY KEY)`},
+		{name: "index", sql: `CREATE TABLE indexed (value TEXT); CREATE INDEX unrelated_index ON indexed (value)`},
+		{name: "view", sql: `CREATE VIEW unrelated_view AS SELECT 1 AS value`},
+		{name: "trigger", sql: `
+CREATE TABLE triggered (value TEXT);
+CREATE TRIGGER unrelated_trigger AFTER INSERT ON triggered BEGIN SELECT 1; END`},
 	}
-	_, err = db.Exec(`
-CREATE TABLE webhook_events (id INTEGER PRIMARY KEY);
-CREATE TABLE review_jobs (
-    id INTEGER PRIMARY KEY,
-    source_event_id INTEGER NOT NULL REFERENCES webhook_events(id),
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    merge_request_iid INTEGER NOT NULL,
-    head_sha TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'queued',
-    created_at TEXT NOT NULL,
-    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
-);
-PRAGMA user_version = 1;`)
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wormtamer.db")
+			db, err := sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(test.sql); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			before := strings.Join(schemaObjects(t, db), "\n")
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	storage, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatalf("Open() migration error = %v", err)
-	}
-	defer storage.Close()
-	var version int
-	if err := storage.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != schemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
-	}
-	assertCount(t, storage.db, "review_results", 0)
-	assertCount(t, storage.db, "review_findings", 0)
-	assertCount(t, storage.db, "publications", 0)
-}
+			_, err = Open(context.Background(), path)
+			if !errors.Is(err, ErrNonemptyVersionZeroSchema) {
+				t.Fatalf("Open() error = %v", err)
+			}
 
-func TestOpenMigratesVersionTwoWithoutLosingWorkflowState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	db, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`
-CREATE TABLE webhook_events (
-    id INTEGER PRIMARY KEY,
-    delivery_id TEXT NOT NULL UNIQUE,
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    project_path TEXT NOT NULL,
-    merge_request_iid INTEGER NOT NULL,
-    head_sha TEXT NOT NULL,
-    action TEXT NOT NULL,
-    outcome TEXT NOT NULL,
-    payload_json BLOB NOT NULL,
-    received_at TEXT NOT NULL
-);
-CREATE TABLE review_jobs (
-    id INTEGER PRIMARY KEY,
-    source_event_id INTEGER NOT NULL REFERENCES webhook_events(id),
-    gitlab_instance TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    merge_request_iid INTEGER NOT NULL,
-    head_sha TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'queued',
-    created_at TEXT NOT NULL,
-    lease_owner TEXT,
-    lease_expires_at TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    started_at TEXT,
-    next_attempt_at TEXT,
-    last_error_category TEXT,
-    last_error_message TEXT,
-    updated_at TEXT,
-    UNIQUE (gitlab_instance, project_id, merge_request_iid, head_sha)
-);
-CREATE INDEX review_jobs_due_idx ON review_jobs (state, next_attempt_at, lease_expires_at);
-CREATE TABLE review_results (
-    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
-    result_json BLOB NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE publications (
-    job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
-    marker TEXT NOT NULL UNIQUE,
-    gitlab_note_id INTEGER NOT NULL,
-    created_at TEXT NOT NULL
-);
-INSERT INTO webhook_events VALUES (5, 'delivery', 'http://gitlab.internal', 42, 'group/project', 7, 'head', 'open', 'queued', '{}', 'created');
-INSERT INTO review_jobs VALUES (9, 5, 'http://gitlab.internal', 42, 7, 'head', 'completed', 'created', NULL, NULL, 2, 'started', 'next', NULL, NULL, 'updated');
-INSERT INTO review_results VALUES (9, '{"summary":"ok","findings":[]}', 'result-created');
-INSERT INTO publications VALUES (9, 'marker', 11, 'publication-created');
-PRAGMA user_version = 2;`)
-	if closeErr := db.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	storage, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatalf("Open() migration error = %v", err)
-	}
-	defer storage.Close()
-	var sourceEventID sql.NullInt64
-	var state, patchIDStatus string
-	if err := storage.db.QueryRow(`SELECT source_event_id, state, patch_id_status FROM review_jobs WHERE id = 9`).Scan(&sourceEventID, &state, &patchIDStatus); err != nil {
-		t.Fatal(err)
-	}
-	if !sourceEventID.Valid || sourceEventID.Int64 != 5 || state != JobCompleted || patchIDStatus != PatchIDUnknown {
-		t.Fatalf("migrated job source=%+v state=%q patch_status=%q", sourceEventID, state, patchIDStatus)
-	}
-	assertCount(t, storage.db, "review_results", 1)
-	assertCount(t, storage.db, "review_findings", 0)
-	assertCount(t, storage.db, "publications", 1)
-	if _, err := storage.CreateReconciledJob(context.Background(), ReconciledReview{
-		GitLabInstance: "http://gitlab.internal", ProjectID: 42, MergeRequestIID: 8, HeadSHA: "new-head",
-	}); err != nil {
-		t.Fatalf("CreateReconciledJob() after migration error = %v", err)
+			db, err = sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var version int
+			if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+				t.Fatal(err)
+			}
+			after := strings.Join(schemaObjects(t, db), "\n")
+			if version != 0 || after != before {
+				t.Fatalf("database changed: version=%d objects=%q, want version=0 objects=%q", version, after, before)
+			}
+		})
 	}
 }
 
@@ -805,6 +794,32 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatalf("Open() error = %v", err)
 	}
 	return storage
+}
+
+func schemaObjects(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`
+SELECT type, name
+FROM sqlite_schema
+WHERE type IN ('table', 'index', 'view', 'trigger')
+  AND name NOT GLOB 'sqlite_*'
+ORDER BY type, name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var objects []string
+	for rows.Next() {
+		var objectType, name string
+		if err := rows.Scan(&objectType, &name); err != nil {
+			t.Fatal(err)
+		}
+		objects = append(objects, objectType+" "+name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return objects
 }
 
 func assertCount(t *testing.T, db *sql.DB, table string, want int) {
