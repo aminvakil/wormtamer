@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -71,9 +72,7 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(server.URL+"/gitlab", token, []string{"group/project", "group/related"}, map[string][]string{
-		"group/project": {"group/related"},
-	}, server.Client())
+	client, err := New(server.URL+"/gitlab", token, []string{"group/project", "group/related"}, true, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +94,50 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	noteID, err = client.PostNote(context.Background(), identity, "summary\n"+marker)
 	if err != nil || noteID != 13 || posted != "summary\n"+marker {
 		t.Fatalf("PostNote() = %d, %v; body %q", noteID, err, posted)
+	}
+}
+
+func TestLoadReviewUsesAllOrNothingRepositorySharing(t *testing.T) {
+	tests := []struct {
+		name                   string
+		authorizedRepositories []string
+		shareAll               bool
+		want                   []string
+	}{
+		{name: "current repository only", authorizedRepositories: []string{"group/project", "group/zeta"}},
+		{name: "all authorized sorted once", authorizedRepositories: []string{"group/zeta", "group/project", "group/alpha", "group/zeta"}, shareAll: true, want: []string{"group/alpha", "group/zeta"}},
+		{name: "all authorized with only current", authorizedRepositories: []string{"group/project"}, shareAll: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v4/projects/42":
+					writeJSON(t, w, projectResponse{ID: 42, PathWithNamespace: "group/project"})
+				case "/api/v4/projects/42/merge_requests/7":
+					writeMergeRequest(t, w, "opened", testHead)
+				case "/api/v4/projects/42/merge_requests/7/diffs":
+					writeJSON(t, w, []diffResponse{{OldPath: "old.go", NewPath: "new.go", Diff: "+new"}})
+				case "/api/v4/projects/42/merge_requests/7/versions":
+					writeJSON(t, w, []diffVersionResponse{})
+				default:
+					t.Fatal("unexpected request: " + r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL, "token", test.authorizedRepositories, test.shareAll, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+			if err != nil {
+				t.Fatalf("LoadReview() error = %v", err)
+			}
+			if !slices.Equal(snapshot.RelatedRepositories, test.want) {
+				t.Fatalf("RelatedRepositories = %v, want %v", snapshot.RelatedRepositories, test.want)
+			}
+		})
 	}
 }
 
@@ -389,8 +432,11 @@ func TestAuthorizationAndMergeRequestState(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := newTestClient(t, server.URL, "token", server.Client())
-			err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
+			client, err := New(server.URL, "token", []string{"group/project", "group/related"}, true, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.CheckCurrent(context.Background(), testIdentity(server.URL))
 			assertFailure(t, err, test.category, false, test.obsolete)
 		})
 	}
@@ -509,7 +555,7 @@ func TestResponseAndInputLimitsFailClosed(t *testing.T) {
 		assertFailure(t, err, "note_body_limit_exceeded", false, false)
 	})
 
-	client, err := New("http://gitlab.internal", "token", []string{"group/project"}, nil, nil)
+	client, err := New("http://gitlab.internal", "token", []string{"group/project"}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +631,7 @@ func reviewServer(t *testing.T, diffs http.HandlerFunc) *httptest.Server {
 
 func newTestClient(t *testing.T, baseURL, token string, httpClient *http.Client) *Client {
 	t.Helper()
-	client, err := New(baseURL, token, []string{"group/project"}, nil, httpClient)
+	client, err := New(baseURL, token, []string{"group/project"}, false, httpClient)
 	if err != nil {
 		t.Fatal(err)
 	}

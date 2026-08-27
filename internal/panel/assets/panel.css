@@ -364,8 +364,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .config-grid { background: var(--border); }
 .plain-list { list-style: none; margin: 0; padding: 0; }
 .plain-list li { margin: .4rem 0; }
-.sharing-rule { border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; padding-top: .75rem; }
-.sharing-rule span, .muted { color: var(--muted); }
+.muted { color: var(--muted); }
 
 .audit-list { list-style: none; margin: 0; padding: 0; }
 .audit-record { background: var(--surface); border: 1px solid var(--border); display: grid; grid-template-columns: minmax(16rem, 1.3fr) repeat(2, minmax(12rem, 1fr)); }

@@ -9,7 +9,7 @@
 - Accepts authenticated GitLab merge request webhooks
 - Reconciles open merge requests periodically so missed webhooks do not lose reviews
 - Starts reviews with bounded merge request metadata and changed-file diffs
-- Prepares disposable Git working directories for the current repository and explicitly shared related repositories
+- Prepares disposable Git working directories for the current repository and, when enabled, every other authorized repository
 - Gives Gemini Pi-style `read` and unrestricted `bash` tools under a credential-free review identity
 - After an MR closes or merges, lets Gemini derive at most one repository-scoped advisory lesson from its diff, comments, and Wormtamer review
 - Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
@@ -24,7 +24,7 @@ Patch equivalence uses GitLab's whitespace-insensitive patch IDs. It can therefo
 
 Wormtamer does not require PostgreSQL, Redis, a queue service, multiple workers, or a control plane. Reviews run in disposable Git working directories with ordinary local `read` and `bash` capabilities. Credentials and SQLite state remain inaccessible to the dedicated review-tool identity; final validation and publication remain application-owned.
 
-Cross-repository preparation requires an explicit directional sharing rule. Runtime memory remains untrusted, repository-scoped advice. See the [security model](docs/agents/security.md) for the complete trust and authorization boundaries.
+Cross-repository preparation is all-or-nothing: reviews receive either no related private repositories or every other authorized repository. Runtime memory remains untrusted, repository-scoped advice. See the [security model](docs/agents/security.md) for the complete trust and authorization boundaries.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ Cross-repository preparation requires an explicit directional sharing rule. Runt
 
 ### 1. Configure
 
-Copy `config.example.json`, replace its placeholders, and set the authorized repositories. Optional directional sharing rules control which related private repositories are prepared for a review.
+Copy `config.example.json`, replace its placeholders, and set the authorized repositories. Leave `share_all_authorized_repositories` disabled unless every authorized repository has the same review audience.
 
     cp config.example.json config.json
 

@@ -66,8 +66,9 @@ func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
 		!strings.Contains(body, "Skip to content") || !strings.Contains(body, `aria-current="page"`) ||
 		!strings.Contains(body, "Review activity") || !strings.Contains(body, `data-tone="waiting" data-empty="false"><span>Waiting</span><strong>2</strong>`) ||
 		!strings.Contains(body, "No queued synthesis") || !strings.Contains(body, "group/project") ||
-		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "Review tools") ||
-		!strings.Contains(body, "<code>read</code>") || !strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "group/shared") {
+		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "Current repository only") ||
+		!strings.Contains(body, "Review tools") || !strings.Contains(body, "<code>read</code>") ||
+		!strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
 	}
 	for _, excluded := range []string{"gitlab-token", "gemini-key", "webhook-secret", "/private/wormtamer.db"} {
@@ -78,6 +79,23 @@ func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
 	assertPanelHeaders(t, response)
 	if storage.dashboardLimit != dashboardRecent {
 		t.Fatalf("dashboard limit = %d", storage.dashboardLimit)
+	}
+}
+
+func TestOverviewReportsAllAuthorizedRepositorySharing(t *testing.T) {
+	handler, err := New(&fakeStore{}, Config{
+		GitLabBaseURL:                  "http://gitlab.internal",
+		AuthorizedRepositories:         []string{"group/project", "group/shared"},
+		ShareAllAuthorizedRepositories: true,
+	}, slog.New(slog.DiscardHandler), diagnostics.New(false, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, handler.Routes(), http.MethodGet, "/")
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "All authorized repositories") ||
+		strings.Contains(body, "Current repository only") || strings.Contains(body, "Directional rules") {
+		t.Fatalf("overview status=%d body=%s", response.Code, body)
 	}
 }
 
@@ -489,7 +507,6 @@ func newTestHandlerWithDiagnostics(t *testing.T, storage Store, diagnosticReader
 		GeminiEndpoint: "http://gemini.internal",
 		GeminiModel:    "gemini-test", GeminiThinkingLevel: "high", LogLevel: "info",
 		AuthorizedRepositories: []string{"group/project", "group/shared"},
-		RepositorySharing:      map[string][]string{"group/project": {"group/shared"}},
 	}, slog.New(slog.DiscardHandler), diagnosticReader)
 	if err != nil {
 		t.Fatal(err)

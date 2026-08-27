@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -22,10 +21,7 @@ const validConfiguration = `{
     "api_key": "gemini-key",
     "model": "gemini-test"
   },
-  "authorized_repositories": ["group/project", "parent/team/project"],
-  "repository_sharing": {
-    "group/project": ["parent/team/project"]
-  }
+  "authorized_repositories": ["group/project", "parent/team/project"]
 }`
 
 func TestLoad(t *testing.T) {
@@ -58,9 +54,6 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.ShareAllAuthorizedRepositories {
 		t.Fatal("ShareAllAuthorizedRepositories = true when omitted")
-	}
-	if related := cfg.RepositorySharing["group/project"]; len(related) != 1 || related[0] != "parent/team/project" {
-		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
 	}
 }
 
@@ -99,11 +92,8 @@ func TestLoadPassesThroughGeminiThinkingLevel(t *testing.T) {
 func TestLoadShareAllAuthorizedRepositories(t *testing.T) {
 	contents := strings.Replace(validConfiguration,
 		`"authorized_repositories": ["group/project", "parent/team/project"]`,
-		`"authorized_repositories": ["group/project", "parent/team/project", "group/third"]`, 1)
-	contents = strings.Replace(contents, `"repository_sharing": {
-    "group/project": ["parent/team/project"]
-  }`, `"share_all_authorized_repositories": true,
-  "repository_sharing": {}`, 1)
+		`"authorized_repositories": ["group/project", "parent/team/project", "group/third"],
+  "share_all_authorized_repositories": true`, 1)
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
@@ -115,58 +105,6 @@ func TestLoadShareAllAuthorizedRepositories(t *testing.T) {
 	}
 	if !cfg.ShareAllAuthorizedRepositories {
 		t.Fatal("ShareAllAuthorizedRepositories = false")
-	}
-	want := map[string][]string{
-		"group/project":       {"parent/team/project", "group/third"},
-		"parent/team/project": {"group/project", "group/third"},
-		"group/third":         {"group/project", "parent/team/project"},
-	}
-	if len(cfg.RepositorySharing) != len(want) {
-		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
-	}
-	for target, related := range want {
-		if !slices.Equal(cfg.RepositorySharing[target], related) {
-			t.Errorf("RepositorySharing[%q] = %v, want %v", target, cfg.RepositorySharing[target], related)
-		}
-	}
-}
-
-func TestLoadShareAllWithOneRepository(t *testing.T) {
-	contents := strings.Replace(validConfiguration,
-		`"authorized_repositories": ["group/project", "parent/team/project"]`,
-		`"authorized_repositories": ["group/project"]`, 1)
-	contents = strings.Replace(contents, `"repository_sharing": {
-    "group/project": ["parent/team/project"]
-  }`, `"share_all_authorized_repositories": true`, 1)
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if len(cfg.RepositorySharing) != 0 {
-		t.Fatalf("RepositorySharing = %+v, want no related repositories", cfg.RepositorySharing)
-	}
-}
-
-func TestLoadExplicitFalsePreservesRepositorySharing(t *testing.T) {
-	contents := strings.Replace(validConfiguration, `"repository_sharing": {`,
-		`"share_all_authorized_repositories": false,
-  "repository_sharing": {`, 1)
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if related := cfg.RepositorySharing["group/project"]; !slices.Equal(related, []string{"parent/team/project"}) {
-		t.Fatalf("RepositorySharing = %+v", cfg.RepositorySharing)
 	}
 }
 
@@ -261,14 +199,9 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "long Gemini model", replace: `"gemini-test"`, with: `"` + strings.Repeat("m", 257) + `"`, want: "must not exceed 256 bytes"},
 		{name: "Gemini model control character", replace: `"gemini-test"`, with: `"gemini\ntest"`, want: "must not contain control characters"},
 		{name: "obsolete public sources", replace: `"authorized_repositories":`, with: `"public_sources": {}, "authorized_repositories":`, want: "unknown field"},
+		{name: "removed repository sharing", replace: `"authorized_repositories":`, with: `"repository_sharing": {}, "authorized_repositories":`, want: `unknown field "repository_sharing"`},
 		{name: "malformed repository", replace: `"group/project"`, with: `"group//project"`, want: "invalid authorized repository"},
 		{name: "duplicate repository", replace: `"parent/team/project"`, with: `"group/project"`, want: "duplicate authorized repository"},
-		{name: "unauthorized sharing target", replace: `"group/project": ["parent/team/project"]`, with: `"other/project": ["parent/team/project"]`, want: "sharing target"},
-		{name: "unauthorized shared repository", replace: `["parent/team/project"]`, with: `["other/project"]`, want: "shared repository"},
-		{name: "self sharing", replace: `["parent/team/project"]`, with: `["group/project"]`, want: "includes itself"},
-		{name: "duplicate shared repository", replace: `["parent/team/project"]`, with: `["parent/team/project", "parent/team/project"]`, want: "duplicate shared repository"},
-		{name: "empty sharing rule", replace: `["parent/team/project"]`, with: `[]`, want: "has no related repositories"},
-		{name: "share all with directional sharing", replace: `"repository_sharing": {`, with: `"share_all_authorized_repositories": true, "repository_sharing": {`, want: "cannot be true with non-empty repository_sharing"},
 	}
 
 	for _, test := range tests {

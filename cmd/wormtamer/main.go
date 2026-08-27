@@ -115,7 +115,6 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		LogLevel:                       cfg.LogLevel,
 		AuthorizedRepositories:         cfg.AuthorizedRepositories,
 		ShareAllAuthorizedRepositories: cfg.ShareAllAuthorizedRepositories,
-		RepositorySharing:              cfg.RepositorySharing,
 	}, logger.With("component", "panel"), diagnosticRecorder)
 	if err != nil {
 		return err
@@ -131,7 +130,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	}
 	defer workspaceManager.Close()
 
-	gitLabClient, err := gitlab.New(cfg.GitLab.BaseURL, cfg.GitLab.PersonalAccessToken, cfg.AuthorizedRepositories, cfg.RepositorySharing, nil)
+	gitLabClient, err := gitlab.New(cfg.GitLab.BaseURL, cfg.GitLab.PersonalAccessToken, cfg.AuthorizedRepositories, cfg.ShareAllAuthorizedRepositories, nil)
 	if err != nil {
 		return err
 	}

@@ -55,7 +55,6 @@ type Config struct {
 	LogLevel                       string
 	AuthorizedRepositories         []string
 	ShareAllAuthorizedRepositories bool
-	RepositorySharing              map[string][]string
 }
 
 type Handler struct {
@@ -77,12 +76,6 @@ type configView struct {
 	LogLevel               string
 	AuthorizedRepositories []string
 	SharingMode            string
-	RepositorySharing      []sharingView
-}
-
-type sharingView struct {
-	Repository string
-	Related    []string
 }
 
 type stateView struct {
@@ -873,18 +866,8 @@ func panelConfig(config Config) configView {
 	}
 	if config.ShareAllAuthorizedRepositories {
 		view.SharingMode = "All authorized repositories"
-		return view
-	}
-	view.SharingMode = "Directional rules"
-	for _, repository := range config.AuthorizedRepositories {
-		related := config.RepositorySharing[repository]
-		if len(related) == 0 {
-			continue
-		}
-		view.RepositorySharing = append(view.RepositorySharing, sharingView{
-			Repository: repository,
-			Related:    append([]string(nil), related...),
-		})
+	} else {
+		view.SharingMode = "Current repository only"
 	}
 	return view
 }

@@ -44,7 +44,7 @@ func TestScanQueuesReadyMergeRequestsIdempotently(t *testing.T) {
 
 	storage := openStore(t)
 	defer storage.Close()
-	client, err := gitlab.New(server.URL, "token", []string{"group/project"}, nil, server.Client())
+	client, err := gitlab.New(server.URL, "token", []string{"group/project"}, false, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestScanKeepsJobsFromPagesBeforeFailure(t *testing.T) {
 	defer server.Close()
 	storage := openStore(t)
 	defer storage.Close()
-	client, err := gitlab.New(server.URL, "token", []string{"group/project"}, nil, server.Client())
+	client, err := gitlab.New(server.URL, "token", []string{"group/project"}, false, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}

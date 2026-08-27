@@ -117,7 +117,7 @@ type Client struct {
 	baseURL    *url.URL
 	token      string
 	authorized map[string]struct{}
-	sharing    map[string]map[string]struct{}
+	shareAll   bool
 	httpClient *http.Client
 	now        func() time.Time
 	after      func(time.Duration) <-chan time.Time
@@ -188,7 +188,7 @@ type userResponse struct {
 	ID int64 `json:"id"`
 }
 
-func New(baseURL, token string, authorizedRepositories []string, repositorySharing map[string][]string, providedClient *http.Client) (*Client, error) {
+func New(baseURL, token string, authorizedRepositories []string, shareAll bool, providedClient *http.Client) (*Client, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("invalid GitLab base URL")
@@ -210,18 +210,11 @@ func New(baseURL, token string, authorizedRepositories []string, repositoryShari
 	for _, repository := range authorizedRepositories {
 		authorized[repository] = struct{}{}
 	}
-	sharing := make(map[string]map[string]struct{}, len(repositorySharing))
-	for target, relatedRepositories := range repositorySharing {
-		sharing[target] = make(map[string]struct{}, len(relatedRepositories))
-		for _, related := range relatedRepositories {
-			sharing[target][related] = struct{}{}
-		}
-	}
 	return &Client{
 		baseURL:    parsed,
 		token:      token,
 		authorized: authorized,
-		sharing:    sharing,
+		shareAll:   shareAll,
 		httpClient: httpClient,
 		now:        time.Now,
 		after:      time.After,
@@ -312,11 +305,16 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
-	relatedRepositories := make([]string, 0, len(c.sharing[projectPath]))
-	for repository := range c.sharing[projectPath] {
-		relatedRepositories = append(relatedRepositories, repository)
+	var relatedRepositories []string
+	if c.shareAll {
+		relatedRepositories = make([]string, 0, len(c.authorized))
+		for repository := range c.authorized {
+			if repository != projectPath {
+				relatedRepositories = append(relatedRepositories, repository)
+			}
+		}
+		sort.Strings(relatedRepositories)
 	}
-	sort.Strings(relatedRepositories)
 	return Snapshot{
 		Identity:            identity,
 		ProjectPath:         projectPath,
