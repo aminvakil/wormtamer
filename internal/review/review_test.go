@@ -1,14 +1,17 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/repository"
@@ -100,6 +103,55 @@ func TestGeminiReviewerDispatchesSameTurnCallsInOrder(t *testing.T) {
 	if len(responses) != 2 || responses[0].ID != "one" || responses[1].ID != "two" ||
 		responses[0].Response["output"] != "read-result" || responses[1].Response["output"] != "bash-result" {
 		t.Fatalf("function responses = %+v", responses)
+	}
+}
+
+func TestReviewDiagnosticsRespectLogLevelAndRedactCredentials(t *testing.T) {
+	secret := "configured\nsecret"
+	for _, test := range []struct {
+		name  string
+		level slog.Level
+		debug bool
+	}{
+		{name: "info", level: slog.LevelInfo},
+		{name: "debug", level: slog.LevelDebug, debug: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: test.level}))
+			generator := &fakeGenerator{generations: []Generation{
+				toolGeneration(&genai.FunctionCall{ID: secret, Name: repository.ToolRead, Args: map[string]any{"path": secret}}),
+				textGeneration(`{"summary":"diagnostic response","findings":[]}`),
+			}}
+			broker := &fakeToolBroker{result: repository.ToolResult{Response: map[string]any{"output": "private tool result"}}}
+			reviewer := newGeminiReviewer(generator, "gemini-test", []string{secret}, logger)
+			if _, _, err := reviewer.Review(context.Background(), testSnapshot(), broker); err != nil {
+				t.Fatal(err)
+			}
+			output := logs.String()
+			privateValues := []string{"+changed", "private tool result", "diagnostic response", "You review a GitLab merge request"}
+			if !test.debug {
+				for _, value := range privateValues {
+					if strings.Contains(output, value) {
+						t.Fatalf("info logs contain %q: %s", value, output)
+					}
+				}
+				if strings.Contains(output, `configured\nsecret`) {
+					t.Fatalf("info logs contain JSON-escaped credential: %s", output)
+				}
+				return
+			}
+			for _, value := range append(privateValues,
+				"Gemini review prompt", "Gemini review tool call", "Gemini review tool result", "Gemini review response",
+				diagnostics.RedactedSensitiveContent) {
+				if !strings.Contains(output, value) {
+					t.Fatalf("debug logs lack %q: %s", value, output)
+				}
+			}
+			if strings.Contains(output, `configured\nsecret`) {
+				t.Fatalf("debug logs contain JSON-escaped credential: %s", output)
+			}
+		})
 	}
 }
 

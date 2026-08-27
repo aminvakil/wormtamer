@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/aminvakil/wormtamer/internal/config"
-	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/feedback"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
@@ -66,8 +65,6 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	}
 	logger = slog.New(logLevelHandler{Handler: logger.Handler(), level: configuredLogLevel(cfg.LogLevel)})
 	forbidden := []string{cfg.GitLab.WebhookSecret, cfg.GitLab.PersonalAccessToken, cfg.Gemini.APIKey}
-	diagnosticRecorder := diagnostics.New(cfg.LogLevel == "debug", forbidden)
-	logger = slog.New(diagnostics.NewTeeHandler(logger.Handler(), diagnosticRecorder))
 	serviceLogger := logger.With("component", "service")
 	if cfg.LogLevel == "debug" {
 		serviceLogger.Warn("debug logging enabled; logs include private model prompts, responses, and tool content")
@@ -105,7 +102,6 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err != nil {
 		return err
 	}
-	generationRecorder := diagnostics.ObserveGenerations(usageRecorder, diagnosticRecorder)
 
 	webPanel, err := panel.New(storage, panel.Config{
 		GitLabBaseURL:                  cfg.GitLab.BaseURL,
@@ -115,7 +111,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		LogLevel:                       cfg.LogLevel,
 		AuthorizedRepositories:         cfg.AuthorizedRepositories,
 		ShareAllAuthorizedRepositories: cfg.ShareAllAuthorizedRepositories,
-	}, logger.With("component", "panel"), diagnosticRecorder)
+	}, logger.With("component", "panel"))
 	if err != nil {
 		return err
 	}
@@ -135,7 +131,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		return err
 	}
 	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden,
-		logger.With("component", "review", "job_kind", "review"), generationRecorder, diagnosticRecorder)
+		logger.With("component", "review", "job_kind", "review"), usageRecorder)
 	if err != nil {
 		return err
 	}
@@ -145,7 +141,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		return err
 	}
 	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden,
-		logger.With("component", "feedback", "job_kind", "feedback"), generationRecorder, diagnosticRecorder)
+		logger.With("component", "feedback", "job_kind", "feedback"), usageRecorder)
 	if err != nil {
 		return err
 	}

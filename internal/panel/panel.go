@@ -15,7 +15,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/store"
 )
 
@@ -36,15 +35,6 @@ type Store interface {
 	ListMemoryRecords(context.Context, int64, int) (store.MemoryRecordsPage, error)
 	ReadUsageReport(context.Context, store.UsageQuery) (store.UsageReport, error)
 	GetGenerationRecord(context.Context, int64) (store.GenerationRecord, error)
-	ListReviewGenerations(context.Context, int64, int) ([]store.GenerationRecord, bool, error)
-	ListFeedbackGenerations(context.Context, int64, int) ([]store.GenerationRecord, bool, error)
-}
-
-type Diagnostics interface {
-	State() diagnostics.BufferState
-	Conversations(diagnostics.ConversationFilter) diagnostics.ConversationSnapshot
-	ConversationByGeneration(int64) (diagnostics.Conversation, bool)
-	Logs(diagnostics.LogFilter, uint64, int) diagnostics.LogSnapshot
 }
 
 type Config struct {
@@ -58,14 +48,13 @@ type Config struct {
 }
 
 type Handler struct {
-	store       Store
-	logger      *slog.Logger
-	templates   *template.Template
-	css         []byte
-	config      configView
-	gitlabURL   *url.URL
-	diagnostics Diagnostics
-	now         func() time.Time
+	store     Store
+	logger    *slog.Logger
+	templates *template.Template
+	css       []byte
+	config    configView
+	gitlabURL *url.URL
+	now       func() time.Time
 }
 
 type configView struct {
@@ -208,61 +197,6 @@ type generationDetailPage struct {
 	Generation generationView
 }
 
-type conversationView struct {
-	Record                diagnostics.Conversation
-	Project               string
-	JobURL                string
-	CanonicalGenerationID int64
-	LatestGeneration      diagnostics.Generation
-	ContentStatus         string
-	ProjectFilterURL      string
-	MergeRequestFilterURL string
-}
-
-type conversationsPage struct {
-	Page            string
-	Title           string
-	State           diagnostics.BufferState
-	Filters         conversationFilters
-	KindLinks       []filterLink
-	ClearFiltersURL string
-	Records         []conversationView
-}
-
-type conversationDetailPage struct {
-	Page                string
-	Title               string
-	State               diagnostics.BufferState
-	RequestedGeneration store.GenerationRecord
-	Conversation        diagnostics.Conversation
-	Project             string
-	JobURL              string
-	ContentStatus       string
-	ContentMessage      string
-	NoCompletedResponse bool
-	Generations         []generationView
-}
-
-type logView struct {
-	Record                diagnostics.LogEvent
-	ComponentFilterURL    string
-	ProjectFilterURL      string
-	MergeRequestFilterURL string
-	GenerationFilterURL   string
-}
-
-type logsPage struct {
-	Page            string
-	Title           string
-	State           diagnostics.BufferState
-	Filters         logFilters
-	LevelLinks      []filterLink
-	KindLinks       []filterLink
-	ClearFiltersURL string
-	Records         []logView
-	NextURL         string
-}
-
 type memoryPage struct {
 	Page    string
 	Title   string
@@ -276,23 +210,6 @@ type filterLink struct {
 	Current bool
 }
 
-type conversationFilters struct {
-	JobKind        string
-	ProjectID      int64
-	MergeRequestID int64
-	GenerationID   int64
-}
-
-type logFilters struct {
-	Level          string
-	Component      string
-	JobKind        string
-	ProjectID      int64
-	MergeRequestID int64
-	GenerationID   int64
-	BeforeID       uint64
-}
-
 type usageFilters struct {
 	Window                   string
 	RequestKind              string
@@ -303,12 +220,9 @@ type usageFilters struct {
 	BeforeID                 int64
 }
 
-func New(storage Store, config Config, logger *slog.Logger, diagnosticReader Diagnostics) (*Handler, error) {
+func New(storage Store, config Config, logger *slog.Logger) (*Handler, error) {
 	if storage == nil {
 		return nil, errors.New("panel store is required")
-	}
-	if diagnosticReader == nil {
-		return nil, errors.New("panel diagnostics are required")
 	}
 	gitLabURL, err := url.Parse(config.GitLabBaseURL)
 	if err != nil || (gitLabURL.Scheme != "http" && gitLabURL.Scheme != "https") || gitLabURL.Host == "" {
@@ -337,7 +251,7 @@ func New(storage Store, config Config, logger *slog.Logger, diagnosticReader Dia
 	}
 	return &Handler{
 		store: storage, logger: logger, templates: templates, css: css,
-		config: panelConfig(config), gitlabURL: gitLabURL, diagnostics: diagnosticReader, now: time.Now,
+		config: panelConfig(config), gitlabURL: gitLabURL, now: time.Now,
 	}, nil
 }
 
@@ -351,9 +265,6 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /memory", h.memory)
 	mux.HandleFunc("GET /usage", h.usage)
 	mux.HandleFunc("GET /usage/{generationID}", h.generationDetail)
-	mux.HandleFunc("GET /diagnostics/conversations", h.conversations)
-	mux.HandleFunc("GET /diagnostics/conversations/{generationID}", h.conversationDetail)
-	mux.HandleFunc("GET /diagnostics/logs", h.logs)
 	mux.HandleFunc("GET /assets/panel.css", h.stylesheet)
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		setSecurityHeaders(w)
@@ -583,211 +494,6 @@ func (h *Handler) generationDetail(w http.ResponseWriter, request *http.Request)
 	h.render(w, "generation-detail", page)
 }
 
-func (h *Handler) conversations(w http.ResponseWriter, request *http.Request) {
-	filters, ok := parseConversationQuery(request.URL.Query())
-	if !ok {
-		h.badRequest(w)
-		return
-	}
-	snapshot := h.diagnostics.Conversations(diagnostics.ConversationFilter{
-		JobKind: filters.JobKind, ProjectID: filters.ProjectID,
-		MergeRequestID: filters.MergeRequestID, GenerationID: filters.GenerationID,
-	})
-	page := conversationsPage{
-		Page: "conversations", Title: "Model conversations · Wormtamer", State: snapshot.State, Filters: filters,
-		KindLinks: []filterLink{
-			{Label: "All conversations", URL: conversationFilterURL(withConversationKind(filters, "")), Current: filters.JobKind == ""},
-			{Label: "Reviews", URL: conversationFilterURL(withConversationKind(filters, "review")), Current: filters.JobKind == "review"},
-			{Label: "Feedback", URL: conversationFilterURL(withConversationKind(filters, "feedback")), Current: filters.JobKind == "feedback"},
-		},
-		ClearFiltersURL: "/diagnostics/conversations",
-	}
-	for _, conversation := range snapshot.Conversations {
-		if len(conversation.Generations) == 0 {
-			continue
-		}
-		view := conversationView{
-			Record: conversation, Project: projectLabel(conversation.ProjectPath, conversation.ProjectID),
-			CanonicalGenerationID: conversation.Generations[0].ID,
-			LatestGeneration:      conversation.Generations[len(conversation.Generations)-1],
-			ContentStatus:         conversationContentStatus(snapshot.State, conversation),
-		}
-		if conversation.ReviewJobID > 0 {
-			view.JobURL = "/reviews/" + strconv.FormatInt(conversation.ReviewJobID, 10)
-		} else if conversation.FeedbackJobID > 0 {
-			view.JobURL = "/feedback/" + strconv.FormatInt(conversation.FeedbackJobID, 10)
-		}
-		projectFilter := filters
-		projectFilter.ProjectID, projectFilter.GenerationID = conversation.ProjectID, 0
-		view.ProjectFilterURL = conversationFilterURL(projectFilter)
-		mergeRequestFilter := filters
-		mergeRequestFilter.MergeRequestID, mergeRequestFilter.GenerationID = conversation.MergeRequestID, 0
-		view.MergeRequestFilterURL = conversationFilterURL(mergeRequestFilter)
-		page.Records = append(page.Records, view)
-	}
-	h.render(w, "conversations", page)
-}
-
-func (h *Handler) conversationDetail(w http.ResponseWriter, request *http.Request) {
-	if request.URL.RawQuery != "" {
-		h.badRequest(w)
-		return
-	}
-	generationID, err := strconv.ParseInt(request.PathValue("generationID"), 10, 64)
-	if err != nil || generationID <= 0 {
-		h.badRequest(w)
-		return
-	}
-	generation, err := h.store.GetGenerationRecord(request.Context(), generationID)
-	if errors.Is(err, store.ErrGenerationRecordNotFound) {
-		h.writeError(w, http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		h.internalError(w, "conversation_detail")
-		return
-	}
-	conversation, found := h.diagnostics.ConversationByGeneration(generationID)
-	state := h.diagnostics.State()
-	generations, err := h.workflowAttemptGenerations(request.Context(), generation, conversation, found)
-	if err != nil {
-		h.internalError(w, "conversation_detail")
-		return
-	}
-	jobURL := ""
-	if generation.ReviewJobID > 0 {
-		jobURL = "/reviews/" + strconv.FormatInt(generation.ReviewJobID, 10)
-	} else if generation.FeedbackJobID > 0 {
-		jobURL = "/feedback/" + strconv.FormatInt(generation.FeedbackJobID, 10)
-	}
-	status, message := conversationDetailStatus(state, conversation, found, generation.RequestStartedAt)
-	page := conversationDetailPage{
-		Page: "conversations", Title: fmt.Sprintf("Conversation for generation #%d · Wormtamer", generation.ID),
-		State: state, RequestedGeneration: generation, Conversation: conversation,
-		Project: projectLabel(generation.ProjectPath, generation.ProjectID), JobURL: jobURL,
-		ContentStatus: status, ContentMessage: message,
-		NoCompletedResponse: generation.CompletionState != "response",
-		Generations:         h.generationViews(generations),
-	}
-	h.render(w, "conversation-detail", page)
-}
-
-func (h *Handler) workflowAttemptGenerations(ctx context.Context, generation store.GenerationRecord, conversation diagnostics.Conversation, found bool) ([]store.GenerationRecord, error) {
-	if found {
-		records := make([]store.GenerationRecord, 0, len(conversation.Generations))
-		for _, observed := range conversation.Generations {
-			if observed.ID == generation.ID {
-				records = append(records, generation)
-				continue
-			}
-			record, err := h.store.GetGenerationRecord(ctx, observed.ID)
-			if err != nil {
-				return nil, err
-			}
-			records = append(records, record)
-		}
-		return records, nil
-	}
-	var records []store.GenerationRecord
-	var err error
-	if generation.ReviewJobID > 0 {
-		records, _, err = h.store.ListReviewGenerations(ctx, generation.ReviewJobID, 100)
-	} else {
-		records, _, err = h.store.ListFeedbackGenerations(ctx, generation.FeedbackJobID, 100)
-	}
-	if err != nil {
-		return nil, err
-	}
-	ascending := make([]store.GenerationRecord, len(records))
-	for index := range records {
-		ascending[len(records)-1-index] = records[index]
-	}
-	target := -1
-	for index := range ascending {
-		if ascending[index].ID == generation.ID {
-			target = index
-			break
-		}
-	}
-	if target < 0 || generation.FeedbackJobID > 0 {
-		return []store.GenerationRecord{generation}, nil
-	}
-	start := target
-	for start > 0 && ascending[start].WorkflowAttempt == generation.WorkflowAttempt {
-		if ascending[start].ReviewTurn != nil && *ascending[start].ReviewTurn == 0 {
-			break
-		}
-		if ascending[start-1].WorkflowAttempt != generation.WorkflowAttempt {
-			break
-		}
-		start--
-	}
-	end := target + 1
-	for end < len(ascending) && ascending[end].WorkflowAttempt == generation.WorkflowAttempt {
-		if ascending[end].ReviewTurn != nil && *ascending[end].ReviewTurn == 0 {
-			break
-		}
-		end++
-	}
-	return ascending[start:end], nil
-}
-
-func (h *Handler) logs(w http.ResponseWriter, request *http.Request) {
-	filters, ok := parseLogQuery(request.URL.Query())
-	if !ok {
-		h.badRequest(w)
-		return
-	}
-	snapshot := h.diagnostics.Logs(diagnostics.LogFilter{
-		Level: filters.Level, Component: filters.Component, JobKind: filters.JobKind,
-		ProjectID: filters.ProjectID, MergeRequestID: filters.MergeRequestID, GenerationID: filters.GenerationID,
-	}, filters.BeforeID, pageSize)
-	page := logsPage{
-		Page: "logs", Title: "Application logs · Wormtamer", State: snapshot.State, Filters: filters,
-		LevelLinks: []filterLink{
-			{Label: "All levels", URL: logFilterURL(withLogLevel(filters, ""), 0), Current: filters.Level == ""},
-			{Label: "Debug", URL: logFilterURL(withLogLevel(filters, "debug"), 0), Current: filters.Level == "debug"},
-			{Label: "Info", URL: logFilterURL(withLogLevel(filters, "info"), 0), Current: filters.Level == "info"},
-			{Label: "Warn", URL: logFilterURL(withLogLevel(filters, "warn"), 0), Current: filters.Level == "warn"},
-			{Label: "Error", URL: logFilterURL(withLogLevel(filters, "error"), 0), Current: filters.Level == "error"},
-		},
-		KindLinks: []filterLink{
-			{Label: "All jobs", URL: logFilterURL(withLogKind(filters, ""), 0), Current: filters.JobKind == ""},
-			{Label: "Reviews", URL: logFilterURL(withLogKind(filters, "review"), 0), Current: filters.JobKind == "review"},
-			{Label: "Feedback", URL: logFilterURL(withLogKind(filters, "feedback"), 0), Current: filters.JobKind == "feedback"},
-		},
-		ClearFiltersURL: "/diagnostics/logs",
-	}
-	for _, event := range snapshot.Events {
-		view := logView{Record: event}
-		if event.Component != "" {
-			filtered := filters
-			filtered.Component, filtered.BeforeID = event.Component, 0
-			view.ComponentFilterURL = logFilterURL(filtered, 0)
-		}
-		if event.ProjectID > 0 {
-			filtered := filters
-			filtered.ProjectID, filtered.BeforeID = event.ProjectID, 0
-			view.ProjectFilterURL = logFilterURL(filtered, 0)
-		}
-		if event.MergeRequestID > 0 {
-			filtered := filters
-			filtered.MergeRequestID, filtered.BeforeID = event.MergeRequestID, 0
-			view.MergeRequestFilterURL = logFilterURL(filtered, 0)
-		}
-		if event.GenerationID > 0 {
-			filtered := filters
-			filtered.GenerationID, filtered.BeforeID = event.GenerationID, 0
-			view.GenerationFilterURL = logFilterURL(filtered, 0)
-		}
-		page.Records = append(page.Records, view)
-	}
-	if snapshot.NextBefore > 0 {
-		page.NextURL = logFilterURL(filters, snapshot.NextBefore)
-	}
-	h.render(w, "logs", page)
-}
-
 func (h *Handler) memory(w http.ResponseWriter, request *http.Request) {
 	before, ok := parseMemoryQuery(request.URL.Query())
 	if !ok {
@@ -922,38 +628,6 @@ func feedbackStates() []string {
 	return []string{store.FeedbackQueued, store.FeedbackRunning, store.FeedbackCompleted, store.FeedbackFailed}
 }
 
-func conversationContentStatus(state diagnostics.BufferState, conversation diagnostics.Conversation) string {
-	if conversation.ContentOmitted == diagnostics.ContentOmittedLimitExceeded {
-		return "Omitted · record limit exceeded"
-	}
-	if !state.ContentEnabled {
-		return "Metadata only · debug disabled"
-	}
-	if conversation.ContentCaptured {
-		return "Content captured"
-	}
-	return "Content unavailable"
-}
-
-func conversationDetailStatus(state diagnostics.BufferState, conversation diagnostics.Conversation, found bool, requestedAt time.Time) (string, string) {
-	if found && conversation.ContentOmitted == diagnostics.ContentOmittedLimitExceeded {
-		return "limit_exceeded", "Conversation content exceeded the fixed per-record limit. Only bounded identity and generation metadata were retained."
-	}
-	if found && conversation.ContentCaptured {
-		return "captured", "Debug diagnostic content is process-local and may contain private source, comments, memory, public content, model output, or unknown secrets."
-	}
-	if !found && requestedAt.Before(state.StartedAt) {
-		return "before_process_start", "This durable generation predates the current process. Diagnostic conversation content is not retained across restarts."
-	}
-	if !state.ContentEnabled {
-		return "debug_disabled", "Debug logging was disabled when this process started. Prompts, model content, tool arguments, and tool results were not captured."
-	}
-	if !found {
-		return "evicted", "This current-process conversation was evicted from the bounded buffer. Its durable generation metadata remains available."
-	}
-	return "unavailable", "No diagnostic content is available for this conversation. Absence is not evidence that no model activity occurred."
-}
-
 func stateLinks(path, current string, states []string) []filterLink {
 	links := []filterLink{{Label: "All", URL: path, Current: current == ""}}
 	for _, state := range states {
@@ -982,87 +656,6 @@ func parseMemoryQuery(values url.Values) (int64, bool) {
 		return 0, false
 	}
 	return parseBefore(values.Get("before"))
-}
-
-func parseConversationQuery(values url.Values) (conversationFilters, bool) {
-	if !onlyQueryKeys(values, "kind", "project_id", "merge_request_iid", "generation_id") {
-		return conversationFilters{}, false
-	}
-	for _, key := range []string{"kind", "project_id", "merge_request_iid", "generation_id"} {
-		if len(values[key]) > 1 {
-			return conversationFilters{}, false
-		}
-	}
-	filters := conversationFilters{JobKind: values.Get("kind")}
-	if filters.JobKind != "" && filters.JobKind != "review" && filters.JobKind != "feedback" {
-		return conversationFilters{}, false
-	}
-	var ok bool
-	if filters.ProjectID, ok = parseOptionalPositiveInt(values.Get("project_id")); !ok {
-		return conversationFilters{}, false
-	}
-	if filters.MergeRequestID, ok = parseOptionalPositiveInt(values.Get("merge_request_iid")); !ok {
-		return conversationFilters{}, false
-	}
-	if filters.GenerationID, ok = parseOptionalPositiveInt(values.Get("generation_id")); !ok {
-		return conversationFilters{}, false
-	}
-	return filters, true
-}
-
-func parseLogQuery(values url.Values) (logFilters, bool) {
-	if !onlyQueryKeys(values, "level", "component", "kind", "project_id", "merge_request_iid", "generation_id", "before") {
-		return logFilters{}, false
-	}
-	for _, key := range []string{"level", "component", "kind", "project_id", "merge_request_iid", "generation_id", "before"} {
-		if len(values[key]) > 1 {
-			return logFilters{}, false
-		}
-	}
-	filters := logFilters{Level: values.Get("level"), Component: values.Get("component"), JobKind: values.Get("kind")}
-	if filters.Level != "" && filters.Level != "debug" && filters.Level != "info" && filters.Level != "warn" && filters.Level != "error" ||
-		filters.JobKind != "" && filters.JobKind != "review" && filters.JobKind != "feedback" ||
-		!validDiagnosticFilterText(filters.Component) {
-		return logFilters{}, false
-	}
-	var ok bool
-	if filters.ProjectID, ok = parseOptionalPositiveInt(values.Get("project_id")); !ok {
-		return logFilters{}, false
-	}
-	if filters.MergeRequestID, ok = parseOptionalPositiveInt(values.Get("merge_request_iid")); !ok {
-		return logFilters{}, false
-	}
-	if filters.GenerationID, ok = parseOptionalPositiveInt(values.Get("generation_id")); !ok {
-		return logFilters{}, false
-	}
-	if value := values.Get("before"); value != "" {
-		parsed, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || parsed == 0 {
-			return logFilters{}, false
-		}
-		filters.BeforeID = parsed
-	}
-	return filters, true
-}
-
-func parseOptionalPositiveInt(value string) (int64, bool) {
-	if value == "" {
-		return 0, true
-	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	return parsed, err == nil && parsed > 0
-}
-
-func validDiagnosticFilterText(value string) bool {
-	if len(value) > 128 || !utf8.ValidString(value) {
-		return false
-	}
-	for _, character := range value {
-		if character < 0x20 || character == 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 func parseUsageQuery(values url.Values) (usageFilters, bool) {
@@ -1131,70 +724,6 @@ func withUsageWindow(filters usageFilters, window string) usageFilters {
 func withUsageKind(filters usageFilters, kind string) usageFilters {
 	filters.RequestKind, filters.BeforeID = kind, 0
 	return filters
-}
-
-func withConversationKind(filters conversationFilters, kind string) conversationFilters {
-	filters.JobKind = kind
-	return filters
-}
-
-func conversationFilterURL(filters conversationFilters) string {
-	values := url.Values{}
-	if filters.JobKind != "" {
-		values.Set("kind", filters.JobKind)
-	}
-	if filters.ProjectID > 0 {
-		values.Set("project_id", strconv.FormatInt(filters.ProjectID, 10))
-	}
-	if filters.MergeRequestID > 0 {
-		values.Set("merge_request_iid", strconv.FormatInt(filters.MergeRequestID, 10))
-	}
-	if filters.GenerationID > 0 {
-		values.Set("generation_id", strconv.FormatInt(filters.GenerationID, 10))
-	}
-	if len(values) == 0 {
-		return "/diagnostics/conversations"
-	}
-	return "/diagnostics/conversations?" + values.Encode()
-}
-
-func withLogLevel(filters logFilters, level string) logFilters {
-	filters.Level, filters.BeforeID = level, 0
-	return filters
-}
-
-func withLogKind(filters logFilters, kind string) logFilters {
-	filters.JobKind, filters.BeforeID = kind, 0
-	return filters
-}
-
-func logFilterURL(filters logFilters, before uint64) string {
-	values := url.Values{}
-	if filters.Level != "" {
-		values.Set("level", filters.Level)
-	}
-	if filters.Component != "" {
-		values.Set("component", filters.Component)
-	}
-	if filters.JobKind != "" {
-		values.Set("kind", filters.JobKind)
-	}
-	if filters.ProjectID > 0 {
-		values.Set("project_id", strconv.FormatInt(filters.ProjectID, 10))
-	}
-	if filters.MergeRequestID > 0 {
-		values.Set("merge_request_iid", strconv.FormatInt(filters.MergeRequestID, 10))
-	}
-	if filters.GenerationID > 0 {
-		values.Set("generation_id", strconv.FormatInt(filters.GenerationID, 10))
-	}
-	if before > 0 {
-		values.Set("before", strconv.FormatUint(before, 10))
-	}
-	if len(values) == 0 {
-		return "/diagnostics/logs"
-	}
-	return "/diagnostics/logs?" + values.Encode()
 }
 
 func usageFilterURL(filters usageFilters, before int64) string {

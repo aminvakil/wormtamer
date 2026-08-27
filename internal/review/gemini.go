@@ -68,7 +68,6 @@ type GeminiReviewer struct {
 	forbidden      []string
 	logger         *slog.Logger
 	recorder       usage.GenerationRecorder
-	conversations  diagnostics.ConversationRecorder
 	requestTimeout time.Duration
 	now            func() time.Time
 	since          func(time.Time) time.Duration
@@ -76,7 +75,7 @@ type GeminiReviewer struct {
 
 type sdkGenerator struct{ client *genai.Client }
 
-func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder, conversations diagnostics.ConversationRecorder) (*GeminiReviewer, error) {
+func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder) (*GeminiReviewer, error) {
 	httpClient := &http.Client{
 		Timeout:       geminiRequestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
@@ -94,7 +93,6 @@ func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLeve
 	reviewer := newGeminiReviewer(&sdkGenerator{client: client}, model, forbidden, logger)
 	reviewer.thinkingLevel = thinkingLevel
 	reviewer.recorder = recorder
-	reviewer.conversations = conversations
 	return reviewer, nil
 }
 
@@ -149,7 +147,6 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			return Result{}, nil, failure.Retry("persistence_failed", 0)
 		}
 		if turn == 0 {
-			r.beginConversation(ctx, generationID, snapshot, prompt)
 			if logger.Enabled(requestCtx, slog.LevelDebug) {
 				logger.DebugContext(requestCtx, "Gemini review prompt", "generation_id", generationID,
 					"system_instruction", diagnosticValue(systemInstruction, r.forbidden), "prompt", diagnosticValue(prompt, r.forbidden))
@@ -198,7 +195,6 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			if err := r.completeReturnedGeneration(ctx, generationID, generation, latency, true, nil, validation); err != nil {
 				return Result{}, nil, failure.Retry("persistence_failed", 0)
 			}
-			r.recordModelTurn(ctx, generationID, turn, text, nil)
 			if validationErr != nil {
 				return Result{}, nil, validationErr
 			}
@@ -231,19 +227,15 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 				return Result{}, nil, failure.Retry("model_requested_undeclared_tool", 0)
 			}
 		}
-		r.recordModelTurn(ctx, generationID, turn, "", calls)
 		if tools == nil {
 			return Result{}, nil, failure.Retry("review_tools_unavailable", 0)
 		}
 
 		responses := make([]*genai.Part, 0, len(calls))
-		diagnosticResponses := make([]diagnostics.ToolResponse, 0, len(calls))
 		exhausted := false
 		for _, call := range calls {
 			if exhausted {
-				part, diagnostic := limitResponse(call)
-				responses = append(responses, part)
-				diagnosticResponses = append(diagnosticResponses, diagnostic)
+				responses = append(responses, limitResponse(call))
 				continue
 			}
 			toolResult, callErr := tools.Call(requestCtx, call.Name, call.Args)
@@ -263,15 +255,12 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			}
 			if toolBytes+len(serialized) > maxToolResultBytes {
 				exhausted = true
-				part, diagnostic := limitResponse(call)
-				responses = append(responses, part)
-				diagnosticResponses = append(diagnosticResponses, diagnostic)
+				responses = append(responses, limitResponse(call))
 				continue
 			}
 			toolBytes += len(serialized)
 			responses = append(responses, &genai.Part{FunctionResponse: functionResponse})
 			diagnosticText := string(serializedResult)
-			diagnosticResponses = append(diagnosticResponses, diagnostics.ToolResponse{ID: call.ID, Name: call.Name, Response: diagnosticText})
 			logger.InfoContext(requestCtx, "Gemini review tool completed", "generation_id", generationID, "turn", turn,
 				"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256), "outcome", "completed")
 			if logger.Enabled(requestCtx, slog.LevelDebug) {
@@ -281,8 +270,6 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			}
 		}
 		contents = append(contents, genai.NewContentFromParts(responses, genai.RoleUser))
-		turnCopy := turn
-		r.recordToolResponses(ctx, generationID, &turnCopy, diagnosticResponses)
 		if exhausted {
 			finalOnly = true
 			logger.InfoContext(requestCtx, "Gemini review final-only mode entered", "generation_id", generationID, "turn", turn,
@@ -310,11 +297,9 @@ func functionResponse(call *genai.FunctionCall, result repository.ToolResult, fo
 	return &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.Response}, serializedResponse, nil
 }
 
-func limitResponse(call *genai.FunctionCall) (*genai.Part, diagnostics.ToolResponse) {
+func limitResponse(call *genai.FunctionCall) *genai.Part {
 	response := map[string]any{"error": "tool_result_limit_exceeded"}
-	return &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: response}}, diagnostics.ToolResponse{
-		ID: call.ID, Name: call.Name, Response: `{"error":"tool_result_limit_exceeded"}`, Denied: true,
-	}
+	return &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: response}}
 }
 
 func reviewContextError(parent, request context.Context) error {
@@ -370,37 +355,6 @@ func (r *GeminiReviewer) completeReturnedGeneration(ctx context.Context, generat
 			Thoughts: int64(generation.ThoughtsTokenCount), Total: int64(generation.TotalTokenCount),
 		},
 	})
-}
-
-func (r *GeminiReviewer) beginConversation(ctx context.Context, generationID int64, snapshot gitlab.Snapshot, prompt string) {
-	if r.conversations != nil {
-		r.conversations.BeginConversation(ctx, diagnostics.ConversationStart{
-			GenerationID: generationID, ProjectID: snapshot.Identity.ProjectID, ProjectPath: snapshot.ProjectPath,
-			MergeRequestID: snapshot.Identity.MergeRequestIID, SystemInstruction: systemInstruction, Prompt: prompt,
-		})
-	}
-}
-
-func (r *GeminiReviewer) recordModelTurn(ctx context.Context, generationID int64, turn int, text string, calls []*genai.FunctionCall) {
-	if r.conversations == nil {
-		return
-	}
-	recordedCalls := make([]diagnostics.FunctionCall, len(calls))
-	for index, call := range calls {
-		arguments, err := json.Marshal(call.Args)
-		if err != nil {
-			arguments = []byte("[unencodable diagnostic content]")
-		}
-		recordedCalls[index] = diagnostics.FunctionCall{ID: call.ID, Name: call.Name, Arguments: string(arguments)}
-	}
-	turnCopy := turn
-	r.conversations.RecordModelTurn(ctx, diagnostics.ModelTurn{GenerationID: generationID, ReviewTurn: &turnCopy, Text: text, Calls: recordedCalls})
-}
-
-func (r *GeminiReviewer) recordToolResponses(ctx context.Context, generationID int64, turn *int, responses []diagnostics.ToolResponse) {
-	if r.conversations != nil {
-		r.conversations.RecordToolResponses(ctx, generationID, turn, responses)
-	}
 }
 
 func diagnosticJSON(value any, forbidden []string, limit int) string {

@@ -65,21 +65,20 @@ type Generator interface {
 }
 
 type Evaluator struct {
-	generator     Generator
-	model         string
-	forbidden     []string
-	logger        *slog.Logger
-	recorder      usage.GenerationRecorder
-	conversations diagnostics.ConversationRecorder
-	now           func() time.Time
-	since         func(time.Time) time.Duration
+	generator Generator
+	model     string
+	forbidden []string
+	logger    *slog.Logger
+	recorder  usage.GenerationRecorder
+	now       func() time.Time
+	since     func(time.Time) time.Duration
 }
 
 type sdkGenerator struct {
 	client *genai.Client
 }
 
-func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder, conversations diagnostics.ConversationRecorder) (*Evaluator, error) {
+func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder) (*Evaluator, error) {
 	httpClient := &http.Client{
 		Timeout: requestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -98,7 +97,6 @@ func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden 
 	}
 	evaluator := newEvaluator(&sdkGenerator{client: client}, model, forbidden, logger)
 	evaluator.recorder = recorder
-	evaluator.conversations = conversations
 	return evaluator, nil
 }
 
@@ -148,12 +146,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
 	if err != nil {
 		return Result{}, failure.Retry("persistence_failed", 0)
 	}
-	if e.conversations != nil {
-		e.conversations.BeginConversation(ctx, diagnostics.ConversationStart{
-			GenerationID: generationID, ProjectID: input.ProjectID, ProjectPath: input.ProjectPath,
-			MergeRequestID: input.MergeRequestIID, SystemInstruction: systemInstruction, Prompt: prompt,
-		})
-	}
 	if logger.Enabled(requestCtx, slog.LevelDebug) {
 		logger.DebugContext(requestCtx, "Gemini feedback prompt",
 			"generation_id", generationID,
@@ -186,19 +178,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
 		if completeErr := e.completeReturnedGeneration(ctx, generationID, generation, latency, true, "invalid"); completeErr != nil {
 			return Result{}, failure.Retry("persistence_failed", 0)
 		}
-		if e.conversations != nil {
-			e.conversations.RecordModelTurn(ctx, diagnostics.ModelTurn{GenerationID: generationID, Text: text})
-		}
 		return Result{}, err
 	}
 	if err := e.completeReturnedGeneration(ctx, generationID, generation, latency, true, "valid"); err != nil {
 		return Result{}, failure.Retry("persistence_failed", 0)
-	}
-	if e.conversations != nil {
-		e.conversations.RecordModelTurn(ctx, diagnostics.ModelTurn{GenerationID: generationID, Text: text})
-		if decision, encodeErr := json.Marshal(result); encodeErr == nil {
-			e.conversations.RecordDecision(ctx, generationID, string(decision))
-		}
 	}
 	if logger.Enabled(requestCtx, slog.LevelDebug) {
 		logger.DebugContext(requestCtx, "Gemini feedback response", "generation_id", generationID, "response", result)

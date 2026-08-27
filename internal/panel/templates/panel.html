@@ -16,8 +16,6 @@
       <a class="nav-link {{if eq .Page "reviews"}}current{{end}}" {{if eq .Page "reviews"}}aria-current="page"{{end}} href="/reviews">Reviews</a>
       <a class="nav-link {{if eq .Page "feedback"}}current{{end}}" {{if eq .Page "feedback"}}aria-current="page"{{end}} href="/feedback">Feedback</a>
       <a class="nav-link {{if eq .Page "usage"}}current{{end}}" {{if eq .Page "usage"}}aria-current="page"{{end}} href="/usage">Usage</a>
-      <a class="nav-link {{if eq .Page "conversations"}}current{{end}}" {{if eq .Page "conversations"}}aria-current="page"{{end}} href="/diagnostics/conversations">Conversations</a>
-      <a class="nav-link {{if eq .Page "logs"}}current{{end}}" {{if eq .Page "logs"}}aria-current="page"{{end}} href="/diagnostics/logs">Logs</a>
       <a class="nav-link {{if eq .Page "memory"}}current{{end}}" {{if eq .Page "memory"}}aria-current="page"{{end}} href="/memory">Memory</a>
     </nav>
   </div>
@@ -104,7 +102,7 @@
   {{range .}}<li>
     <article class="record-row generation-grid" aria-labelledby="generation-link-{{.Record.ID}}">
       <div class="record-primary">
-        <div class="record-reference"><a id="generation-link-{{.Record.ID}}" href="/usage/{{.Record.ID}}">Generation #{{.Record.ID}}</a><a href="/diagnostics/conversations/{{.Record.ID}}">Conversation</a><code>{{.Record.RequestKind}}</code></div>
+        <div class="record-reference"><a id="generation-link-{{.Record.ID}}" href="/usage/{{.Record.ID}}">Generation #{{.Record.ID}}</a><code>{{.Record.RequestKind}}</code></div>
         <strong class="record-project">{{.Project}}</strong>
         <div class="record-meta"><span>MR !{{.Record.MergeRequestIID}}</span></div>
       </div>
