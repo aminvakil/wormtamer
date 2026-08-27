@@ -48,11 +48,6 @@ func TestLoadReviewAndPublication(t *testing.T) {
 				ID: 9, HeadCommitSHA: testHead, MergeRequestID: 8,
 				State: "collected", PatchIDSHA: &patchID,
 			}})
-		case "/gitlab/api/v4/projects/42/repository/archive.tar.gz":
-			if r.URL.Query().Get("sha") != testHead || r.Header.Get("Accept") != "application/octet-stream" {
-				t.Errorf("archive request query=%q accept=%q", r.URL.RawQuery, r.Header.Get("Accept"))
-			}
-			_, _ = io.WriteString(w, "archive-at-reviewed-head")
 		case "/gitlab/api/v4/projects/42/merge_requests/7/notes":
 			if r.Method == http.MethodGet {
 				if r.URL.Query().Get("order_by") != "created_at" || r.URL.Query().Get("sort") != "desc" {
@@ -89,10 +84,6 @@ func TestLoadReviewAndPublication(t *testing.T) {
 	}
 	if snapshot.ProjectPath != "group/project" || len(snapshot.RelatedRepositories) != 1 || snapshot.RelatedRepositories[0] != "group/related" || snapshot.Title != "Review title" || snapshot.PatchIDStatus != PatchIDAvailable || snapshot.PatchIDSHA != strings.Repeat("a", 40) || len(snapshot.Files) != 1 || snapshot.Files[0].NewPath != "new.go" {
 		t.Fatalf("snapshot = %+v", snapshot)
-	}
-	archive, err := client.LoadRepositoryArchive(context.Background(), identity)
-	if err != nil || string(archive) != "archive-at-reviewed-head" {
-		t.Fatalf("LoadRepositoryArchive() = %q, %v", archive, err)
 	}
 	if err := client.CheckCurrent(context.Background(), identity); err != nil {
 		t.Fatalf("CheckCurrent() error = %v", err)
@@ -217,100 +208,6 @@ func TestLoadFeedbackRequiresCurrentTerminalState(t *testing.T) {
 		Identity: testIdentity(server.URL), ProjectPath: "group/project",
 	})
 	assertFailure(t, err, "merge_request_not_terminal", true, false)
-}
-
-func TestLoadRelatedRepositoryArchivePinsDefaultBranchHead(t *testing.T) {
-	const relatedHead = "abcdef0123456789abcdef0123456789abcdef01"
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		switch r.URL.Path {
-		case "/api/v4/projects/group/related":
-			if !strings.Contains(r.URL.EscapedPath(), "group%2Frelated") {
-				t.Errorf("escaped project path = %q", r.URL.EscapedPath())
-			}
-			writeJSON(t, w, projectResponse{ID: 84, PathWithNamespace: "group/related", DefaultBranch: "release/main"})
-		case "/api/v4/projects/84/repository/branches/release/main":
-			if !strings.Contains(r.URL.EscapedPath(), "release%2Fmain") {
-				t.Errorf("escaped branch path = %q", r.URL.EscapedPath())
-			}
-			branch := branchResponse{Name: "release/main"}
-			branch.Commit.ID = strings.ToUpper(relatedHead)
-			writeJSON(t, w, branch)
-		case "/api/v4/projects/84/repository/archive.tar.gz":
-			if r.URL.Query().Get("sha") != relatedHead {
-				t.Errorf("archive revision = %q", r.URL.Query().Get("sha"))
-			}
-			_, _ = io.WriteString(w, "related-archive")
-		default:
-			t.Fatal("unexpected request: " + r.URL.String())
-		}
-	}))
-	defer server.Close()
-	client, err := New(server.URL, "token", []string{"group/project", "group/related"}, map[string][]string{
-		"group/project": {"group/related"},
-	}, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	revision, archive, err := client.LoadRelatedRepositoryArchive(context.Background(), "group/project", "group/related")
-	if err != nil || revision != relatedHead || string(archive) != "related-archive" {
-		t.Fatalf("LoadRelatedRepositoryArchive() = %q, %q, %v", revision, archive, err)
-	}
-	if requests != 3 {
-		t.Fatalf("requests = %d, want 3", requests)
-	}
-}
-
-func TestLoadRelatedRepositoryArchiveRejectsUnsharedWithoutRequest(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("unshared repository reached GitLab")
-	}))
-	defer server.Close()
-	client, err := New(server.URL, "token", []string{"group/project", "group/related"}, nil, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = client.LoadRelatedRepositoryArchive(context.Background(), "group/project", "group/related")
-	assertFailure(t, err, "repository_unavailable", false, false)
-}
-
-func TestLoadRelatedRepositoryArchiveFailsClosedForRenamedOrInaccessibleRepository(t *testing.T) {
-	tests := []struct {
-		name     string
-		status   int
-		path     string
-		category string
-	}{
-		{name: "renamed", path: "group/renamed", category: "repository_unauthorized"},
-		{name: "inaccessible", status: http.StatusNotFound, category: "gitlab_authorization_failed"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			requests := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests++
-				if test.status != 0 {
-					w.WriteHeader(test.status)
-					return
-				}
-				writeJSON(t, w, projectResponse{ID: 84, PathWithNamespace: test.path, DefaultBranch: "main"})
-			}))
-			defer server.Close()
-			client, err := New(server.URL, "token", []string{"group/project", "group/related"}, map[string][]string{
-				"group/project": {"group/related"},
-			}, server.Client())
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, _, err = client.LoadRelatedRepositoryArchive(context.Background(), "group/project", "group/related")
-			assertFailure(t, err, test.category, false, false)
-			if requests != 1 {
-				t.Fatalf("requests = %d, want 1", requests)
-			}
-		})
-	}
 }
 
 func TestFindNoteIgnoresMarkerFromAnotherAuthor(t *testing.T) {
@@ -575,16 +472,6 @@ func TestResponseAndInputLimitsFailClosed(t *testing.T) {
 		client := newTestClient(t, server.URL, "token", server.Client())
 		err := client.CheckCurrent(context.Background(), testIdentity(server.URL))
 		assertFailure(t, err, "gitlab_response_limit_exceeded", false, false)
-	})
-
-	t.Run("archive response", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.WriteString(w, "12345")
-		}))
-		defer server.Close()
-		client := newTestClient(t, server.URL, "token", server.Client())
-		_, err := client.download(context.Background(), "/archive", nil, 4)
-		assertFailure(t, err, "repository_archive_response_limit_exceeded", false, false)
 	})
 
 	t.Run("diff content", func(t *testing.T) {

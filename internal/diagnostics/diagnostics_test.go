@@ -34,10 +34,10 @@ func TestConversationRecorderKeepsOrderedRedactedContentAndUsageMetadata(t *test
 		MergeRequestID: 7, SystemInstruction: "system", Prompt: `prompt configured-secret`,
 	})
 	recorder.RecordModelTurn(ctx, ModelTurn{GenerationID: generationID, ReviewTurn: &turn, Calls: []FunctionCall{{
-		ID: "call-1", Name: "read_repository_file", Arguments: `{"path":"README.md"}`,
+		ID: "call-1", Name: "read", Arguments: `{"path":"README.md"}`,
 	}}})
 	recorder.RecordToolResponses(ctx, generationID, &turn, []ToolResponse{{
-		ID: "call-1", Name: "read_repository_file", Response: `{"content":"safe"}`,
+		ID: "call-1", Name: "read", Response: `{"content":"safe"}`,
 	}})
 	completed := started.Add(time.Second)
 	if err := observed.Complete(ctx, generationID, usage.GenerationCompletion{

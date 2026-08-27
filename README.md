@@ -9,9 +9,9 @@
 - Accepts authenticated GitLab merge request webhooks
 - Reconciles open merge requests periodically so missed webhooks do not lose reviews
 - Starts reviews with bounded merge request metadata and changed-file diffs
-- Lets Gemini inspect bounded text snapshots from the current repository and explicitly shared related repositories
+- Prepares disposable Git working directories for the current repository and explicitly shared related repositories
+- Gives Gemini Pi-style `read` and unrestricted `bash` tools under a credential-free review identity
 - After an MR closes or merges, lets Gemini derive at most one repository-scoped advisory lesson from its diff, comments, and Wormtamer review
-- Lets Gemini retrieve bounded public text from approved domains and exact configured GitHub repositories
 - Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
 - Persists webhook, job, patch-equivalence, result, publication, feedback, advisory-memory, and model-usage state in SQLite
 - Shows persisted workflow state and bounded current-process conversations and logs in a built-in read-only web panel
@@ -22,30 +22,31 @@ Patch equivalence uses GitLab's whitespace-insensitive patch IDs. It can therefo
 
 ## Deliberately small
 
-Wormtamer does not require PostgreSQL, Redis, a queue service, multiple workers, or a control plane. Repository, memory, and public-source access is read-only, bounded, and authorized by application code rather than model instructions. Repository snapshots are disposable, and Wormtamer never executes repository-controlled code.
+Wormtamer does not require PostgreSQL, Redis, a queue service, multiple workers, or a control plane. Reviews run in disposable Git working directories with ordinary local `read` and `bash` capabilities. Credentials and SQLite state remain inaccessible to the dedicated review-tool identity; final validation and publication remain application-owned.
 
-Cross-repository access requires an explicit directional sharing rule. Runtime memory remains untrusted, repository-scoped advice, and public research is limited to configured sources. See the [security model](docs/agents/security.md) for the complete trust and authorization boundaries.
+Cross-repository preparation requires an explicit directional sharing rule. Runtime memory remains untrusted, repository-scoped advice. See the [security model](docs/agents/security.md) for the complete trust and authorization boundaries.
 
 ## Requirements
 
 - A GitLab personal access token with `api` scope and at least the Reporter role on every authorized project
 - A GitLab webhook secret
 - A Gemini Developer API key, or a Gemini Developer API-compatible endpoint and API key, with a Gemini 3 or newer model name
-- Docker for the recommended deployment, or Go 1.26 with CGO and a C compiler for local builds
+- Docker for the recommended deployment, or Go 1.27 with CGO and a C compiler for local builds
 
 ## Quick start
 
 ### 1. Configure
 
-Copy `config.example.json`, replace its placeholders, and set the authorized repositories. Optional directional sharing rules and public-source allowlists control which related or public content reviews may inspect.
+Copy `config.example.json`, replace its placeholders, and set the authorized repositories. Optional directional sharing rules control which related private repositories are prepared for a review.
 
     cp config.example.json config.json
 
 ### 2. Create persistent storage
 
-Create a persistent Docker volume:
+Create separate volumes for persistent SQLite state and disposable review workspaces:
 
     docker volume create wormtamer-data
+    docker volume create wormtamer-workspaces
 
 ### 3. Run
 
@@ -56,6 +57,7 @@ Create a persistent Docker volume:
       --publish 8080:8080 \
       --volume ./config.json:/etc/wormtamer/config.json:ro \
       --mount type=volume,src=wormtamer-data,dst=/var/lib/wormtamer \
+      --mount type=volume,src=wormtamer-workspaces,dst=/var/lib/wormtamer-reviews \
       ghcr.io/aminvakil/wormtamer:latest
 
 ### 4. Add the webhook

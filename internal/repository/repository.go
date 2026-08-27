@@ -1,520 +1,241 @@
 package repository
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
-	"sort"
 	"strings"
-	"unicode/utf8"
-
-	"github.com/aminvakil/wormtamer/internal/failure"
+	"sync"
+	"time"
 )
 
 const (
-	// ReviewResourceLimit bounds both repository tool calls and distinct repositories per review.
-	ReviewResourceLimit  = 8
-	MaxToolResponseBytes = 64 << 10
+	ToolRead = "read"
+	ToolBash = "bash"
+
+	DefaultToolUID = 65532
+	DefaultToolGID = 65532
+
+	DefaultSetupTimeout      = 2 * time.Minute
+	MaxFunctionResponseBytes = 16 << 20
+	MaxCommandOutputBytes    = 16 << 20
+	MaxReviewSpoolBytes      = 64 << 20
+	MaxToolLines             = 2000
+	MaxToolBytes             = 50 << 10
 )
 
-const (
-	maxArchiveEntries = 20_000
-	maxArchiveBytes   = 128 << 20
-	maxWorkspaceFiles = 10_000
-	maxFileBytes      = 2 << 20
-	maxPathBytes      = 1024
-	maxListedFiles    = 1_000
-	maxReadLines      = 200
-	maxSearchBytes    = 16 << 20
-	maxSearchMatches  = 100
-	maxQueryBytes     = 256
-)
-
-const (
-	ToolListFiles = "list_repository_files"
-	ToolReadFile  = "read_repository_file"
-	ToolSearch    = "search_repository"
-)
+type ToolResult struct {
+	Response map[string]any
+}
 
 type ToolBroker interface {
-	Call(context.Context, string, map[string]any) (map[string]any, error)
+	Call(context.Context, string, map[string]any) (ToolResult, error)
+}
+
+type PreparedRepository struct {
+	Repository      string `json:"repository"`
+	Path            string `json:"path"`
+	InitialRevision string `json:"initial_revision"`
+}
+
+type ReviewContext struct {
+	WorkingDirectory    string
+	ReviewedHead        string
+	RelatedRepositories []PreparedRepository
+	MemoryPath          string
 }
 
 type Workspace interface {
 	ToolBroker
+	Context() ReviewContext
 	Close() error
 }
 
-type Manager struct {
-	root string
+type Memory struct {
+	ID        string
+	Lesson    string
+	SourceURL string
+	UpdatedAt time.Time
 }
 
-func NewManager(root string) (*Manager, error) {
-	if strings.TrimSpace(root) == "" {
+type ManagerConfig struct {
+	Root                string
+	GitLabBaseURL       string
+	PersonalAccessToken string
+	ToolUID             uint32
+	ToolGID             uint32
+	Executable          string
+	SetupTimeout        time.Duration
+}
+
+type Manager struct {
+	root         string
+	stagingRoot  string
+	baseURL      string
+	token        string
+	toolUID      uint32
+	toolGID      uint32
+	executable   string
+	setupTimeout time.Duration
+
+	mu     sync.Mutex
+	closed bool
+	open   map[string]struct{}
+}
+
+func NewManager(config ManagerConfig) (*Manager, error) {
+	if strings.TrimSpace(config.Root) == "" {
 		return nil, errors.New("repository workspace root is required")
 	}
-	root = filepath.Clean(root)
-	if err := os.RemoveAll(root); err != nil {
-		return nil, fmt.Errorf("clean repository workspace root: %w", err)
+	if strings.TrimSpace(config.GitLabBaseURL) == "" || config.PersonalAccessToken == "" {
+		return nil, errors.New("repository preparation credentials are required")
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	root, err := filepath.Abs(config.Root)
+	if err != nil {
+		return nil, errors.New("resolve repository workspace root")
+	}
+	if config.ToolUID == 0 && config.ToolGID == 0 {
+		config.ToolUID = DefaultToolUID
+		config.ToolGID = DefaultToolGID
+	} else if config.ToolUID == 0 || config.ToolGID == 0 {
+		return nil, errors.New("review-tool UID and GID must both be non-zero")
+	}
+	if config.Executable == "" {
+		config.Executable, err = os.Executable()
+		if err != nil {
+			return nil, errors.New("resolve Wormtamer executable")
+		}
+	}
+	if config.SetupTimeout <= 0 {
+		config.SetupTimeout = DefaultSetupTimeout
+	}
+	if err := os.MkdirAll(root, 0o711); err != nil {
 		return nil, fmt.Errorf("create repository workspace root: %w", err)
 	}
-	return &Manager{root: root}, nil
-}
-
-func (m *Manager) Create(ctx context.Context, revision string, archive []byte) (Workspace, error) {
-	if revision == "" {
-		return nil, failure.Failed("repository_snapshot_invalid")
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("repository workspace root must be a directory, not a symlink")
 	}
-	directory, err := os.MkdirTemp(m.root, "review-")
-	if err != nil {
-		return nil, failure.Retry("repository_workspace_create_failed", 0)
+	if err := os.Chown(root, os.Geteuid(), os.Getegid()); err != nil {
+		return nil, fmt.Errorf("own repository workspace root: %w", err)
 	}
-	workspace := &localWorkspace{root: directory, revision: revision}
-	if err := extractArchive(ctx, directory, archive); err != nil {
-		_ = workspace.Close()
-		return nil, err
+	if err := cleanDirectory(root); err != nil {
+		return nil, fmt.Errorf("clean repository workspace root: %w", err)
 	}
-	return workspace, nil
+	if err := os.Chmod(root, 0o711); err != nil {
+		return nil, fmt.Errorf("set repository workspace root permissions: %w", err)
+	}
+	stagingRoot := filepath.Join(root, ".staging")
+	if err := os.Mkdir(stagingRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("create private repository staging root: %w", err)
+	}
+	return &Manager{
+		root: root, stagingRoot: stagingRoot, baseURL: config.GitLabBaseURL,
+		token: config.PersonalAccessToken, toolUID: config.ToolUID, toolGID: config.ToolGID,
+		executable: config.Executable, setupTimeout: config.SetupTimeout, open: make(map[string]struct{}),
+	}, nil
 }
 
 func (m *Manager) Close() error {
-	if err := os.RemoveAll(m.root); err != nil {
-		return fmt.Errorf("remove repository workspace root: %w", err)
+	m.mu.Lock()
+	m.closed = true
+	m.open = make(map[string]struct{})
+	m.mu.Unlock()
+	if err := cleanDirectory(m.root); err != nil {
+		return fmt.Errorf("clean repository workspace root: %w", err)
+	}
+	return nil
+}
+
+func cleanDirectory(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 type localWorkspace struct {
-	root     string
-	revision string
+	manager    *Manager
+	root       string
+	cwd        string
+	context    ReviewContext
+	toolUID    uint32
+	toolGID    uint32
+	executable string
+
+	spoolMu   sync.Mutex
+	spoolUsed int64
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (w *localWorkspace) Context() ReviewContext {
+	contextCopy := w.context
+	contextCopy.RelatedRepositories = append([]PreparedRepository(nil), w.context.RelatedRepositories...)
+	return contextCopy
+}
+
+func (w *localWorkspace) Call(ctx context.Context, name string, arguments map[string]any) (ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+	switch name {
+	case ToolRead:
+		return w.callRead(ctx, arguments)
+	case ToolBash:
+		return w.callBash(ctx, arguments)
+	default:
+		return ToolResult{}, fmt.Errorf("undeclared review tool %q", name)
+	}
 }
 
 func (w *localWorkspace) Close() error {
-	if err := os.RemoveAll(w.root); err != nil {
-		return fmt.Errorf("remove repository workspace: %w", err)
-	}
-	return nil
-}
-
-func extractArchive(ctx context.Context, destination string, contents []byte) error {
-	compressed, err := gzip.NewReader(bytes.NewReader(contents))
-	if err != nil {
-		return failure.Failed("repository_archive_invalid")
-	}
-	defer compressed.Close()
-
-	reader := tar.NewReader(compressed)
-	var archiveRoot string
-	entries := 0
-	files := 0
-	var totalBytes int64
-	seen := make(map[string]struct{})
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+	w.closeOnce.Do(func() {
+		if err := os.RemoveAll(w.root); err != nil {
+			w.closeErr = fmt.Errorf("remove review workspace: %w", err)
 		}
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			break
+		if w.manager != nil {
+			w.manager.mu.Lock()
+			delete(w.manager.open, w.root)
+			w.manager.mu.Unlock()
 		}
-		if err != nil {
-			return failure.Failed("repository_archive_invalid")
-		}
-		entries++
-		if entries > maxArchiveEntries || header.Size < 0 {
-			return failure.Failed("repository_archive_limit_exceeded")
-		}
-		if header.Size > maxArchiveBytes-totalBytes {
-			return failure.Failed("repository_archive_limit_exceeded")
-		}
-		totalBytes += header.Size
-		if header.Typeflag == tar.TypeXGlobalHeader {
-			// Global PAX metadata has no repository-relative path and may precede the archive root.
-			continue
-		}
-
-		relative, root, skip, err := archiveEntryPath(header.Name)
-		if err != nil {
-			return err
-		}
-		if archiveRoot == "" {
-			archiveRoot = root
-		} else if archiveRoot != root {
-			return failure.Failed("repository_archive_invalid_path")
-		}
-		if skip {
-			continue
-		}
-		target := filepath.Join(destination, filepath.FromSlash(relative))
-		if !withinRoot(destination, target) {
-			return failure.Failed("repository_archive_invalid_path")
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o700); err != nil {
-				return failure.Retry("repository_workspace_write_failed", 0)
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if header.Size > maxFileBytes {
-				continue
-			}
-			if _, duplicate := seen[relative]; duplicate {
-				return failure.Failed("repository_archive_duplicate_path")
-			}
-			data, err := io.ReadAll(io.LimitReader(reader, maxFileBytes+1))
-			if err != nil || int64(len(data)) != header.Size {
-				return failure.Failed("repository_archive_invalid")
-			}
-			if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
-				continue
-			}
-			files++
-			if files > maxWorkspaceFiles {
-				return failure.Failed("repository_archive_limit_exceeded")
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-				return failure.Retry("repository_workspace_write_failed", 0)
-			}
-			if err := os.WriteFile(target, data, 0o600); err != nil {
-				return failure.Retry("repository_workspace_write_failed", 0)
-			}
-			seen[relative] = struct{}{}
-		default:
-			// Symlinks, gitlinks, devices, and other non-regular entries are not exposed.
-		}
-	}
-	if archiveRoot == "" {
-		return failure.Failed("repository_archive_invalid")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func archiveEntryPath(name string) (relative, root string, skip bool, err error) {
-	if name == "" || len(name) > maxPathBytes+256 || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') || strings.HasPrefix(name, "/") || strings.Contains(name, `\`) {
-		return "", "", false, failure.Failed("repository_archive_invalid_path")
-	}
-	trimmed := strings.TrimSuffix(name, "/")
-	cleaned := path.Clean(trimmed)
-	if cleaned != trimmed || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", "", false, failure.Failed("repository_archive_invalid_path")
-	}
-	parts := strings.SplitN(cleaned, "/", 2)
-	root = parts[0]
-	if root == "" || root == "." || root == ".." {
-		return "", "", false, failure.Failed("repository_archive_invalid_path")
-	}
-	if len(parts) == 1 {
-		return "", root, true, nil
-	}
-	relative = parts[1]
-	if len(relative) > maxPathBytes {
-		return "", "", false, failure.Failed("repository_archive_invalid_path")
-	}
-	return relative, root, false, nil
-}
-
-func withinRoot(root, target string) bool {
-	relative, err := filepath.Rel(root, target)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func (w *localWorkspace) Call(ctx context.Context, name string, arguments map[string]any) (map[string]any, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	var result map[string]any
-	var err error
-	switch name {
-	case ToolListFiles:
-		result, err = w.listFiles(ctx, arguments)
-	case ToolReadFile:
-		result, err = w.readFile(ctx, arguments)
-	case ToolSearch:
-		result, err = w.search(ctx, arguments)
-	default:
-		return nil, failure.Failed("repository_tool_undeclared")
-	}
-	if err != nil {
-		return nil, err
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return nil, failure.Failed("repository_tool_output_invalid")
-	}
-	if len(encoded) > MaxToolResponseBytes {
-		return nil, failure.Failed("repository_tool_output_limit_exceeded")
-	}
-	return result, nil
-}
-
-func (w *localWorkspace) listFiles(ctx context.Context, arguments map[string]any) (map[string]any, error) {
-	if err := onlyKeys(arguments, "path"); err != nil {
-		return nil, err
-	}
-	requested, err := optionalString(arguments, "path")
-	if err != nil {
-		return nil, err
-	}
-	relative, err := normalizeRequestedPath(requested, true)
-	if err != nil {
-		return nil, err
-	}
-	start, err := w.resolve(relative)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(start)
-	if err != nil || !info.IsDir() {
-		return nil, failure.Failed("repository_path_not_found")
-	}
-	files := make([]string, 0)
-	err = filepath.WalkDir(start, func(current string, entry fs.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.Type().IsRegular() {
-			path, err := filepath.Rel(w.root, current)
-			if err != nil {
-				return err
-			}
-			files = append(files, filepath.ToSlash(path))
-			if len(files) > maxListedFiles {
-				return failure.Failed("repository_tool_output_limit_exceeded")
-			}
-		}
-		return nil
 	})
-	if err != nil {
-		var failureError *failure.Error
-		if errors.As(err, &failureError) {
-			return nil, err
-		}
-		return nil, failure.Retry("repository_workspace_read_failed", 0)
-	}
-	sort.Strings(files)
-	return map[string]any{"revision": w.revision, "path": relative, "files": files}, nil
+	return w.closeErr
 }
 
-func (w *localWorkspace) readFile(ctx context.Context, arguments map[string]any) (map[string]any, error) {
-	if err := onlyKeys(arguments, "path", "start_line", "line_count"); err != nil {
-		return nil, err
-	}
-	requested, err := requiredString(arguments, "path")
-	if err != nil {
-		return nil, err
-	}
-	relative, err := normalizeRequestedPath(requested, false)
-	if err != nil {
-		return nil, err
-	}
-	start, err := optionalInteger(arguments, "start_line", 1)
-	if err != nil || start < 1 {
-		return nil, failure.Failed("repository_tool_arguments_invalid")
-	}
-	count, err := optionalInteger(arguments, "line_count", maxReadLines)
-	if err != nil || count < 1 || count > maxReadLines {
-		return nil, failure.Failed("repository_tool_arguments_invalid")
-	}
-	file, err := w.resolve(relative)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return nil, failure.Failed("repository_path_not_found")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	first := start - 1
-	if first > len(lines) {
-		first = len(lines)
-	}
-	last := first + count
-	if last > len(lines) {
-		last = len(lines)
-	}
-	selected := append([]string(nil), lines[first:last]...)
-	return map[string]any{
-		"revision": w.revision, "path": relative, "start_line": start,
-		"end_line": first + len(selected), "lines": selected,
-	}, nil
-}
-
-func (w *localWorkspace) search(ctx context.Context, arguments map[string]any) (map[string]any, error) {
-	if err := onlyKeys(arguments, "query", "path"); err != nil {
-		return nil, err
-	}
-	query, err := requiredString(arguments, "query")
-	if err != nil || query == "" || len(query) > maxQueryBytes {
-		return nil, failure.Failed("repository_tool_arguments_invalid")
-	}
-	requested, err := optionalString(arguments, "path")
-	if err != nil {
-		return nil, err
-	}
-	relative, err := normalizeRequestedPath(requested, true)
-	if err != nil {
-		return nil, err
-	}
-	start, err := w.resolve(relative)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(start)
-	if err != nil || !info.IsDir() {
-		return nil, failure.Failed("repository_path_not_found")
-	}
-	type match struct {
-		Path string `json:"path"`
-		Line int    `json:"line"`
-		Text string `json:"text"`
-	}
-	matches := make([]match, 0)
-	scanned := 0
-	err = filepath.WalkDir(start, func(current string, entry fs.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.Type().IsRegular() {
-			return nil
-		}
-		data, err := os.ReadFile(current)
-		if err != nil {
-			return err
-		}
-		scanned += len(data)
-		if scanned > maxSearchBytes {
-			return failure.Failed("repository_search_limit_exceeded")
-		}
-		filePath, err := filepath.Rel(w.root, current)
-		if err != nil {
-			return err
-		}
-		lines := strings.Split(string(data), "\n")
-		for index, line := range lines {
-			if strings.Contains(line, query) {
-				matches = append(matches, match{Path: filepath.ToSlash(filePath), Line: index + 1, Text: line})
-				if len(matches) > maxSearchMatches {
-					return failure.Failed("repository_tool_output_limit_exceeded")
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		var failureError *failure.Error
-		if errors.As(err, &failureError) {
-			return nil, err
-		}
-		return nil, failure.Retry("repository_workspace_read_failed", 0)
-	}
-	return map[string]any{"revision": w.revision, "path": relative, "query": query, "matches": matches}, nil
-}
-
-func (w *localWorkspace) resolve(relative string) (string, error) {
-	target := filepath.Join(w.root, filepath.FromSlash(relative))
-	if !withinRoot(w.root, target) {
-		return "", failure.Failed("repository_path_invalid")
-	}
-	return target, nil
-}
-
-func normalizeRequestedPath(value string, allowRoot bool) (string, error) {
-	if value == "" && allowRoot {
-		return "", nil
-	}
-	if len(value) > maxPathBytes || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') || strings.HasPrefix(value, "/") || strings.Contains(value, `\`) {
-		return "", failure.Failed("repository_path_invalid")
-	}
-	cleaned := path.Clean(value)
-	if cleaned != value || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", failure.Failed("repository_path_invalid")
-	}
-	return cleaned, nil
-}
-
-func onlyKeys(arguments map[string]any, allowed ...string) error {
+func onlyArguments(arguments map[string]any, allowed ...string) bool {
 	set := make(map[string]struct{}, len(allowed))
 	for _, key := range allowed {
 		set[key] = struct{}{}
 	}
 	for key := range arguments {
 		if _, ok := set[key]; !ok {
-			return failure.Failed("repository_tool_arguments_invalid")
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
-func requiredString(arguments map[string]any, key string) (string, error) {
-	value, ok := arguments[key]
-	if !ok {
-		return "", failure.Failed("repository_tool_arguments_invalid")
-	}
-	text, ok := value.(string)
-	if !ok {
-		return "", failure.Failed("repository_tool_arguments_invalid")
-	}
-	return text, nil
-}
-
-func optionalString(arguments map[string]any, key string) (string, error) {
-	value, ok := arguments[key]
-	if !ok {
-		return "", nil
-	}
-	text, ok := value.(string)
-	if !ok {
-		return "", failure.Failed("repository_tool_arguments_invalid")
-	}
-	return text, nil
-}
-
-func optionalInteger(arguments map[string]any, key string, fallback int) (int, error) {
-	value, ok := arguments[key]
-	if !ok {
-		return fallback, nil
-	}
+func integerArgument(value any) (int64, bool) {
 	switch number := value.(type) {
 	case int:
-		return number, nil
+		return int64(number), true
 	case int32:
-		return int(number), nil
+		return int64(number), true
 	case int64:
-		return int(number), nil
+		return number, true
 	case float64:
-		integer := int(number)
-		if number != float64(integer) {
-			return 0, failure.Failed("repository_tool_arguments_invalid")
-		}
-		return integer, nil
+		integer := int64(number)
+		return integer, number == float64(integer)
 	default:
-		return 0, failure.Failed("repository_tool_arguments_invalid")
+		return 0, false
 	}
 }

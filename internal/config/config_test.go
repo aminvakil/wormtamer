@@ -11,6 +11,7 @@ import (
 const validConfiguration = `{
   "listen_address": ":8080",
   "database_path": "data/wormtamer.db",
+  "review_workspace_path": "../wormtamer-reviews",
   "log_level": "info",
   "gitlab": {
     "base_url": "http://gitlab.internal",
@@ -20,10 +21,6 @@ const validConfiguration = `{
   "gemini": {
     "api_key": "gemini-key",
     "model": "gemini-test"
-  },
-  "public_sources": {
-    "allowed_domains": ["github.com", "openbao.org", "syncthing.net"],
-    "github_repositories": ["nginx/nginx"]
   },
   "authorized_repositories": ["group/project", "parent/team/project"],
   "repository_sharing": {
@@ -46,8 +43,9 @@ func TestLoad(t *testing.T) {
 	if cfg.DatabasePath != wantDatabasePath {
 		t.Fatalf("DatabasePath = %q, want %q", cfg.DatabasePath, wantDatabasePath)
 	}
-	if cfg.ConfigFileBroadlyRead {
-		t.Fatal("ConfigFileBroadlyRead = true for a 0600 file")
+	wantWorkspacePath := filepath.Join(filepath.Dir(directory), "wormtamer-reviews")
+	if cfg.ReviewWorkspacePath != wantWorkspacePath {
+		t.Fatalf("ReviewWorkspacePath = %q, want %q", cfg.ReviewWorkspacePath, wantWorkspacePath)
 	}
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
@@ -231,28 +229,6 @@ func TestLoadUsesCanonicalGitLabURL(t *testing.T) {
 	}
 }
 
-func TestLoadDetectsBroadReadPermission(t *testing.T) {
-	for _, mode := range []os.FileMode{0o640, 0o604, 0o644} {
-		t.Run(mode.String(), func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(path, []byte(validConfiguration), mode); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(path, mode); err != nil {
-				t.Fatal(err)
-			}
-
-			cfg, err := Load(path)
-			if err != nil {
-				t.Fatalf("Load() error = %v", err)
-			}
-			if !cfg.ConfigFileBroadlyRead {
-				t.Fatalf("ConfigFileBroadlyRead = false for a %#o file", mode)
-			}
-		})
-	}
-}
-
 func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -264,6 +240,9 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "empty address", replace: `":8080"`, with: `""`, want: "listen_address is required"},
 		{name: "invalid address", replace: `":8080"`, with: `"8080"`, want: "host:port"},
 		{name: "empty database", replace: `"data/wormtamer.db"`, with: `""`, want: "database_path is required"},
+		{name: "empty review workspace", replace: `"../wormtamer-reviews"`, with: `""`, want: "review_workspace_path is required"},
+		{name: "workspace inside private database directory", replace: `"../wormtamer-reviews"`, with: `"data/reviews"`, want: "must be outside service-private"},
+		{name: "workspace contains private directories", replace: `"../wormtamer-reviews"`, with: `".."`, want: "must be outside service-private"},
 		{name: "invalid log level", replace: `"log_level": "info"`, with: `"log_level": "trace"`, want: "log_level must be"},
 		{name: "invalid URL scheme", replace: `"http://gitlab.internal"`, with: `"ftp://gitlab.internal"`, want: "HTTP or HTTPS"},
 		{name: "URL credentials", replace: `"http://gitlab.internal"`, with: `"http://user:pass@gitlab.internal"`, want: "must not contain credentials"},
@@ -281,15 +260,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
 		{name: "long Gemini model", replace: `"gemini-test"`, with: `"` + strings.Repeat("m", 257) + `"`, want: "must not exceed 256 bytes"},
 		{name: "Gemini model control character", replace: `"gemini-test"`, with: `"gemini\ntest"`, want: "must not contain control characters"},
-		{name: "missing public domains", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `[]`, want: "public_sources.allowed_domains is required"},
-		{name: "missing GitHub domain", replace: `["github.com", "openbao.org", "syncthing.net"]`, with: `["openbao.org"]`, want: "must include github.com"},
-		{name: "invalid public domain", replace: `"openbao.org"`, with: `"fake_openbao.org"`, want: "invalid public source domain"},
-		{name: "duplicate public domain", replace: `"syncthing.net"]`, with: `"GITHUB.COM"]`, want: "duplicate public source domain"},
-		{name: "GitHub repository URL", replace: `"nginx/nginx"`, with: `"https://github.com/nginx/nginx"`, want: "invalid public GitHub repository slug"},
-		{name: "GitHub repository extra path", replace: `"nginx/nginx"`, with: `"nginx/nginx/tree"`, want: "invalid public GitHub repository slug"},
-		{name: "GitHub repository query", replace: `"nginx/nginx"`, with: `"nginx/nginx?q=x"`, want: "invalid public GitHub repository slug"},
-		{name: "encoded GitHub repository", replace: `"nginx/nginx"`, with: `"%6eginx/nginx"`, want: "invalid public GitHub repository slug"},
-		{name: "duplicate GitHub repository", replace: `["nginx/nginx"]`, with: `["nginx/nginx", "NGINX/NGINX"]`, want: "duplicate public GitHub repository"},
+		{name: "obsolete public sources", replace: `"authorized_repositories":`, with: `"public_sources": {}, "authorized_repositories":`, want: "unknown field"},
 		{name: "malformed repository", replace: `"group/project"`, with: `"group//project"`, want: "invalid authorized repository"},
 		{name: "duplicate repository", replace: `"parent/team/project"`, with: `"group/project"`, want: "duplicate authorized repository"},
 		{name: "unauthorized sharing target", replace: `"group/project": ["parent/team/project"]`, with: `"other/project": ["parent/team/project"]`, want: "sharing target"},

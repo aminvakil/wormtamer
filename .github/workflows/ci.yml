@@ -37,7 +37,7 @@ jobs:
         uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: Dockerfile
-          ignore: DL3003,DL3018,DL3008,DL3066
+          ignore: DL3002,DL3003,DL3018,DL3008,DL3066
 
   build:
     name: Build and test docker
@@ -48,6 +48,14 @@ jobs:
 
       - name: Build docker image.
         run: docker build --no-cache --tag ${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID} .
+
+      - name: Check review-tool image commands and identity.
+        run: |
+          docker run --rm --entrypoint /bin/bash ${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID} -c '
+            command -v bash git rg fd curl >/dev/null &&
+            test "$(id -u wormtamer-review)" = 65532 &&
+            test "$(id -g wormtamer-review)" = 65532
+          '
 
       - name: Run a container of created image.
         run: |

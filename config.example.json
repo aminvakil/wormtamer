@@ -1,6 +1,7 @@
 {
   "listen_address": "0.0.0.0:8080",
   "database_path": "/var/lib/wormtamer/wormtamer.db",
+  "review_workspace_path": "/var/lib/wormtamer-reviews",
   "log_level": "info",
   "gitlab": {
     "base_url": "https://gitlab.example",
@@ -12,10 +13,6 @@
     "base_url": "",
     "model": "replace-me",
     "thinking_level": "default"
-  },
-  "public_sources": {
-    "allowed_domains": ["github.com"],
-    "github_repositories": []
   },
   "authorized_repositories": ["group/project", "group/shared-contracts"],
   "share_all_authorized_repositories": false,

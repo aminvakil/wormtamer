@@ -132,6 +132,29 @@ func TestRunStartsAndShutsDown(t *testing.T) {
 	}
 }
 
+func TestRunRejectsToolAccessibleConfigurationAndState(t *testing.T) {
+	directory, err := os.MkdirTemp("", "wormtamer-boundary-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	configPath := writeConfig(t, directory, "wormtamer.db")
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(configPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	err = run(context.Background(), []string{"-config", configPath}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err == nil || !strings.Contains(err.Error(), "review-tool identity") {
+		t.Fatalf("credential boundary error = %v", err)
+	}
+	if strings.Contains(logs.String(), "HTTP server started") {
+		t.Fatalf("service started with an invalid credential boundary: %s", logs.String())
+	}
+}
+
 func TestRunFailsBeforeListeningWhenDatabaseIsUnavailable(t *testing.T) {
 	directory := t.TempDir()
 	configPath := writeConfig(t, directory, filepath.Join("missing", "wormtamer.db"))
@@ -220,7 +243,8 @@ func TestJobsCommandsDoNotStartServiceOrExposePrivateState(t *testing.T) {
 	if strings.Contains(logs.String(), "HTTP server started") {
 		t.Fatalf("operational command started HTTP server: %s", logs.String())
 	}
-	if _, err := os.Stat(databasePath + ".workspaces"); !os.IsNotExist(err) {
+	workspacePath := filepath.Join(filepath.Dir(directory), "reviews-"+filepath.Base(directory))
+	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
 		t.Fatalf("operational command created workspace path: %v", err)
 	}
 
@@ -244,6 +268,7 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
 	contents := `{
   "listen_address": "127.0.0.1:0",
   "database_path": ` + quote(databasePath) + `,
+  "review_workspace_path": ` + quote(filepath.Join(filepath.Dir(directory), "reviews-"+filepath.Base(directory))) + `,
   "gitlab": {
     "base_url": "http://gitlab.internal",
     "webhook_secret": "secret",
@@ -253,10 +278,6 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
     "api_key": "gemini-key",
     "base_url": "http://gemini.internal",
     "model": "gemini-test"
-  },
-  "public_sources": {
-    "allowed_domains": ["github.com"],
-    "github_repositories": []
   },
   "authorized_repositories": ["group/project"]
 }`

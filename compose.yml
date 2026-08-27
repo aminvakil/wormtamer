@@ -8,6 +8,8 @@ services:
     volumes:
       - ./config.json:/etc/wormtamer/config.json:ro
       - wormtamer-data:/var/lib/wormtamer
+      - wormtamer-workspaces:/var/lib/wormtamer-reviews
 
 volumes:
   wormtamer-data:
+  wormtamer-workspaces:

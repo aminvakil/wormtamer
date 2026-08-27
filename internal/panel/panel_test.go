@@ -66,8 +66,8 @@ func TestOverviewRendersStateAndOnlyExplicitConfiguration(t *testing.T) {
 		!strings.Contains(body, "Skip to content") || !strings.Contains(body, `aria-current="page"`) ||
 		!strings.Contains(body, "Review activity") || !strings.Contains(body, `data-tone="waiting" data-empty="false"><span>Waiting</span><strong>2</strong>`) ||
 		!strings.Contains(body, "No queued synthesis") || !strings.Contains(body, "group/project") ||
-		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "docs.example.com") ||
-		!strings.Contains(body, "group/shared") {
+		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "Review tools") ||
+		!strings.Contains(body, "<code>read</code>") || !strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
 	}
 	for _, excluded := range []string{"gitlab-token", "gemini-key", "webhook-secret", "/private/wormtamer.db"} {
@@ -243,7 +243,7 @@ func TestUsageAndGenerationViewsAreBoundedReadOnlyReports(t *testing.T) {
 		ConfiguredModel: "configured-<model>", ResolvedModel: "resolved-model",
 		RequestStartedAt: now, CompletedAt: &completed, CompletionState: "response", LatencyMS: &latency,
 		FinishReason: "STOP", StructuredValidation: "valid", ToolCallsAvailable: true,
-		ToolNames: []string{"read_repository_file"}, FinalOnly: true,
+		ToolNames: []string{"read"}, FinalOnly: true,
 		UsageMetadataAvailable: true, UsageMetadataValid: true, TokenCountsAvailable: true,
 		PromptTokens: 100, CachedTokens: 20, ToolUsePromptTokens: 10,
 		CandidateTokens: 30, ThoughtTokens: 5, TotalTokens: 145,
@@ -291,7 +291,7 @@ func TestUsageAndGenerationViewsAreBoundedReadOnlyReports(t *testing.T) {
 	detail := request(t, handler, http.MethodGet, "/usage/8")
 	detailBody := detail.Body.String()
 	if detail.Code != http.StatusOK || storage.generationID != 8 ||
-		!strings.Contains(detailBody, "Request metadata") || !strings.Contains(detailBody, "read_repository_file") ||
+		!strings.Contains(detailBody, "Request metadata") || !strings.Contains(detailBody, "read") ||
 		!strings.Contains(detailBody, "Cached input") || !strings.Contains(detailBody, "145") ||
 		strings.Contains(detailBody, "Estimated cost") || strings.Contains(detailBody, "USD") {
 		t.Fatalf("generation detail status=%d body=%s", detail.Code, detailBody)
@@ -488,10 +488,8 @@ func newTestHandlerWithDiagnostics(t *testing.T, storage Store, diagnosticReader
 		GitLabBaseURL:  "http://gitlab.internal",
 		GeminiEndpoint: "http://gemini.internal",
 		GeminiModel:    "gemini-test", GeminiThinkingLevel: "high", LogLevel: "info",
-		AuthorizedRepositories:   []string{"group/project", "group/shared"},
-		RepositorySharing:        map[string][]string{"group/project": {"group/shared"}},
-		AllowedPublicDomains:     []string{"github.com", "docs.example.com"},
-		PublicGitHubRepositories: []string{"owner/repository"},
+		AuthorizedRepositories: []string{"group/project", "group/shared"},
+		RepositorySharing:      map[string][]string{"group/project": {"group/shared"}},
 	}, slog.New(slog.DiscardHandler), diagnosticReader)
 	if err != nil {
 		t.Fatal(err)

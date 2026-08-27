@@ -26,12 +26,13 @@ Establish an upgrade and compatibility policy before the first production deploy
 
 ## Deployment Configuration
 
-The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, log level, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, model API key, optional Gemini Developer API-compatible base URL, model, review thinking level, authorized internal repositories, approved public domains, and exact public GitHub repositories; required values must be non-empty and repository entries must be well-formed and unique. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` when omitted. When `gemini.base_url` is omitted, the SDK uses the Gemini Developer API. When set, it is the validated HTTP or HTTPS base URL used for both reviews and feedback evaluation. The endpoint must accept the Gemini Developer API request path, authentication header, function-calling, structured-output, and thinking configuration used by Wormtamer and return native Gemini responses. OpenAI-compatible endpoints serving Gemini models are not sufficient. `gemini.thinking_level` defaults to `default`, which leaves the SDK thinking configuration unset. Any other non-empty value is passed through without a local allowlist so model-specific support is decided by the endpoint. The validated GitLab and configured model endpoint URLs are canonicalized. The review worker is always enabled, so its credentials are required at startup without external credential or scope validation.
+The process starts with an explicit JSON configuration path, for example `wormtamer -config ./config.json`, and fails startup when the file or a required value is missing or invalid. Configuration decoding rejects unknown fields. Relative data and review-workspace paths resolve from the configuration file's directory. The configuration defines the listen address, SQLite path, disposable review-workspace path, log level, HTTP or HTTPS GitLab base URL, webhook secret, GitLab personal access token, model API key, optional Gemini Developer API-compatible base URL, model, review thinking level, authorized internal repositories, and directional repository sharing; required values must be non-empty and repository entries must be well-formed and unique. The review-workspace path must be outside service-private configuration and database directories. `log_level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info` when omitted. When `gemini.base_url` is omitted, the SDK uses the Gemini Developer API. When set, it is the validated HTTP or HTTPS base URL used for both reviews and feedback evaluation. The endpoint must accept the Gemini Developer API request path, authentication header, function-calling, structured-output, and thinking configuration used by Wormtamer and return native Gemini responses. OpenAI-compatible endpoints serving Gemini models are not sufficient. `gemini.thinking_level` defaults to `default`, which leaves the SDK thinking configuration unset. Any other non-empty value is passed through without a local allowlist so model-specific support is decided by the endpoint. The validated GitLab and configured model endpoint URLs are canonicalized. The review worker is always enabled, so its credentials are required at startup without external credential or scope validation.
 
 ```json
 {
   "listen_address": "127.0.0.1:8080",
   "database_path": "data/wormtamer.db",
+  "review_workspace_path": "/var/lib/wormtamer-reviews",
   "log_level": "info",
   "gitlab": {
     "base_url": "https://gitlab.example",
@@ -43,10 +44,6 @@ The process starts with an explicit JSON configuration path, for example `wormta
     "base_url": "",
     "model": "replace-me",
     "thinking_level": "default"
-  },
-  "public_sources": {
-    "allowed_domains": ["github.com", "openbao.org", "syncthing.net"],
-    "github_repositories": ["nginx/nginx"]
   },
   "authorized_repositories": ["group/project", "group/shared-contracts"],
   "share_all_authorized_repositories": false,
@@ -62,15 +59,13 @@ Authorized repositories are identified by exact GitLab namespace paths such as `
 
 Authorization by path intentionally fails after a project rename until configuration is updated; durable review identity still uses the numeric project ID supplied by GitLab.
 
-`public_sources.allowed_domains` must include `github.com`; each canonical entry authorizes that domain and dot-boundary subdomains for bounded direct HTTPS retrieval. `public_sources.github_repositories` contains exact `<owner>/<repository>` slugs and authorizes snapshot tools only for those repositories. These installation-wide lists are disclosed to every review. Public GitHub access is unauthenticated.
-
 Plain HTTP is supported for local self-hosted operation. `GET /healthcheck` is an unauthenticated liveness check that returns success after startup; it does not report job state or GitLab connectivity. The same listener serves the [read-only web panel](#read-only-web-panel). Failed-job mutation remains limited to the local commands described in [Reliability](reliability.md#jobs-and-retries).
 
 ## Components
 
 ```text
 GitLab -> webhook ingress -> SQLite review jobs -> review worker -> review agent
-                         |                            -> repository, memory, and public-source brokers
+                         |                            -> Git workspace preparation -> read/bash subprocesses
                          |                            -> publication broker -> GitLab
                          +-> SQLite feedback jobs -> feedback evaluator -> runtime memory
 Periodic reconciler -----+
@@ -86,36 +81,27 @@ Validates and durably records merge request webhooks. Ready openings create idem
 
 Claims jobs with leases, retries recoverable failures, and completes generated work only after publication is reconciled. For a job without a locally validated result, it checks the deterministic GitLab publication marker before loading review evidence or invoking Gemini; an existing current publication completes as external-only recovery without reconstructing structured review data.
 
-After that exact-head recovery check, the worker validates the GitLab diff version for the current head. Within retained SQLite state, a new head whose available `patch_id_sha` matches the newest completed canonical job for the same merge request completes as equivalent without invoking Gemini, loading a repository archive, or publishing another note. The canonical job must have both a local validated result and a durable publication and cannot itself be equivalent. Head SHA remains the revision, repository, review-target, finding, and publication identity; patch identity only suppresses redundant work.
+After that exact-head recovery check, the worker validates the GitLab diff version for the current head. Within retained SQLite state, a new head whose available `patch_id_sha` matches the newest completed canonical job for the same merge request completes as equivalent without invoking Gemini, preparing repositories, or publishing another note. The canonical job must have both a local validated result and a durable publication and cannot itself be equivalent. Head SHA remains the revision, repository, review-target, finding, and publication identity; patch identity only suppresses redundant work.
 
 ### Review agent
 
-The worker starts with bounded merge request metadata and changed-file diffs, then runs a small explicit Gemini function-calling loop. Gemini may request bounded context from the current repository, directionally shared related repositories, active advisory memory for the exact current repository, approved public websites, and exact configured public GitHub repositories through declared read-only tools. Tool declarations narrow as application-owned budgets are consumed, and the loop requires a structured final-only generation after a denied excess call or exhaustion of the combined budget. Application code dispatches each admitted request and still requires a final summary and findings whose paths match fetched changed files before persistence.
+The worker starts with bounded merge request metadata and changed-file diffs, prepares a disposable Git review root, then runs a small explicit Gemini function-calling loop. Every ordinary generation declares exactly `read` and `bash`; application code dispatches each call under the credential-free review-tool identity. The loop continues until Gemini returns a structured result, the cumulative 16 MiB serialized function-response allowance forces one final-only generation, or the review deadline ends. Application code still requires a final summary and findings whose paths match fetched changed files before persistence.
 
 A finding is a discrete, actionable correctness, security, or reliability defect introduced by the changed diff or made newly reachable or materially worse by it. It must identify concrete affected behavior and a realistic failure scenario without relying on unstated assumptions. Pre-existing issues unaffected by the change, style preferences, generic best practices, speculative risks, and missing tests or documentation without an independent concrete defect are not findings. Attributed tool context may establish impact, but each finding remains attached to an exact changed-file `new_path`. Findings with the same root cause are consolidated and explanations state the changed behavior, trigger, and impact concisely before recommending the smallest relevant correction.
 
 Findings use ordered priorities `P0` through `P3`. `P0` is an immediate deployment or operations blocker, or catastrophic security or data-loss impact in a realistic supported scenario. `P1` is an urgent serious defect that should be fixed before merge. `P2` is a normal concrete defect that should be fixed. `P3` is a limited but real defect, not a style preference or optional improvement.
 
-### Tool brokers
+### Local review agent
 
-Model-invocable tool brokers enforce repository allowlists, directional sharing rules, credential and network boundaries, resource limits, and read/write permissions. Model intent cannot override broker policy. The repository broker provides bounded file listing, text-file range reads, and case-sensitive literal search in the current repository and sharing-eligible related repositories. Every request names an exact repository exposed in the review input, and every result identifies its repository and immutable revision.
+The model-facing foundation is exactly two tools. `read` reads relative or absolute file paths as bounded text. `bash` executes an unrestricted Bash command in the current Git working directory with Pi-compatible tail truncation and review-local full-output files. There is no command allowlist, path confinement, network broker, or sandbox. Both tools run as the dedicated review-tool UID/GID with a minimal environment and no service credentials; the application process retains final result validation and GitLab publication. The authoritative trust and credential decision is in [Security](security.md#local-review-agent).
 
-The memory broker provides bounded lexical search over merge-request-derived lessons for the exact GitLab instance and numeric project under review. The model supplies only a query, not scope. Directional repository sharing does not broaden memory access. Results identify their repository scope, memory identity, merge request source reference, lesson, and creation time, and label lessons as untrusted advisory guidance.
-
-The public-source broker fetches one independently authorized HTTPS text URL at a time and provides file listing and range reads from exact configured GitHub repositories. It performs no search or automatic crawling. A GitHub repository's default-branch HEAD is resolved and pinned on first access in each review; content is extracted under the same hostile-archive rules as internal repositories. Results are labeled as untrusted public evidence and attributed with a final URL and retrieval time or an exact repository and commit.
-
-Tools may provide bounded, attributed access to:
-
-- The current repository and authorized, directionally shared internal repositories (implemented)
-- Runtime review memory (implemented)
-- Public documentation and exact configured GitHub repositories (implemented)
-- Structured finding submission
+Current-project runtime memory is materialized as an ordinary, provenance-bearing JSON file outside repository-controlled paths in the review root. Trusted code fixes its GitLab instance and numeric project scope. All exposed memory versions are recorded at the successful review-result checkpoint.
 
 ### Repository workspace
 
-When Gemini first requests current-repository context, the GitLab broker downloads a bounded repository archive at the exact reviewed head SHA. On first access to a sharing-eligible related repository, the broker resolves that repository's default-branch HEAD, pins its immutable commit SHA, and downloads an archive at that SHA. Trusted application code extracts validated regular UTF-8 text files into installation-local disposable workspaces; it does not invoke Git, follow symlinks, initialize submodules, or expose binary and oversized files. Workspaces are removed after each review, and their dedicated root is cleaned at startup and shutdown.
+Before the first generation, trusted application code clones the current project and every directionally authorized related repository in service-private staging. It fetches all branch refs and complete branch histories; the current checkout is detached at the exact merge-request ref SHA, while each related checkout starts detached at its default-branch head. The setup removes and validates retained Git credential, proxy, and helper configuration before recursively transferring ownership and atomically exposing the complete root to the review-tool identity. The current repository is Bash's working directory, related repositories have deterministic sibling paths, and `.git` metadata and refs remain mutable.
 
-Internal repository tools may list, read, and search these snapshots but cannot execute repository-controlled code. Public GitHub snapshot tools may list and read but do not search. A review may make at most eight internal repository tool calls and inspect at most eight distinct internal repositories under one shared application-owned ceiling. Public repository access has a separate eight-call ceiling. Related and public snapshots are fetched lazily, one revision is retained per repository during the review, and there is no cross-review repository cache.
+The complete review root, including repositories, memory, shell-output files, worktrees, and model-created files, is removed after the attempt and at process startup and shutdown. There is no cross-review repository cache or application workspace-size quota.
 
 ### Publication broker
 
@@ -155,11 +141,11 @@ The built-in panel provides server-rendered HTML at `GET /`, with bounded histor
 
 Usage reporting covers rolling 24-hour, 7-day, and 30-day windows with validated request-kind, configured-model, resolved-model, and numeric-project filters. It shows observed token-category totals, model, repository, and request-kind breakdowns, generation histories, and aggregate estimated cost in USD. It never presents an estimate as provider billing and does not expose per-generation cost, formulas, or pricing rates.
 
-Durable panel handlers query SQLite through fixed-size cursor pagination and bounded aggregate groups. Diagnostic handlers read bounded in-memory snapshots and use SQLite only for correlated durable generation and workflow metadata. No panel handler makes GitLab, Gemini, repository, public-source, file, container, or external logging-service requests. The panel exposes no state-changing methods and cannot retry work, create reviews, change logging, delete or export diagnostics, or edit configuration or memory. It requires no presentation-only persistent state. Panel access and traffic controls deliberately remain at the deployment boundary described in [Security](security.md#read-only-web-panel).
+Durable panel handlers query SQLite through fixed-size cursor pagination and bounded aggregate groups. Diagnostic handlers read bounded in-memory snapshots and use SQLite only for correlated durable generation and workflow metadata. No panel handler makes GitLab, Gemini, repository, file, container, or external logging-service requests. The panel exposes no state-changing methods and cannot retry work, create reviews, change logging, delete or export diagnostics, or edit configuration or memory. It requires no presentation-only persistent state. Panel access and traffic controls deliberately remain at the deployment boundary described in [Security](security.md#read-only-web-panel).
 
 ## Context and State
 
-The model conversation begins with bounded changed-file diffs, relevant metadata, the exact current and sharing-eligible repository paths, approved public domains and exact GitHub repository slugs, the structured response schema, declared tools, and application-owned limits. Model-facing guidance prefers a direct read when an exact file path is known and path-scoped recursive listing or search when a relevant directory is known; root operations remain valid when no narrower context is available. It requests independent calls together when their complete arguments are already known and keeps calls whose arguments depend on earlier results sequential. Only validated, attributed tool results are added on later turns; conversations and retrieved public content are not persisted. Authorization and limits remain deterministic regardless of model intent.
+The model conversation begins with bounded changed-file diffs, relevant metadata, the current Git working directory and exact reviewed head, deterministic paths and initial revisions for prepared related repositories, the review-memory file path and advisory authority, the structured response schema, and exactly the `read` and `bash` declarations. The system instruction contributes only Pi's minimal tool list and two file-operation guidelines; it does not teach shell or Git command recipes. Function responses are added in same-turn call order. Conversations and command output are not persisted in SQLite.
 
 SQLite stores webhook, job, publication, patch-equivalence, merge request progress, and structured model-generation diagnostic records. A review job may originate from a webhook event or from reconciliation without an event. Each newly generated result records either its validated GitLab patch ID or an explicit unavailable outcome. An equivalent job records the same patch ID and its canonical job ID but owns no result, findings, memory-retrieval audit, or publication. Existing and externally recovered rows without locally validated results retain unknown patch identity. GitLab remains the source of truth for merge requests and published discussions.
 
@@ -175,6 +161,6 @@ Runtime review memory is separate from contributor guidance in `AGENTS.md` and `
 
 ## Excluded Until Required
 
-Do not add multi-tenant logic, a central service, another database or queue, a distributed worker fleet, eager indexing of repositories or public websites, public-source search, model training, a provider abstraction, or repository-controlled code execution without a concrete approved requirement.
+Do not add multi-tenant logic, a central service, another database or queue, a distributed worker fleet, eager indexing, model training, a provider abstraction, a sandbox, or structured wrappers around ordinary shell and Git operations without a concrete approved requirement.
 
 See [Reliability](reliability.md) for workflow guarantees and [Security](security.md) for trust boundaries.

@@ -31,7 +31,7 @@ func TestModelGenerationLifecyclePersistsMetadataWithoutContent(t *testing.T) {
 		GenerationCompletion: usage.GenerationCompletion{
 			State: usage.CompletionResponse, CompletedAt: started.Add(1500 * time.Millisecond), Latency: 1500 * time.Millisecond,
 			ResolvedModel: "gemini-resolved", FinishReason: "STOP", StructuredValidation: "valid",
-			ToolCallsAvailable: true, ToolNames: []string{"read_repository_file"}, UsageMetadataAvailable: true,
+			ToolCallsAvailable: true, ToolNames: []string{"read"}, UsageMetadataAvailable: true,
 			Tokens: usage.TokenCounts{Prompt: 100, Cached: 20, ToolUsePrompt: 10, Candidates: 30, Thoughts: 5, Total: 145},
 		},
 		StoreTokenCounts: true, UsageMetadataValid: true,
@@ -54,7 +54,7 @@ FROM model_generations WHERE id = ?`, generationID).Scan(
 		t.Fatal(err)
 	}
 	if state != usage.CompletionResponse || model != "gemini-test" || resolved != "gemini-resolved" || latency != 1500 ||
-		validation != "valid" || toolNames != `["read_repository_file"]` || prompt != 100 || cached != 20 ||
+		validation != "valid" || toolNames != `["read"]` || prompt != 100 || cached != 20 ||
 		toolPrompt != 10 || candidates != 30 || thoughts != 5 || total != 145 || cost != estimate {
 		t.Fatalf("stored generation state=%q model=%q resolved=%q latency=%d validation=%q tools=%q tokens=%d/%d/%d/%d/%d/%d cost=%d",
 			state, model, resolved, latency, validation, toolNames, prompt, cached, toolPrompt, candidates, thoughts, total, cost)
@@ -74,7 +74,7 @@ FROM model_generations WHERE id = ?`, generationID).Scan(
 		t.Fatalf("usage report = %+v", report)
 	}
 	detail, err := storage.GetGenerationRecord(context.Background(), generationID)
-	if err != nil || !detail.TokenCountsAvailable || len(detail.ToolNames) != 1 || detail.ToolNames[0] != "read_repository_file" {
+	if err != nil || !detail.TokenCountsAvailable || len(detail.ToolNames) != 1 || detail.ToolNames[0] != "read" {
 		t.Fatalf("GetGenerationRecord() = %+v, %v", detail, err)
 	}
 	reviewDetail, err := storage.GetReviewRecord(context.Background(), accepted.JobID)

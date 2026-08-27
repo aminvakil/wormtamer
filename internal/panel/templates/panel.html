@@ -164,7 +164,7 @@
       <article class="panel-card"><h3>Repository sharing</h3><p>{{.Config.SharingMode}}</p>
         {{range .Config.RepositorySharing}}<div class="sharing-rule"><code>{{.Repository}}</code><span>may inspect</span>{{range .Related}}<code>{{.}}</code>{{end}}</div>{{else}}{{if eq .Config.SharingMode "Directional rules"}}<p class="muted">No cross-repository rules.</p>{{end}}{{end}}
       </article>
-      <article class="panel-card"><h3>Public sources</h3><h4>Domains</h4><ul class="plain-list">{{range .Config.AllowedPublicDomains}}<li><code>{{.}}</code></li>{{end}}</ul><h4>GitHub repositories</h4><ul class="plain-list">{{range .Config.PublicGitHubRepositories}}<li><code>{{.}}</code></li>{{else}}<li class="muted">None</li>{{end}}</ul></article>
+      <article class="panel-card"><h3>Review tools</h3><ul class="plain-list"><li><code>read</code></li><li><code>bash</code></li></ul><p class="muted">Runs in disposable Git working directories under the credential-free review identity.</p></article>
     </div>
   </details>
 </section>

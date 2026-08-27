@@ -8,7 +8,6 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +22,7 @@ import (
 
 const workerHead = "0123456789abcdef0123456789abcdef01234567"
 
-func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
+func TestWorkerPreparesAndClosesWorkspaceBeforePublication(t *testing.T) {
 	storage, db := workerStore(t)
 	defer storage.Close()
 	defer db.Close()
@@ -31,8 +30,8 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 
 	broker := &fakeGitLab{}
 	workspaces := &fakeWorkspaces{}
-	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}, useTools: true}
-	worker, err := New(storage, broker, nil, []string{"github.com"}, []string{"nginx/nginx"}, workspaces, reviewer, slog.Default(), nil)
+	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}}
+	worker, err := New(storage, broker, workspaces, reviewer, slog.Default(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,95 +39,38 @@ func TestWorkerLoadsAndClosesRequestedRepositoryWorkspace(t *testing.T) {
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
 	}
-	if broker.archiveCalls != 1 || workspaces.createCalls != 1 || workspaces.revision != workerHead || string(workspaces.archive) != "archive" {
-		t.Fatalf("archive calls=%d workspace=%+v", broker.archiveCalls, workspaces)
+	if workspaces.prepareCalls != 1 || workspaces.workspace == nil || !workspaces.workspace.closed {
+		t.Fatalf("prepared workspace = %+v", workspaces)
 	}
-	if workspaces.workspace == nil || workspaces.workspace.calls != 1 || !workspaces.workspace.closed {
-		t.Fatalf("review workspace = %+v", workspaces.workspace)
-	}
-	if len(reviewer.snapshot.AllowedPublicDomains) != 1 || reviewer.snapshot.AllowedPublicDomains[0] != "github.com" ||
-		len(reviewer.snapshot.PublicGitHubRepositories) != 1 || reviewer.snapshot.PublicGitHubRepositories[0] != "nginx/nginx" {
-		t.Fatalf("review public sources = %+v, %+v", reviewer.snapshot.AllowedPublicDomains, reviewer.snapshot.PublicGitHubRepositories)
+	if reviewer.snapshot.WorkingDirectory != "/review/current" || reviewer.snapshot.ReviewMemoryPath != "/review/review-memory.json" {
+		t.Fatalf("review snapshot context = %+v", reviewer.snapshot)
 	}
 }
 
-func TestReviewRepositoryLoadsRelatedRepositoryLazilyAndAttributesResult(t *testing.T) {
-	broker := &fakeGitLab{}
-	workspaces := &fakeWorkspaces{}
-	snapshot := gitlab.Snapshot{
-		Identity: gitlab.Identity{HeadSHA: workerHead}, ProjectPath: "group/project",
-		RelatedRepositories: []string{"group/related"},
-	}
-	tools := newReviewRepository(snapshot, broker, workspaces)
-	defer tools.Close()
+func TestWorkerPreservesReviewAndWorkspaceCleanupFailures(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
 
-	arguments := map[string]any{"repository": "group/related", "path": "contract.go"}
-	result, err := tools.Call(context.Background(), repository.ToolReadFile, arguments)
+	reviewErr := failure.Retry("review_failed", 0)
+	closeErr := errors.New("close failed")
+	workspaces := &fakeWorkspaces{closeErr: closeErr}
+	worker, err := New(storage, &fakeGitLab{}, workspaces, &fakeReviewer{err: reviewErr}, slog.Default(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tools.Call(context.Background(), repository.ToolReadFile, arguments); err != nil {
-		t.Fatal(err)
+	job, err := worker.claim(context.Background())
+	if err != nil || job == nil {
+		t.Fatalf("claim = %+v, %v", job, err)
 	}
-	if broker.archiveCalls != 1 || workspaces.createCalls != 1 || workspaces.revision != strings.Repeat("b", 40) || string(workspaces.archive) != "related-archive" {
-		t.Fatalf("broker=%+v workspaces=%+v", broker, workspaces)
+	err = worker.execute(context.Background(), job)
+	if !errors.Is(err, reviewErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("combined error = %v", err)
 	}
-	if result["repository"] != "group/related" || workspaces.workspace.arguments["repository"] != nil || workspaces.workspace.arguments["path"] != "contract.go" {
-		t.Fatalf("result=%+v workspace arguments=%+v", result, workspaces.workspace.arguments)
-	}
-}
-
-func TestReviewRepositoryBoundsAttributedOutput(t *testing.T) {
-	workspace := &fakeWorkspace{result: map[string]any{"value": strings.Repeat("x", repository.MaxToolResponseBytes-20)}}
-	tools := &reviewRepository{
-		currentRepository: "group/project", relatedRepositories: map[string]struct{}{},
-		open: map[string]repository.Workspace{"group/project": workspace},
-	}
-	_, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": "group/project"})
 	var failureError *failure.Error
-	if !errors.As(err, &failureError) || failureError.Category != "repository_tool_output_limit_exceeded" {
-		t.Fatalf("attributed output error = %v", err)
-	}
-}
-
-func TestReviewRepositoryRejectsUnlistedRepositoryWithoutGitLabAccess(t *testing.T) {
-	broker := &fakeGitLab{}
-	tools := newReviewRepository(gitlab.Snapshot{
-		Identity: gitlab.Identity{HeadSHA: workerHead}, ProjectPath: "group/project",
-	}, broker, &fakeWorkspaces{})
-	_, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": "visible/unconfigured"})
-	var failureError *failure.Error
-	if !errors.As(err, &failureError) || failureError.Category != "repository_unavailable" || failureError.Retryable {
-		t.Fatalf("unlisted repository error = %v", err)
-	}
-	if broker.archiveCalls != 0 {
-		t.Fatalf("unlisted repository caused %d GitLab calls", broker.archiveCalls)
-	}
-}
-
-func TestReviewRepositoryEnforcesSharedResourceLimit(t *testing.T) {
-	related := make([]string, repository.ReviewResourceLimit+1)
-	for index := range related {
-		related[index] = "group/related-" + strconv.Itoa(index)
-	}
-	broker := &fakeGitLab{}
-	workspaces := &fakeWorkspaces{}
-	tools := newReviewRepository(gitlab.Snapshot{
-		Identity: gitlab.Identity{HeadSHA: workerHead}, ProjectPath: "group/project", RelatedRepositories: related,
-	}, broker, workspaces)
-	defer tools.Close()
-	for _, repositoryPath := range related[:repository.ReviewResourceLimit] {
-		if _, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": repositoryPath}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, err := tools.Call(context.Background(), repository.ToolListFiles, map[string]any{"repository": related[len(related)-1]})
-	var failureError *failure.Error
-	if !errors.As(err, &failureError) || failureError.Category != "repository_limit_exceeded" || !failureError.Retryable {
-		t.Fatalf("limit error = %v", err)
-	}
-	if broker.archiveCalls != repository.ReviewResourceLimit || workspaces.createCalls != repository.ReviewResourceLimit {
-		t.Fatalf("archive calls=%d workspace calls=%d", broker.archiveCalls, workspaces.createCalls)
+	if !errors.As(err, &failureError) || failureError.Category != "repository_workspace_cleanup_failed" {
+		t.Fatalf("prioritized failure = %v", err)
 	}
 }
 
@@ -140,22 +82,16 @@ func TestWorkerRetrievesScopedMemoryAndPersistsSuccessfulAudit(t *testing.T) {
 	memoryID := prepareMemoryForWorker(t, storage, now)
 	queueNewWorkerRevision(t, storage, "memory-review", strings.Repeat("b", 40))
 
-	reviewer := &fakeReviewer{
-		result:      review.Result{Summary: "used current evidence", Findings: []review.Finding{}},
-		memoryQuery: "generated source", memoryCalls: 2,
-	}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "used current evidence", Findings: []review.Finding{}}}
 	worker := newTestWorker(t, storage, &fakeGitLab{}, reviewer, nil)
 	worker.now = func() time.Time { return now.Add(10 * time.Second) }
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
 	}
-	memories, ok := reviewer.memoryResult["memories"].([]map[string]any)
-	if !ok || len(memories) != 1 || memories[0]["memory_id"] != memoryID || reviewer.memoryResult["authority"] != "untrusted_advisory" {
-		t.Fatalf("memory result = %+v", reviewer.memoryResult)
-	}
-	if memories[0]["lesson"] == "" || memories[0]["evidence_reference"] == "" {
-		t.Fatalf("memory evidence = %+v", memories[0])
+	if len(reviewer.memories) != 1 || reviewer.memories[0].ID != memoryID ||
+		reviewer.memories[0].Lesson == "" || reviewer.memories[0].SourceURL == "" {
+		t.Fatalf("materialized memories = %+v", reviewer.memories)
 	}
 	var auditMemoryID string
 	if err := db.QueryRow(`SELECT memory_id FROM review_memory_retrievals`).Scan(&auditMemoryID); err != nil {
@@ -173,7 +109,7 @@ func TestWorkerRetriesMemoryStoreFailureWithoutPublishing(t *testing.T) {
 	defer db.Close()
 	queueJob(t, storage)
 	failing := &failingMemoryStore{Store: storage}
-	reviewer := &fakeReviewer{result: review.Result{Summary: "degraded", Findings: []review.Finding{}}, memoryQuery: "generated"}
+	reviewer := &fakeReviewer{result: review.Result{Summary: "degraded", Findings: []review.Finding{}}}
 	broker := &fakeGitLab{}
 	worker := newTestWorker(t, failing, broker, reviewer, nil)
 	processed, err := worker.ProcessOne(context.Background())
@@ -212,7 +148,7 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	assertCount(t, db, "review_results", 1)
 	assertCount(t, db, "review_findings", 1)
 	assertCount(t, db, "publications", 1)
-	if broker.loadCalls != 1 || broker.archiveCalls != 0 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
+	if broker.loadCalls != 1 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
 		t.Fatalf("calls: broker=%+v reviewer=%+v", broker, reviewer)
 	}
 	expectedFindingID := review.FindingID("http://gitlab.internal", 42, 7, workerHead, 1)
@@ -289,7 +225,7 @@ func TestWorkerCompletesEquivalentPatchWithoutReviewOrPublication(t *testing.T) 
 	if rows.Next() {
 		t.Fatal("unexpected extra review job")
 	}
-	if reviewer.calls != 1 || broker.loadCalls != 2 || broker.archiveCalls != 0 || broker.postCalls != 1 {
+	if reviewer.calls != 1 || broker.loadCalls != 2 || broker.postCalls != 1 {
 		t.Fatalf("broker=%+v reviewer calls=%d", broker, reviewer.calls)
 	}
 	assertCount(t, db, "review_results", 1)
@@ -720,7 +656,7 @@ func newTestWorker(t *testing.T, storage JobStore, broker *fakeGitLab, reviewer 
 	if logs == nil {
 		logs = &bytes.Buffer{}
 	}
-	result, err := New(storage, broker, nil, nil, nil, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
+	result, err := New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -826,7 +762,6 @@ type fakeGitLab struct {
 	checkError       error
 	checkErrors      []error
 	loadCalls        int
-	archiveCalls     int
 	checkCalls       int
 	findCalls        int
 	postCalls        int
@@ -852,16 +787,6 @@ func (g *fakeGitLab) LoadReview(_ context.Context, identity gitlab.Identity) (gi
 		PatchIDStatus: patchIDStatus, PatchIDSHA: patchIDSHA,
 		Files: []gitlab.ChangedFile{{OldPath: "main.go", NewPath: "main.go", Diff: "+private-diff"}},
 	}, nil
-}
-
-func (g *fakeGitLab) LoadRepositoryArchive(_ context.Context, _ gitlab.Identity) ([]byte, error) {
-	g.archiveCalls++
-	return []byte("archive"), nil
-}
-
-func (g *fakeGitLab) LoadRelatedRepositoryArchive(_ context.Context, _, _ string) (string, []byte, error) {
-	g.archiveCalls++
-	return strings.Repeat("b", 40), []byte("related-archive"), nil
 }
 
 func (g *fakeGitLab) CheckCurrent(_ context.Context, _ gitlab.Identity) error {
@@ -892,17 +817,31 @@ func (g *fakeGitLab) PostNote(_ context.Context, _ gitlab.Identity, body string)
 }
 
 type fakeWorkspaces struct {
-	createCalls int
-	revision    string
-	archive     []byte
-	workspace   *fakeWorkspace
+	prepareCalls int
+	snapshot     gitlab.Snapshot
+	memories     []repository.Memory
+	workspace    *fakeWorkspace
+	prepareErr   error
+	closeErr     error
 }
 
-func (m *fakeWorkspaces) Create(_ context.Context, revision string, archive []byte) (repository.Workspace, error) {
-	m.createCalls++
-	m.revision = revision
-	m.archive = append([]byte(nil), archive...)
-	m.workspace = &fakeWorkspace{}
+func (m *fakeWorkspaces) Prepare(_ context.Context, snapshot gitlab.Snapshot, memories []repository.Memory) (repository.Workspace, error) {
+	m.prepareCalls++
+	m.snapshot = snapshot
+	m.memories = append([]repository.Memory(nil), memories...)
+	if m.prepareErr != nil {
+		return nil, m.prepareErr
+	}
+	m.workspace = &fakeWorkspace{
+		memories: append([]repository.Memory(nil), memories...), closeErr: m.closeErr,
+		context: repository.ReviewContext{
+			WorkingDirectory: "/review/current", ReviewedHead: snapshot.Identity.HeadSHA,
+			RelatedRepositories: []repository.PreparedRepository{{
+				Repository: "group/related", Path: "/review/related/group/related", InitialRevision: strings.Repeat("b", 40),
+			}},
+			MemoryPath: "/review/review-memory.json",
+		},
+	}
 	return m.workspace, nil
 }
 
@@ -910,57 +849,44 @@ type fakeWorkspace struct {
 	closed    bool
 	calls     int
 	arguments map[string]any
-	result    map[string]any
+	result    repository.ToolResult
+	memories  []repository.Memory
+	context   repository.ReviewContext
+	closeErr  error
 }
 
-func (w *fakeWorkspace) Call(_ context.Context, _ string, arguments map[string]any) (map[string]any, error) {
+func (w *fakeWorkspace) Context() repository.ReviewContext { return w.context }
+
+func (w *fakeWorkspace) Call(_ context.Context, _ string, arguments map[string]any) (repository.ToolResult, error) {
 	w.calls++
 	w.arguments = arguments
-	if w.result != nil {
+	if w.result.Response != nil {
 		return w.result, nil
 	}
-	return map[string]any{"files": []string{}}, nil
+	return repository.ToolResult{Response: map[string]any{"output": "ok"}}, nil
 }
 
 func (w *fakeWorkspace) Close() error {
 	w.closed = true
-	return nil
+	return w.closeErr
 }
 
 type fakeReviewer struct {
-	result       review.Result
-	snapshot     gitlab.Snapshot
-	err          error
-	calls        int
-	useTools     bool
-	memoryQuery  string
-	memoryCalls  int
-	memoryResult map[string]any
+	result   review.Result
+	snapshot gitlab.Snapshot
+	err      error
+	calls    int
+	memories []repository.Memory
 }
 
-func (r *fakeReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, tools repository.ToolBroker) (review.Result, []byte, error) {
+func (r *fakeReviewer) Review(_ context.Context, snapshot gitlab.Snapshot, tools repository.ToolBroker) (review.Result, []byte, error) {
 	r.calls++
 	r.snapshot = snapshot
+	if workspace, ok := tools.(*fakeWorkspace); ok {
+		r.memories = append([]repository.Memory(nil), workspace.memories...)
+	}
 	if r.err != nil {
 		return review.Result{}, nil, r.err
-	}
-	if r.memoryQuery != "" {
-		calls := r.memoryCalls
-		if calls == 0 {
-			calls = 1
-		}
-		for index := 0; index < calls; index++ {
-			result, err := tools.Call(ctx, review.ToolSearchMemory, map[string]any{"query": r.memoryQuery})
-			if err != nil {
-				return review.Result{}, nil, err
-			}
-			r.memoryResult = result
-		}
-	}
-	if r.useTools {
-		if _, err := tools.Call(ctx, repository.ToolListFiles, map[string]any{"repository": "group/project"}); err != nil {
-			return review.Result{}, nil, err
-		}
 	}
 	encoded, err := json.Marshal(r.result)
 	return r.result, encoded, err

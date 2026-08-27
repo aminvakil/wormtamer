@@ -1,6 +1,6 @@
 # Container deployment
 
-Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, and public CA certificates. Configuration, credentials, and SQLite state remain outside the image.
+Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, public CA certificates, Bash, Git, ripgrep (`rg`), fd (`fd`), and curl. Configuration, credentials, SQLite state, and disposable review workspaces remain outside the image.
 
 ## Image
 
@@ -10,7 +10,12 @@ Pull the published image from GitHub Container Registry:
 docker pull ghcr.io/aminvakil/wormtamer:latest
 ```
 
-Each release updates `ghcr.io/aminvakil/wormtamer:latest`.
+Each release updates `ghcr.io/aminvakil/wormtamer:latest`. Verify the model's expected commands in an image with:
+
+```sh
+docker run --rm --entrypoint /bin/bash ghcr.io/aminvakil/wormtamer:latest \
+  -c 'command -v bash git rg fd curl'
+```
 
 ## Configure
 
@@ -28,7 +33,7 @@ Use a GitLab personal access token with `api` scope whose user has at least the 
 
 `share_all_authorized_repositories` defaults to `false`. Enabling it makes every other authorized repository available as related context in every review and cannot be combined with a non-empty `repository_sharing` map. **Enable it only when every person able to view merge requests in any authorized repository may receive information derived from every other authorized repository.** Keep it disabled and use directional rules when repository audiences differ. The setting does not authorize unlisted repositories or eagerly download related repositories.
 
-`public_sources.allowed_domains` must include `github.com`. Each entry authorizes bounded model-directed HTTPS retrieval from that exact domain and its subdomains; for example, `syncthing.net` also permits `docs.syncthing.net`. `public_sources.github_repositories` lists exact public GitHub repositories as `<owner>/<repository>` slugs, such as `nginx/nginx`, that the model may inspect through bounded snapshot file tools. These public sources are available to every review, so add only domains to which the team permits bounded request paths to be disclosed. Public access is unauthenticated, ignores environment proxy settings, and remains subject to GitHub's public rate limits. Deployment-level egress filtering is recommended in addition to application checks.
+`review_workspace_path` identifies disposable storage exposed only to the credential-free review-tool identity; the example uses `/var/lib/wormtamer-reviews`. Keep it outside the configuration and SQLite directories. Model-directed Bash has ordinary network access and can use curl without an application domain allowlist. The accepted trust boundary is documented under [Local review agent](agents/security.md#local-review-agent).
 
 Configure each authorized GitLab project to send merge request webhooks to:
 
@@ -38,19 +43,22 @@ https://wormtamer.example/webhooks/gitlab
 
 The webhook secret in GitLab must equal `gitlab.webhook_secret`. Close and merge events let Wormtamer evaluate the terminal diff, current comments, and its locally persisted review. Note Hook deliveries are ignored.
 
-The configuration contains plaintext credentials. Keep it outside version control, restrict host access, and mount it read-only. The process runs as the image's `nobody` user; the mounted file must be readable by that identity. Do not pass credentials through command arguments or bake them into another image.
+The configuration contains plaintext credentials. Keep it outside version control, set it to mode `0600` or stricter, restrict its parent directory, and mount it read-only. The service process runs as root only so it can own private state and launch tools as fixed UID/GID `65532`; the model never receives a root process. Startup fails if the review-tool identity can access the configuration or SQLite paths. Do not pass credentials through command arguments or bake them into another image.
 
-## Store state
+## Store state and disposable workspaces
 
-Use one persistent volume for `/var/lib/wormtamer`. The SQLite database, WAL, and shared-memory files must remain together on storage that provides reliable filesystem locking.
+Use one persistent volume for `/var/lib/wormtamer`. The SQLite database, WAL, and shared-memory files must remain together on storage that provides reliable filesystem locking. Use a separate disposable volume or filesystem for `/var/lib/wormtamer-reviews` so review activity and disk exhaustion cannot starve persistent SQLite storage.
 
-A Docker-managed volume is the simplest option:
+Docker-managed volumes are the simplest option:
 
 ```sh
 docker volume create wormtamer-data
+docker volume create wormtamer-workspaces
 ```
 
-The image initializes `/var/lib/wormtamer` for its `nobody` user. If a bind mount is used instead, the operator must make its directory writable by that identity (UID and GID `65534` in the selected runtime image). Never run multiple Wormtamer containers against the volume.
+The image initializes the state directory as root-owned mode `0700` and the review-workspace parent as root-owned mode `0711`; individual exposed review roots become owned by UID/GID `65532`. If bind mounts are used, preserve those ownership and traversal properties. Never run multiple Wormtamer containers against either volume.
+
+Size and monitor disposable capacity for complete Git histories of the current and every prepared related repository, bounded command-output spools, model-created Git worktrees, and arbitrary files created or copied by Bash. Wormtamer intentionally has no workspace-size quota. Filesystem allocation or write failure fails the active setup or tool call; it does not trigger a cleanup-and-continue fallback.
 
 ## Run
 
@@ -62,6 +70,7 @@ docker run --detach \
   --publish 8080:8080 \
   --mount type=bind,src=/absolute/path/config.json,dst=/etc/wormtamer/config.json,readonly \
   --mount type=volume,src=wormtamer-data,dst=/var/lib/wormtamer \
+  --mount type=volume,src=wormtamer-workspaces,dst=/var/lib/wormtamer-reviews \
   ghcr.io/aminvakil/wormtamer:latest
 ```
 
@@ -81,7 +90,7 @@ curl --fail --silent --show-error http://127.0.0.1:8080/healthcheck
 
 A successful response confirms that startup completed and the HTTP server is live. It does not check GitLab, Gemini, or queued jobs.
 
-Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, terminal feedback processing, runtime memory, model usage, non-secret effective configuration, and current-process diagnostics. Review, feedback, memory, generation, and log history use bounded pagination or fixed buffers. The panel does not probe GitLab, Gemini, repositories, public sources, files, containers, or external logging services while rendering.
+Open `http://127.0.0.1:8080/` to view the built-in read-only panel. It shows current persisted job counts, review history and findings, terminal feedback processing, runtime memory, model usage, non-secret effective configuration, and current-process diagnostics. Review, feedback, memory, generation, and log history use bounded pagination or fixed buffers. The panel does not probe GitLab, Gemini, repositories, files, containers, or external logging services while rendering.
 
 The panel also exposes `/reviews`, `/feedback`, `/memory`, `/usage`, `/diagnostics/conversations`, and `/diagnostics/logs`, with review, feedback, generation, and conversation detail routes; it has no controls or request methods for changing application state, logging, or diagnostics. Conversation links use a contained durable generation ID. A review attempt is one conversation across all of its turns, while a feedback attempt contains one generation. `/usage` reports rolling 24-hour, 7-day, and 30-day application-observed token totals and bounded model, repository, and request-kind breakdowns. When pricing or response cost is retrieved it shows aggregate estimated cost in USD, not per-generation prices, formulas, or rates. Review summaries and memory lessons may contain private project information.
 
@@ -107,7 +116,7 @@ docker exec wormtamer wormtamer -config /etc/wormtamer/config.json jobs retry fe
 
 These commands open the same SQLite volume briefly but do not start an HTTP listener, worker, reconciler, or external client. They are safe alongside the one running replica because retry is a conditional transaction; they are not a way to start a second service replica. Their output contains operational identifiers and error categories, not stored error messages, webhook payloads, review results, comments, or memory lessons.
 
-For model diagnostics, set `"log_level": "debug"` and restart the container. Stderr debug events include the complete model system instruction and prompt, each requested tool and its arguments, each validated tool result, and the validated final model response. The conversation view then shows the application-visible sequence, including admitted tool responses and fixed limit denials, but never hidden thought text, thought signatures, or SDK protocol data. Review tool-call arguments show when Gemini chooses a directionally shared repository. These diagnostics can contain private merge request data, repository content, comments, memory, public content, model output, and secrets unknown to Wormtamer. Restrict both panel and stderr access and retention, and restore `"log_level": "info"` after diagnosis. Wormtamer replaces any diagnostic value containing a configured GitLab or Gemini credential before buffering it.
+For model diagnostics, set `"log_level": "debug"` and restart the container. Stderr debug events include the complete model system instruction and prompt, each requested tool and its arguments, each admitted bounded tool result, and the validated final model response. The conversation view then shows the application-visible sequence, including fixed `tool_result_limit_exceeded` bookkeeping responses, but never hidden thought text, thought signatures, or SDK protocol data. These diagnostics can contain private merge request data, repository and command output, comments, memory, model output, and secrets unknown to Wormtamer. Restrict both panel and stderr access and retention, and restore `"log_level": "info"` after diagnosis. Wormtamer replaces any diagnostic value containing a configured GitLab or Gemini credential before buffering it.
 
 Conversation buffering is fixed at 64 attempts, 4 MiB per attempt, and 32 MiB total. Structured panel logging is fixed at 2,000 events, 16 KiB per event, 8 MiB total, and 64 attributes per event. Logs evict the oldest event, while conversations evict the oldest completed record before a generation that is still started; an impossible all-active overflow omits the newest active conversation. Individually oversized records show an omission marker rather than partial content. Both views display their process start and eviction state. At non-debug levels, conversation pages show current-process generation metadata but never prompts, responses, tool arguments, or tool results.
 
@@ -115,6 +124,6 @@ Restarting the container clears both diagnostic buffers. Using the same volume s
 
 ## Back up and restore
 
-The operator owns backup and restore. For a filesystem-level backup, stop Wormtamer and back up the entire persistent volume so the database and any WAL state stay together. An online backup must use a SQLite-aware backup mechanism; copying only the live database file is unsafe.
+The operator owns backup and restore. For a filesystem-level backup, stop Wormtamer and back up the entire persistent state volume so the database and any WAL state stay together. The disposable review-workspace volume is excluded and may be cleared while Wormtamer is stopped. An online backup must use a SQLite-aware backup mechanism; copying only the live database file is unsafe.
 
-Restore only while Wormtamer is stopped, restore the complete persistent state to storage writable by the image's `nobody` user, and then start one container with that volume. Protect backups as sensitive data because stored webhook payloads may contain private repository metadata. Model-generation records contain structured operational metadata and token counts, but no prompts, model responses, tool content, comments, or repository content. No automatic generation-record retention policy is currently applied.
+Restore only while Wormtamer is stopped, restore the complete persistent state to root-owned mode-`0700` storage, and then start one container with that volume. Protect backups as sensitive data because stored webhook payloads may contain private repository metadata. Model-generation records contain structured operational metadata and token counts, but no prompts, model responses, tool content, comments, or repository content. No automatic generation-record retention policy is currently applied.

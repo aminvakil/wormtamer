@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -22,7 +23,6 @@ import (
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/memory"
 	"github.com/aminvakil/wormtamer/internal/panel"
-	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/reconcile"
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
@@ -35,6 +35,12 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
+	if repository.IsReadHelperInvocation(os.Args[1:]) {
+		if err := repository.RunReadHelper(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -66,10 +72,11 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if cfg.LogLevel == "debug" {
 		serviceLogger.Warn("debug logging enabled; logs include private model prompts, responses, and tool content")
 	}
-	if cfg.ConfigFileBroadlyRead {
-		serviceLogger.Warn("configuration file is readable by group or other users")
+	if invocation.jobs == nil {
+		if err := validateCredentialBoundary(cfg); err != nil {
+			return err
+		}
 	}
-
 	storage, err := store.Open(ctx, cfg.DatabasePath)
 	if err != nil {
 		return err
@@ -77,6 +84,9 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	defer storage.Close()
 	if invocation.jobs != nil {
 		return executeJobsCommand(ctx, storage, *invocation.jobs, output)
+	}
+	if err := validateCredentialBoundary(cfg); err != nil {
+		return err
 	}
 	if err := storage.MarkStartedModelGenerationsUnknown(ctx); err != nil {
 		return err
@@ -106,14 +116,16 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		AuthorizedRepositories:         cfg.AuthorizedRepositories,
 		ShareAllAuthorizedRepositories: cfg.ShareAllAuthorizedRepositories,
 		RepositorySharing:              cfg.RepositorySharing,
-		AllowedPublicDomains:           cfg.PublicSources.AllowedDomains,
-		PublicGitHubRepositories:       cfg.PublicSources.GitHubRepositories,
 	}, logger.With("component", "panel"), diagnosticRecorder)
 	if err != nil {
 		return err
 	}
 
-	workspaceManager, err := repository.NewManager(cfg.DatabasePath + ".workspaces")
+	workspaceManager, err := repository.NewManager(repository.ManagerConfig{
+		Root: cfg.ReviewWorkspacePath, GitLabBaseURL: cfg.GitLab.BaseURL,
+		PersonalAccessToken: cfg.GitLab.PersonalAccessToken,
+		ToolUID:             repository.DefaultToolUID, ToolGID: repository.DefaultToolGID,
+	})
 	if err != nil {
 		return err
 	}
@@ -128,13 +140,8 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err != nil {
 		return err
 	}
-	publicClient, err := publicsource.New(cfg.PublicSources.AllowedDomains, cfg.PublicSources.GitHubRepositories, forbidden)
-	if err != nil {
-		return err
-	}
-	reviewWorker, err := worker.New(storage, gitLabClient, publicClient,
-		cfg.PublicSources.AllowedDomains, cfg.PublicSources.GitHubRepositories,
-		workspaceManager, geminiReviewer, logger.With("component", "review_worker", "job_kind", "review"), forbidden)
+	reviewWorker, err := worker.New(storage, gitLabClient, workspaceManager, geminiReviewer,
+		logger.With("component", "review_worker", "job_kind", "review"), forbidden)
 	if err != nil {
 		return err
 	}
@@ -257,6 +264,12 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	}
 	serviceLogger.Info("HTTP server stopped")
 	return processError
+}
+
+func validateCredentialBoundary(cfg config.Config) error {
+	return repository.ValidateCredentialBoundary(repository.DefaultToolUID, repository.DefaultToolGID,
+		[]string{cfg.ConfigPath, cfg.DatabasePath, cfg.DatabasePath + "-wal", cfg.DatabasePath + "-shm"},
+		[]string{filepath.Dir(cfg.ConfigPath), filepath.Dir(cfg.DatabasePath)})
 }
 
 func serviceRoutes(ingress, panel http.Handler) http.Handler {

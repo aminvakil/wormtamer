@@ -23,7 +23,6 @@ const (
 	requestTimeout              = 30 * time.Second
 	metadataResponseLimit       = 256 << 10
 	diffResponseLimit           = 2 << 20
-	archiveResponseLimit        = 32 << 20
 	noteResponseLimit           = 2 << 20
 	maxDiffPages                = 5
 	diffsPerPage                = 20
@@ -60,18 +59,25 @@ type Identity struct {
 }
 
 type Snapshot struct {
-	Identity                 Identity
-	ProjectPath              string
-	RelatedRepositories      []string
-	AllowedPublicDomains     []string
-	PublicGitHubRepositories []string
-	Title                    string
-	Description              string
-	SourceBranch             string
-	TargetBranch             string
-	PatchIDStatus            string
-	PatchIDSHA               string
-	Files                    []ChangedFile
+	Identity             Identity
+	ProjectPath          string
+	RelatedRepositories  []string
+	WorkingDirectory     string
+	PreparedRepositories []PreparedRepository
+	ReviewMemoryPath     string
+	Title                string
+	Description          string
+	SourceBranch         string
+	TargetBranch         string
+	PatchIDStatus        string
+	PatchIDSHA           string
+	Files                []ChangedFile
+}
+
+type PreparedRepository struct {
+	Repository      string `json:"repository"`
+	Path            string `json:"path"`
+	InitialRevision string `json:"initial_revision"`
 }
 
 type ChangedFile struct {
@@ -123,14 +129,6 @@ type Client struct {
 type projectResponse struct {
 	ID                int64  `json:"id"`
 	PathWithNamespace string `json:"path_with_namespace"`
-	DefaultBranch     string `json:"default_branch"`
-}
-
-type branchResponse struct {
-	Name   string `json:"name"`
-	Commit struct {
-		ID string `json:"id"`
-	} `json:"commit"`
 }
 
 type reconciliationMergeRequestResponse struct {
@@ -331,49 +329,6 @@ func (c *Client) LoadReview(ctx context.Context, identity Identity) (Snapshot, e
 		PatchIDSHA:          patchIDSHA,
 		Files:               files,
 	}, nil
-}
-
-func (c *Client) LoadRepositoryArchive(ctx context.Context, identity Identity) ([]byte, error) {
-	if err := c.validateIdentity(identity); err != nil {
-		return nil, err
-	}
-	if _, err := c.checkProject(ctx, identity.ProjectID); err != nil {
-		return nil, err
-	}
-	query := url.Values{"sha": {strings.ToLower(identity.HeadSHA)}}
-	return c.download(ctx, fmt.Sprintf("/projects/%d/repository/archive.tar.gz", identity.ProjectID), query, archiveResponseLimit)
-}
-
-func (c *Client) LoadRelatedRepositoryArchive(ctx context.Context, reviewedRepository, relatedRepository string) (string, []byte, error) {
-	shared, targetAllowed := c.sharing[reviewedRepository]
-	if !targetAllowed {
-		return "", nil, failure.Failed("repository_unavailable")
-	}
-	if _, allowed := shared[relatedRepository]; !allowed {
-		return "", nil, failure.Failed("repository_unavailable")
-	}
-	project, err := c.resolveProject(ctx, relatedRepository)
-	if err != nil {
-		return "", nil, err
-	}
-	if project.DefaultBranch == "" || len(project.DefaultBranch) > 1024 || strings.ContainsRune(project.DefaultBranch, '\x00') {
-		return "", nil, failure.Failed("malformed_gitlab_response")
-	}
-	var branch branchResponse
-	endpoint := fmt.Sprintf("/projects/%d/repository/branches/%s", project.ID, url.PathEscape(project.DefaultBranch))
-	if _, err := c.get(ctx, endpoint, nil, metadataResponseLimit, &branch); err != nil {
-		return "", nil, err
-	}
-	if branch.Name != project.DefaultBranch || !headSHAPattern.MatchString(branch.Commit.ID) {
-		return "", nil, failure.Failed("malformed_gitlab_response")
-	}
-	revision := strings.ToLower(branch.Commit.ID)
-	query := url.Values{"sha": {revision}}
-	archive, err := c.download(ctx, fmt.Sprintf("/projects/%d/repository/archive.tar.gz", project.ID), query, archiveResponseLimit)
-	if err != nil {
-		return "", nil, err
-	}
-	return revision, archive, nil
 }
 
 func (c *Client) CheckCurrent(ctx context.Context, identity Identity) error {
@@ -747,22 +702,6 @@ func (c *Client) request(ctx context.Context, method, endpoint string, query url
 		return nil, failure.Failed("malformed_gitlab_response")
 	}
 	return response.Header, nil
-}
-
-func (c *Client) download(ctx context.Context, endpoint string, query url.Values, limit int64) ([]byte, error) {
-	response, err := c.do(ctx, http.MethodGet, endpoint, query, nil, "application/octet-stream")
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, failure.Retry("gitlab_response_read_failed", 0)
-	}
-	if int64(len(contents)) > limit {
-		return nil, failure.Failed("repository_archive_response_limit_exceeded")
-	}
-	return contents, nil
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, body []byte, accept string) (*http.Response, error) {

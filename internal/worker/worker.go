@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
-	"github.com/aminvakil/wormtamer/internal/publicsource"
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
@@ -45,15 +43,13 @@ type JobStore interface {
 
 type GitLabBroker interface {
 	LoadReview(context.Context, gitlab.Identity) (gitlab.Snapshot, error)
-	LoadRepositoryArchive(context.Context, gitlab.Identity) ([]byte, error)
-	LoadRelatedRepositoryArchive(context.Context, string, string) (string, []byte, error)
 	CheckCurrent(context.Context, gitlab.Identity) error
 	FindNote(context.Context, gitlab.Identity, string) (int64, bool, error)
 	PostNote(context.Context, gitlab.Identity, string) (int64, error)
 }
 
 type RepositoryWorkspaces interface {
-	Create(context.Context, string, []byte) (repository.Workspace, error)
+	Prepare(context.Context, gitlab.Snapshot, []repository.Memory) (repository.Workspace, error)
 }
 
 type Reviewer interface {
@@ -63,115 +59,24 @@ type Reviewer interface {
 var errPatchIDDeferred = errors.New("patch ID deferred")
 
 type Worker struct {
-	store                    JobStore
-	gitlab                   GitLabBroker
-	public                   publicsource.Broker
-	allowedPublicDomains     []string
-	publicGitHubRepositories []string
-	workspaces               RepositoryWorkspaces
-	reviewer                 Reviewer
-	logger                   *slog.Logger
-	owner                    string
-	forbidden                []string
-	now                      func() time.Time
-	shutdownGrace            time.Duration
+	store         JobStore
+	gitlab        GitLabBroker
+	workspaces    RepositoryWorkspaces
+	reviewer      Reviewer
+	logger        *slog.Logger
+	owner         string
+	forbidden     []string
+	now           func() time.Time
+	shutdownGrace time.Duration
 }
 
-type reviewRepository struct {
-	identity            gitlab.Identity
-	currentRepository   string
-	relatedRepositories map[string]struct{}
-	gitlab              GitLabBroker
-	workspaces          RepositoryWorkspaces
-	open                map[string]repository.Workspace
-}
-
-func newReviewRepository(snapshot gitlab.Snapshot, gitLab GitLabBroker, workspaces RepositoryWorkspaces) *reviewRepository {
-	related := make(map[string]struct{}, len(snapshot.RelatedRepositories))
-	for _, repositoryPath := range snapshot.RelatedRepositories {
-		related[repositoryPath] = struct{}{}
-	}
-	return &reviewRepository{
-		identity: snapshot.Identity, currentRepository: snapshot.ProjectPath,
-		relatedRepositories: related, gitlab: gitLab, workspaces: workspaces,
-		open: make(map[string]repository.Workspace),
-	}
-}
-
-func (r *reviewRepository) Call(ctx context.Context, name string, arguments map[string]any) (map[string]any, error) {
-	requested, ok := arguments["repository"].(string)
-	if !ok || requested == "" {
-		return nil, failure.Failed("repository_tool_arguments_invalid")
-	}
-	if requested != r.currentRepository {
-		if _, allowed := r.relatedRepositories[requested]; !allowed {
-			return nil, failure.Failed("repository_unavailable")
-		}
-	}
-	workspace := r.open[requested]
-	if workspace == nil {
-		if len(r.open) >= repository.ReviewResourceLimit {
-			return nil, failure.Retry("repository_limit_exceeded", 0)
-		}
-		var revision string
-		var archive []byte
-		var err error
-		if requested == r.currentRepository {
-			revision = r.identity.HeadSHA
-			archive, err = r.gitlab.LoadRepositoryArchive(ctx, r.identity)
-		} else {
-			revision, archive, err = r.gitlab.LoadRelatedRepositoryArchive(ctx, r.currentRepository, requested)
-		}
-		if err != nil {
-			return nil, err
-		}
-		workspace, err = r.workspaces.Create(ctx, revision, archive)
-		if err != nil {
-			return nil, err
-		}
-		r.open[requested] = workspace
-	}
-	workspaceArguments := make(map[string]any, len(arguments)-1)
-	for key, value := range arguments {
-		if key != "repository" {
-			workspaceArguments[key] = value
-		}
-	}
-	result, err := workspace.Call(ctx, name, workspaceArguments)
-	if err != nil {
-		return nil, err
-	}
-	result["repository"] = requested
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return nil, failure.Failed("repository_tool_output_invalid")
-	}
-	if len(encoded) > repository.MaxToolResponseBytes {
-		return nil, failure.Failed("repository_tool_output_limit_exceeded")
-	}
-	return result, nil
-}
-
-func (r *reviewRepository) Close() error {
-	var firstError error
-	for _, workspace := range r.open {
-		if err := workspace.Close(); err != nil && firstError == nil {
-			firstError = err
-		}
-	}
-	return firstError
-}
-
-func New(storage JobStore, gitLab GitLabBroker, publicBroker publicsource.Broker, allowedPublicDomains, publicGitHubRepositories []string, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string) (*Worker, error) {
+func New(storage JobStore, gitLab GitLabBroker, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string) (*Worker, error) {
 	ownerBytes := make([]byte, 16)
 	if _, err := rand.Read(ownerBytes); err != nil {
 		return nil, errors.New("generate worker lease owner")
 	}
 	return &Worker{
-		store: storage, gitlab: gitLab, public: publicBroker,
-		allowedPublicDomains:     append([]string(nil), allowedPublicDomains...),
-		publicGitHubRepositories: append([]string(nil), publicGitHubRepositories...),
-		workspaces:               workspaces, reviewer: reviewer, logger: logger,
+		store: storage, gitlab: gitLab, workspaces: workspaces, reviewer: reviewer, logger: logger,
 		owner: hex.EncodeToString(ownerBytes), forbidden: append([]string(nil), forbidden...),
 		now: time.Now, shutdownGrace: shutdownGracePeriod,
 	}, nil
@@ -358,19 +263,47 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 				return nil
 			}
 		}
-		snapshot.AllowedPublicDomains = append([]string(nil), w.allowedPublicDomains...)
-		snapshot.PublicGitHubRepositories = append([]string(nil), w.publicGitHubRepositories...)
-		tools := newReviewTools(snapshot, w.gitlab, w.public, w.workspaces, w.store, w.now)
+		memories, err := w.store.ListReviewMemories(ctx, snapshot.Identity.GitLabInstance, snapshot.Identity.ProjectID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return failure.Retry("memory_retrieval_failed", 0)
+		}
+		materialized := make([]repository.Memory, len(memories))
+		retrievedAt := w.now().UTC()
+		retrievals := make([]store.ReviewMemoryRetrieval, len(memories))
+		for index, memory := range memories {
+			materialized[index] = repository.Memory{
+				ID: memory.MemoryID, Lesson: memory.Lesson, SourceURL: memory.SourceURL, UpdatedAt: memory.UpdatedAt,
+			}
+			retrievals[index] = store.ReviewMemoryRetrieval{
+				MemoryID: memory.MemoryID, MemoryUpdatedAt: memory.UpdatedAt, RetrievedAt: retrievedAt,
+			}
+		}
+		workspace, err := w.workspaces.Prepare(ctx, snapshot, materialized)
+		if err != nil {
+			return err
+		}
+		prepared := workspace.Context()
+		snapshot.WorkingDirectory = prepared.WorkingDirectory
+		snapshot.ReviewMemoryPath = prepared.MemoryPath
+		snapshot.PreparedRepositories = make([]gitlab.PreparedRepository, len(prepared.RelatedRepositories))
+		for index, related := range prepared.RelatedRepositories {
+			snapshot.PreparedRepositories[index] = gitlab.PreparedRepository{
+				Repository: related.Repository, Path: related.Path, InitialRevision: related.InitialRevision,
+			}
+		}
 		reviewCtx := usage.WithScope(ctx, usage.Scope{
 			RequestKind: usage.RequestReview, ReviewJobID: job.ID, Attempt: job.AttemptCount,
 		})
-		validated, encoded, reviewErr := w.reviewer.Review(reviewCtx, snapshot, tools)
-		closeErr := tools.Close()
+		validated, encoded, reviewErr := w.reviewer.Review(reviewCtx, snapshot, workspace)
+		closeErr := workspace.Close()
+		if closeErr != nil {
+			return errors.Join(failure.Retry("repository_workspace_cleanup_failed", 0), closeErr, reviewErr)
+		}
 		if reviewErr != nil {
 			return reviewErr
-		}
-		if closeErr != nil {
-			return failure.Retry("repository_workspace_cleanup_failed", 0)
 		}
 		job.FindingIDs = findingIDs(identity, len(validated.Findings))
 		if err := applyFindingIDs(&validated, job.FindingIDs); err != nil {
@@ -380,7 +313,7 @@ func (w *Worker) execute(ctx context.Context, job *store.Job) error {
 		if snapshot.PatchIDStatus == gitlab.PatchIDAvailable {
 			patchIDStatus = store.PatchIDAvailable
 		}
-		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, tools.Retrievals(), patchIDStatus, snapshot.PatchIDSHA, w.now().UTC()); err != nil {
+		if err := w.store.SaveReviewResult(ctx, job.ID, w.owner, encoded, job.FindingIDs, retrievals, patchIDStatus, snapshot.PatchIDSHA, w.now().UTC()); err != nil {
 			if errors.Is(err, store.ErrLeaseLost) {
 				return err
 			}

@@ -56,8 +56,6 @@ type Config struct {
 	AuthorizedRepositories         []string
 	ShareAllAuthorizedRepositories bool
 	RepositorySharing              map[string][]string
-	AllowedPublicDomains           []string
-	PublicGitHubRepositories       []string
 }
 
 type Handler struct {
@@ -72,16 +70,14 @@ type Handler struct {
 }
 
 type configView struct {
-	GitLabBaseURL            string
-	GeminiEndpoint           string
-	GeminiModel              string
-	GeminiThinkingLevel      string
-	LogLevel                 string
-	AuthorizedRepositories   []string
-	SharingMode              string
-	RepositorySharing        []sharingView
-	AllowedPublicDomains     []string
-	PublicGitHubRepositories []string
+	GitLabBaseURL          string
+	GeminiEndpoint         string
+	GeminiModel            string
+	GeminiThinkingLevel    string
+	LogLevel               string
+	AuthorizedRepositories []string
+	SharingMode            string
+	RepositorySharing      []sharingView
 }
 
 type sharingView struct {
@@ -865,14 +861,12 @@ func setSecurityHeaders(w http.ResponseWriter) {
 
 func panelConfig(config Config) configView {
 	view := configView{
-		GitLabBaseURL:            config.GitLabBaseURL,
-		GeminiEndpoint:           config.GeminiEndpoint,
-		GeminiModel:              config.GeminiModel,
-		GeminiThinkingLevel:      config.GeminiThinkingLevel,
-		LogLevel:                 config.LogLevel,
-		AuthorizedRepositories:   append([]string(nil), config.AuthorizedRepositories...),
-		AllowedPublicDomains:     append([]string(nil), config.AllowedPublicDomains...),
-		PublicGitHubRepositories: append([]string(nil), config.PublicGitHubRepositories...),
+		GitLabBaseURL:          config.GitLabBaseURL,
+		GeminiEndpoint:         config.GeminiEndpoint,
+		GeminiModel:            config.GeminiModel,
+		GeminiThinkingLevel:    config.GeminiThinkingLevel,
+		LogLevel:               config.LogLevel,
+		AuthorizedRepositories: append([]string(nil), config.AuthorizedRepositories...),
 	}
 	if view.GeminiEndpoint == "" {
 		view.GeminiEndpoint = "Gemini Developer API"

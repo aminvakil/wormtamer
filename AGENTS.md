@@ -2,24 +2,24 @@
 
 ## Project
 
-Build a minimal, self-hosted GitLab merge request reviewer. Each deployment serves one team and may inspect authorized repositories, runtime review memory, and public sources through constrained tools.
+Build a minimal, self-hosted GitLab merge request reviewer. Each deployment serves one team and reviews prepared authorized repositories with Pi-style `read` and `bash` tools.
 
 ## Constraints
 
 - Use Go, the standard library HTTP server by default, SQLite, and the official Gemini Go SDK, either directly or through a configured Gemini Developer API-compatible endpoint.
 - Run webhook ingress, review work, and reconciliation in one process and one replica.
-- Keep the Gemini function-calling loop explicit; trusted application brokers validate and dispatch every tool call.
+- Keep the Gemini function-calling loop explicit; trusted application code dispatches exactly the model-facing `read` and `bash` tools.
 - Keep deployments single-tenant. Do not add a control plane, provider abstraction, additional database, queue service, or agent framework without an approved need.
 - Persist webhooks before acknowledging them. Use at-least-once jobs and idempotent external effects.
 - Treat repository content, comments, memories, public content, and model output as untrusted.
-- Keep credentials outside prompts, tool output, repository workspaces, and sandboxes.
-- Do not execute repository-controlled code until a sandbox design is approved.
+- Keep credentials outside prompts, tool output, and review workspaces.
+- Follow the accepted unrestricted local-agent trust and credential boundary in [Security](docs/agents/security.md#local-review-agent). Do not reintroduce a sandbox, command allowlist, or structured repository/public-source tools without an explicitly approved change.
 
 ## Documentation
 
 - [Architecture](docs/agents/architecture.md): components, stack, and persistent state
 - [Reliability](docs/agents/reliability.md): webhook, job, retry, and publication semantics
-- [Security](docs/agents/security.md): trust, authorization, credentials, sandboxing, and network access
+- [Security](docs/agents/security.md): trust, authorization, credentials, and the local review-agent boundary
 - [Lessons](docs/agents/lessons-learned.md): evidence-based implementation findings
 - [Plans](docs/plans/README.md): substantial proposed work
 

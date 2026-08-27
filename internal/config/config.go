@@ -19,14 +19,14 @@ var repositoryPathPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.
 type Config struct {
 	ListenAddress                  string              `json:"listen_address"`
 	DatabasePath                   string              `json:"database_path"`
+	ReviewWorkspacePath            string              `json:"review_workspace_path"`
 	LogLevel                       string              `json:"log_level"`
 	GitLab                         GitLab              `json:"gitlab"`
 	Gemini                         Gemini              `json:"gemini"`
-	PublicSources                  PublicSources       `json:"public_sources"`
 	AuthorizedRepositories         []string            `json:"authorized_repositories"`
 	ShareAllAuthorizedRepositories bool                `json:"share_all_authorized_repositories"`
 	RepositorySharing              map[string][]string `json:"repository_sharing"`
-	ConfigFileBroadlyRead          bool                `json:"-"`
+	ConfigPath                     string              `json:"-"`
 }
 
 type GitLab struct {
@@ -40,11 +40,6 @@ type Gemini struct {
 	BaseURL       string `json:"base_url"`
 	Model         string `json:"model"`
 	ThinkingLevel string `json:"thinking_level"`
-}
-
-type PublicSources struct {
-	AllowedDomains     []string `json:"allowed_domains"`
-	GitHubRepositories []string `json:"github_repositories"`
 }
 
 func Load(path string) (Config, error) {
@@ -61,11 +56,6 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("open configuration: %w", err)
 	}
 	defer file.Close()
-
-	info, err := file.Stat()
-	if err != nil {
-		return Config{}, fmt.Errorf("inspect configuration: %w", err)
-	}
 
 	var cfg Config
 	decoder := json.NewDecoder(file)
@@ -84,10 +74,16 @@ func Load(path string) (Config, error) {
 		cfg.DatabasePath = filepath.Join(filepath.Dir(absolutePath), cfg.DatabasePath)
 	}
 	cfg.DatabasePath = filepath.Clean(cfg.DatabasePath)
-	cfg.ConfigFileBroadlyRead, err = configFileBroadlyRead(file, info)
-	if err != nil {
-		return Config{}, fmt.Errorf("inspect configuration permissions: %w", err)
+	if !filepath.IsAbs(cfg.ReviewWorkspacePath) {
+		cfg.ReviewWorkspacePath = filepath.Join(filepath.Dir(absolutePath), cfg.ReviewWorkspacePath)
 	}
+	cfg.ReviewWorkspacePath = filepath.Clean(cfg.ReviewWorkspacePath)
+	for _, privateDirectory := range []string{filepath.Dir(absolutePath), filepath.Dir(cfg.DatabasePath)} {
+		if pathWithin(privateDirectory, cfg.ReviewWorkspacePath) || pathWithin(cfg.ReviewWorkspacePath, privateDirectory) {
+			return Config{}, errors.New("review_workspace_path must be outside service-private configuration and database directories and must not contain them")
+		}
+	}
+	cfg.ConfigPath = absolutePath
 	return cfg, nil
 }
 
@@ -110,6 +106,9 @@ func validate(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.DatabasePath) == "" {
 		return errors.New("database_path is required")
+	}
+	if strings.TrimSpace(cfg.ReviewWorkspacePath) == "" {
+		return errors.New("review_workspace_path is required")
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
@@ -157,9 +156,6 @@ func validate(cfg *Config) error {
 	cfg.Gemini.ThinkingLevel = strings.TrimSpace(cfg.Gemini.ThinkingLevel)
 	if cfg.Gemini.ThinkingLevel == "" {
 		cfg.Gemini.ThinkingLevel = "default"
-	}
-	if err := validatePublicSources(&cfg.PublicSources); err != nil {
-		return err
 	}
 	if len(cfg.AuthorizedRepositories) == 0 {
 		return errors.New("authorized_repositories is required")
@@ -214,76 +210,6 @@ func validate(cfg *Config) error {
 		}
 	}
 	return nil
-}
-
-func validatePublicSources(sources *PublicSources) error {
-	if len(sources.AllowedDomains) == 0 {
-		return errors.New("public_sources.allowed_domains is required")
-	}
-	seenDomains := make(map[string]struct{}, len(sources.AllowedDomains))
-	for index, domain := range sources.AllowedDomains {
-		canonical := strings.ToLower(domain)
-		if domain == "" || strings.TrimSpace(domain) != domain || !validDomain(canonical) {
-			return fmt.Errorf("invalid public source domain %q", domain)
-		}
-		if _, exists := seenDomains[canonical]; exists {
-			return fmt.Errorf("duplicate public source domain %q", domain)
-		}
-		seenDomains[canonical] = struct{}{}
-		sources.AllowedDomains[index] = canonical
-	}
-	if _, exists := seenDomains["github.com"]; !exists {
-		return errors.New("public_sources.allowed_domains must include github.com")
-	}
-
-	seenRepositories := make(map[string]struct{}, len(sources.GitHubRepositories))
-	for _, repositorySlug := range sources.GitHubRepositories {
-		if !validGitHubRepositorySlug(repositorySlug) {
-			return fmt.Errorf("invalid public GitHub repository slug %q", repositorySlug)
-		}
-		key := strings.ToLower(repositorySlug)
-		if _, exists := seenRepositories[key]; exists {
-			return fmt.Errorf("duplicate public GitHub repository %q", repositorySlug)
-		}
-		seenRepositories[key] = struct{}{}
-	}
-	return nil
-}
-
-func validDomain(domain string) bool {
-	if len(domain) == 0 || len(domain) > 253 || net.ParseIP(domain) != nil {
-		return false
-	}
-	for _, label := range strings.Split(domain, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, character := range label {
-			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func validGitHubRepositorySlug(slug string) bool {
-	parts := strings.Split(slug, "/")
-	if len(parts) != 2 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." || len(part) > 100 {
-			return false
-		}
-		for _, character := range part {
-			if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
-				(character < '0' || character > '9') && character != '-' && character != '_' && character != '.' {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func validateListenAddress(address string) error {
@@ -367,6 +293,11 @@ func canonicalHTTPBaseURL(raw, field string) (string, error) {
 		parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "/")
 	}
 	return parsed.String(), nil
+}
+
+func pathWithin(root, target string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func validRepositoryPath(path string) bool {
