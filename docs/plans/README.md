@@ -6,6 +6,17 @@ Use a plan for substantial work that changes architecture, security boundaries, 
 
 Every roadmap item follows the repository-wide [KISS rules](../../AGENTS.md#kiss). A plan defines direction, not an obligation to handle every conceivable condition. Before approval, narrow it to the smallest safe, complete outcome supported by current requirements and evidence. Risks and open questions do not expand implementation scope unless they block that outcome.
 
+## Roadmap
+
+Implement approved plans in this order:
+
+1. [Use all-or-nothing repository sharing](all-or-nothing-repository-sharing.md)
+2. [Remove process-local diagnostic buffers](remove-process-diagnostic-buffers.md)
+3. [Remove model usage and pricing persistence](remove-model-usage-and-pricing.md)
+4. [Recover jobs without leases](recover-jobs-without-leases.md)
+
+The final two plans both change SQLite state. Complete them in one unreleased sequence with one final schema rebaseline rather than adding an intermediate migration.
+
 ## Format
 
 - Name each plan with a stable short kebab-case outcome; record implementation order only in the roadmap.
