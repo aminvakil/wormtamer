@@ -8,12 +8,7 @@ Every roadmap item follows the repository-wide [KISS rules](../../AGENTS.md#kiss
 
 ## Roadmap
 
-Implement approved plans in this order:
-
-1. [Remove model usage and pricing persistence](remove-model-usage-and-pricing.md)
-2. [Recover jobs without leases](recover-jobs-without-leases.md)
-
-Both plans change SQLite state. Complete them in one unreleased sequence with one final schema rebaseline rather than adding an intermediate migration.
+No approved plans are currently queued.
 
 ## Format
 

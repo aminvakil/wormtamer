@@ -26,7 +26,6 @@ import (
 	"github.com/aminvakil/wormtamer/internal/repository"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
-	"github.com/aminvakil/wormtamer/internal/usage"
 	"github.com/aminvakil/wormtamer/internal/webhook"
 	"github.com/aminvakil/wormtamer/internal/worker"
 )
@@ -85,21 +84,7 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 	if err := validateCredentialBoundary(cfg); err != nil {
 		return err
 	}
-	if err := storage.MarkStartedModelGenerationsUnknown(ctx); err != nil {
-		return err
-	}
-	var modelPricing *usage.Pricing
-	if cfg.Gemini.BaseURL == "" {
-		pricingCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-		modelPricing, err = usage.FetchGeminiPricing(pricingCtx, cfg.Gemini.Model)
-		cancel()
-		if err != nil {
-			serviceLogger.Warn("Gemini pricing unavailable; cost estimates disabled", "error", bounded(err.Error()))
-			modelPricing = nil
-		}
-	}
-	usageRecorder, err := usage.NewRecorder(storage, modelPricing, forbidden)
-	if err != nil {
+	if err := storage.RecoverInterruptedJobs(ctx, time.Now().UTC()); err != nil {
 		return err
 	}
 
@@ -131,24 +116,18 @@ func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, outp
 		return err
 	}
 	geminiReviewer, err := review.NewGeminiReviewer(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, cfg.Gemini.ThinkingLevel, forbidden,
-		logger.With("component", "review", "job_kind", "review"), usageRecorder)
+		logger.With("component", "review", "job_kind", "review"))
 	if err != nil {
 		return err
 	}
-	reviewWorker, err := worker.New(storage, gitLabClient, workspaceManager, geminiReviewer,
+	reviewWorker := worker.New(storage, gitLabClient, workspaceManager, geminiReviewer,
 		logger.With("component", "review_worker", "job_kind", "review"), forbidden)
-	if err != nil {
-		return err
-	}
 	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden,
-		logger.With("component", "feedback", "job_kind", "feedback"), usageRecorder)
+		logger.With("component", "feedback", "job_kind", "feedback"))
 	if err != nil {
 		return err
 	}
-	feedbackWorker, err := feedback.New(storage, gitLabClient, memoryEvaluator, logger.With("component", "feedback_worker", "job_kind", "feedback"))
-	if err != nil {
-		return err
-	}
+	feedbackWorker := feedback.New(storage, gitLabClient, memoryEvaluator, logger.With("component", "feedback_worker", "job_kind", "feedback"))
 	reconciler := reconcile.New(storage, gitLabClient, cfg.GitLab.BaseURL, cfg.AuthorizedRepositories, logger.With("component", "reconciler"))
 
 	ingressHandler := webhook.New(webhook.Config{

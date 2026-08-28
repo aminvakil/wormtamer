@@ -53,18 +53,18 @@ func TestScanQueuesReadyMergeRequestsIdempotently(t *testing.T) {
 	reconciler.Scan(context.Background())
 
 	now := time.Now().UTC().Add(time.Second)
-	first, err := storage.ClaimJob(context.Background(), "owner-1", now, time.Minute, 5)
+	first, err := storage.ClaimJob(context.Background(), now)
 	if err != nil || first == nil {
 		t.Fatalf("ClaimJob(first) = %+v, %v", first, err)
 	}
-	second, err := storage.ClaimJob(context.Background(), "owner-2", now, time.Minute, 5)
+	second, err := storage.ClaimJob(context.Background(), now)
 	if err != nil || second == nil {
 		t.Fatalf("ClaimJob(second) = %+v, %v", second, err)
 	}
 	if first.MergeRequestIID != 7 || second.MergeRequestIID != 9 {
 		t.Fatalf("claimed merge requests = %d, %d", first.MergeRequestIID, second.MergeRequestIID)
 	}
-	third, err := storage.ClaimJob(context.Background(), "owner-3", now, time.Minute, 5)
+	third, err := storage.ClaimJob(context.Background(), now)
 	if err != nil || third != nil {
 		t.Fatalf("ClaimJob(third) = %+v, %v", third, err)
 	}
@@ -98,7 +98,7 @@ func TestScanKeepsJobsFromPagesBeforeFailure(t *testing.T) {
 	var logs bytes.Buffer
 	New(storage, client, server.URL, []string{"group/project"}, slog.New(slog.NewJSONHandler(&logs, nil))).Scan(context.Background())
 
-	job, err := storage.ClaimJob(context.Background(), "owner", time.Now().UTC().Add(time.Second), time.Minute, 5)
+	job, err := storage.ClaimJob(context.Background(), time.Now().UTC().Add(time.Second))
 	if err != nil || job == nil || job.MergeRequestIID != 7 {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}

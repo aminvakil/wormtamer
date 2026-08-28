@@ -14,7 +14,6 @@ import (
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/repository"
-	"github.com/aminvakil/wormtamer/internal/usage"
 	"google.golang.org/genai"
 )
 
@@ -43,18 +42,13 @@ Guidelines:
 - Use read to examine files instead of cat or sed.`
 
 type Generation struct {
-	Content                 *genai.Content
-	ModelVersion            string
-	FinishReason            genai.FinishReason
-	CandidateTokenCount     int32
-	PromptTokenCount        int32
-	CachedContentTokenCount int32
-	ToolUsePromptTokenCount int32
-	CandidatesTokenCount    int32
-	ThoughtsTokenCount      int32
-	TotalTokenCount         int32
-	UsageMetadataAvailable  bool
-	EndpointCostPicos       *int64
+	Content                *genai.Content
+	ModelVersion           string
+	FinishReason           genai.FinishReason
+	CandidateTokenCount    int32
+	CandidatesTokenCount   int32
+	ThoughtsTokenCount     int32
+	UsageMetadataAvailable bool
 }
 
 type Generator interface {
@@ -67,15 +61,12 @@ type GeminiReviewer struct {
 	thinkingLevel  string
 	forbidden      []string
 	logger         *slog.Logger
-	recorder       usage.GenerationRecorder
 	requestTimeout time.Duration
-	now            func() time.Time
-	since          func(time.Time) time.Duration
 }
 
 type sdkGenerator struct{ client *genai.Client }
 
-func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger, recorder usage.GenerationRecorder) (*GeminiReviewer, error) {
+func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger) (*GeminiReviewer, error) {
 	httpClient := &http.Client{
 		Timeout:       geminiRequestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
@@ -87,12 +78,8 @@ func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLeve
 	if err != nil {
 		return nil, errors.New("initialize Gemini client")
 	}
-	if recorder == nil {
-		return nil, errors.New("Gemini usage recorder is required")
-	}
 	reviewer := newGeminiReviewer(&sdkGenerator{client: client}, model, forbidden, logger)
 	reviewer.thinkingLevel = thinkingLevel
-	reviewer.recorder = recorder
 	return reviewer, nil
 }
 
@@ -120,7 +107,7 @@ func newGeminiReviewer(generator Generator, model string, forbidden []string, lo
 	}
 	return &GeminiReviewer{
 		generator: generator, model: strings.TrimSpace(model), forbidden: append([]string(nil), forbidden...),
-		logger: logger, requestTimeout: geminiRequestTimeout, now: time.Now, since: time.Since,
+		logger: logger, requestTimeout: geminiRequestTimeout,
 	}
 }
 
@@ -141,43 +128,27 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 	toolBytes := 0
 	finalOnly := false
 	for turn := 0; ; turn++ {
-		requestStartedAt := r.now().UTC()
-		generationID, err := r.startGeneration(ctx, turn, finalOnly, requestStartedAt)
-		if err != nil {
-			return Result{}, nil, failure.Retry("persistence_failed", 0)
-		}
-		if turn == 0 {
-			if logger.Enabled(requestCtx, slog.LevelDebug) {
-				logger.DebugContext(requestCtx, "Gemini review prompt", "generation_id", generationID,
-					"system_instruction", diagnosticValue(systemInstruction, r.forbidden), "prompt", diagnosticValue(prompt, r.forbidden))
-			}
+		if turn == 0 && logger.Enabled(requestCtx, slog.LevelDebug) {
+			logger.DebugContext(requestCtx, "Gemini review prompt",
+				"system_instruction", diagnosticValue(systemInstruction, r.forbidden), "prompt", diagnosticValue(prompt, r.forbidden))
 		}
 		config := generationConfig(r.thinkingLevel, !finalOnly)
-		sdkStartedAt := r.now()
+		sdkStartedAt := time.Now()
 		generation, generateErr := r.generator.Generate(requestCtx, r.model, contents, config)
-		latency := r.since(sdkStartedAt)
+		latency := time.Since(sdkStartedAt)
 		if generateErr != nil {
-			if completeErr := r.completeFailedGeneration(ctx, generationID, latency); completeErr != nil {
-				return Result{}, nil, failure.Retry("persistence_failed", 0)
-			}
 			if contextErr := reviewContextError(ctx, requestCtx); contextErr != nil {
 				return Result{}, nil, contextErr
 			}
 			return Result{}, nil, classifyGeminiError(generateErr)
 		}
 		if generation.FinishReason != genai.FinishReasonStop {
-			r.logGeneration(logger, requestCtx, generationID, turn, generation, latency, nil, "not_attempted_incomplete_finish")
-			if err := r.completeReturnedGeneration(ctx, generationID, generation, latency, false, nil, "not_attempted_incomplete_finish"); err != nil {
-				return Result{}, nil, failure.Retry("persistence_failed", 0)
-			}
+			r.logGeneration(logger, requestCtx, turn, generation, latency, nil, "not_attempted_incomplete_finish")
 			return Result{}, nil, failure.Retry("incomplete_model_response", 0)
 		}
 		text, calls, parseErr := parseModelTurn(generation.Content)
 		if parseErr != nil {
-			r.logGeneration(logger, requestCtx, generationID, turn, generation, latency, nil, "not_attempted_invalid_turn")
-			if err := r.completeReturnedGeneration(ctx, generationID, generation, latency, false, nil, "not_attempted_invalid_turn"); err != nil {
-				return Result{}, nil, failure.Retry("persistence_failed", 0)
-			}
+			r.logGeneration(logger, requestCtx, turn, generation, latency, nil, "not_attempted_invalid_turn")
 			return Result{}, nil, parseErr
 		}
 		contents = append(contents, generation.Content)
@@ -191,15 +162,12 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			if validationErr != nil {
 				validation = "invalid"
 			}
-			r.logGeneration(logger, requestCtx, generationID, turn, generation, latency, nil, validation)
-			if err := r.completeReturnedGeneration(ctx, generationID, generation, latency, true, nil, validation); err != nil {
-				return Result{}, nil, failure.Retry("persistence_failed", 0)
-			}
+			r.logGeneration(logger, requestCtx, turn, generation, latency, nil, validation)
 			if validationErr != nil {
 				return Result{}, nil, validationErr
 			}
 			if logger.Enabled(requestCtx, slog.LevelDebug) {
-				logger.DebugContext(requestCtx, "Gemini review response", "generation_id", generationID, "turn", turn, "response", string(encoded))
+				logger.DebugContext(requestCtx, "Gemini review response", "turn", turn, "response", string(encoded))
 			}
 			return result, encoded, nil
 		}
@@ -208,13 +176,10 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 		if finalOnly {
 			validation = "invalid_final_only"
 		}
-		r.logGeneration(logger, requestCtx, generationID, turn, generation, latency, calls, validation)
-		if err := r.completeReturnedGeneration(ctx, generationID, generation, latency, true, calls, validation); err != nil {
-			return Result{}, nil, failure.Retry("persistence_failed", 0)
-		}
+		r.logGeneration(logger, requestCtx, turn, generation, latency, calls, validation)
 		if logger.Enabled(requestCtx, slog.LevelDebug) {
 			for _, call := range calls {
-				logger.DebugContext(requestCtx, "Gemini review tool call", "generation_id", generationID, "turn", turn,
+				logger.DebugContext(requestCtx, "Gemini review tool call", "turn", turn,
 					"tool_call_id", boundedDiagnosticValue(call.ID, r.forbidden, 256), "tool", boundedDiagnosticValue(call.Name, r.forbidden, 256),
 					"arguments", diagnosticJSON(call.Args, r.forbidden, 4096))
 			}
@@ -261,10 +226,10 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			toolBytes += len(serialized)
 			responses = append(responses, &genai.Part{FunctionResponse: functionResponse})
 			diagnosticText := string(serializedResult)
-			logger.InfoContext(requestCtx, "Gemini review tool completed", "generation_id", generationID, "turn", turn,
+			logger.InfoContext(requestCtx, "Gemini review tool completed", "turn", turn,
 				"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256), "outcome", "completed")
 			if logger.Enabled(requestCtx, slog.LevelDebug) {
-				logger.DebugContext(requestCtx, "Gemini review tool result", "generation_id", generationID, "turn", turn,
+				logger.DebugContext(requestCtx, "Gemini review tool result", "turn", turn,
 					"tool_call_id", boundedDiagnosticValue(call.ID, r.forbidden, 256), "tool", boundedDiagnosticValue(call.Name, r.forbidden, 256),
 					"result", diagnosticValue(diagnosticText, r.forbidden))
 			}
@@ -272,7 +237,7 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 		contents = append(contents, genai.NewContentFromParts(responses, genai.RoleUser))
 		if exhausted {
 			finalOnly = true
-			logger.InfoContext(requestCtx, "Gemini review final-only mode entered", "generation_id", generationID, "turn", turn,
+			logger.InfoContext(requestCtx, "Gemini review final-only mode entered", "turn", turn,
 				"reason", "tool_result_limit_exceeded")
 		}
 	}
@@ -312,51 +277,6 @@ func reviewContextError(parent, request context.Context) error {
 	return request.Err()
 }
 
-func (r *GeminiReviewer) startGeneration(ctx context.Context, turn int, finalOnly bool, startedAt time.Time) (int64, error) {
-	if r.recorder == nil {
-		return 0, nil
-	}
-	scope, ok := usage.ScopeFromContext(ctx)
-	if !ok || scope.RequestKind != usage.RequestReview {
-		return 0, errors.New("review usage scope is required")
-	}
-	return r.recorder.Start(ctx, usage.GenerationStart{Scope: scope, Turn: &turn, ConfiguredModel: r.model, FinalOnly: finalOnly, StartedAt: startedAt})
-}
-
-func (r *GeminiReviewer) completeFailedGeneration(ctx context.Context, generationID int64, latency time.Duration) error {
-	if r.recorder == nil {
-		return nil
-	}
-	checkpointCtx, cancel := usage.NewCheckpointContext(ctx)
-	defer cancel()
-	return r.recorder.Complete(checkpointCtx, generationID, usage.GenerationCompletion{
-		State: usage.CompletionFailed, CompletedAt: time.Now().UTC(), Latency: latency, StructuredValidation: "request_failed",
-	})
-}
-
-func (r *GeminiReviewer) completeReturnedGeneration(ctx context.Context, generationID int64, generation Generation, latency time.Duration, toolCallsAvailable bool, calls []*genai.FunctionCall, validation string) error {
-	if r.recorder == nil {
-		return nil
-	}
-	toolNames := []string(nil)
-	if toolCallsAvailable {
-		toolNames, _ = safeToolNames(calls)
-	}
-	checkpointCtx, cancel := usage.NewCheckpointContext(ctx)
-	defer cancel()
-	return r.recorder.Complete(checkpointCtx, generationID, usage.GenerationCompletion{
-		State: usage.CompletionResponse, CompletedAt: time.Now().UTC(), Latency: latency,
-		ResolvedModel: generation.ModelVersion, FinishReason: string(generation.FinishReason), StructuredValidation: validation,
-		ToolCallsAvailable: toolCallsAvailable, ToolNames: toolNames, UsageMetadataAvailable: generation.UsageMetadataAvailable,
-		EndpointCostPicos: generation.EndpointCostPicos,
-		Tokens: usage.TokenCounts{
-			Prompt: int64(generation.PromptTokenCount), Cached: int64(generation.CachedContentTokenCount),
-			ToolUsePrompt: int64(generation.ToolUsePromptTokenCount), Candidates: int64(generation.CandidatesTokenCount),
-			Thoughts: int64(generation.ThoughtsTokenCount), Total: int64(generation.TotalTokenCount),
-		},
-	})
-}
-
 func diagnosticJSON(value any, forbidden []string, limit int) string {
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -381,10 +301,10 @@ func diagnosticValue(value string, forbidden []string) string {
 	return diagnostics.Redact(value, forbidden)
 }
 
-func (r *GeminiReviewer) logGeneration(logger *slog.Logger, ctx context.Context, generationID int64, turn int, generation Generation, latency time.Duration, calls []*genai.FunctionCall, validation string) {
+func (r *GeminiReviewer) logGeneration(logger *slog.Logger, ctx context.Context, turn int, generation Generation, latency time.Duration, calls []*genai.FunctionCall, validation string) {
 	toolNames, undeclaredTools := safeToolNames(calls)
 	attributes := []any{
-		"generation_id", generationID, "turn", turn, "configured_endpoint", r.model, "finish_reason", generation.FinishReason,
+		"turn", turn, "configured_endpoint", r.model, "finish_reason", generation.FinishReason,
 		"candidate_token_count", generation.CandidateTokenCount, "latency_ms", latency.Milliseconds(), "tool_call_count", len(calls),
 		"tool_names", toolNames, "undeclared_tool_count", undeclaredTools, "structured_validation", validation,
 	}
@@ -421,16 +341,9 @@ func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*g
 		return Generation{}, err
 	}
 	generation := Generation{ModelVersion: response.ModelVersion}
-	if response.SDKHTTPResponse != nil {
-		generation.EndpointCostPicos = usage.LiteLLMResponseCostPicos(response.SDKHTTPResponse.Headers)
-	}
 	if response.UsageMetadata != nil {
-		generation.PromptTokenCount = response.UsageMetadata.PromptTokenCount
-		generation.CachedContentTokenCount = response.UsageMetadata.CachedContentTokenCount
-		generation.ToolUsePromptTokenCount = response.UsageMetadata.ToolUsePromptTokenCount
 		generation.CandidatesTokenCount = response.UsageMetadata.CandidatesTokenCount
 		generation.ThoughtsTokenCount = response.UsageMetadata.ThoughtsTokenCount
-		generation.TotalTokenCount = response.UsageMetadata.TotalTokenCount
 		generation.UsageMetadataAvailable = true
 	}
 	if len(response.Candidates) == 1 && response.Candidates[0] != nil {

@@ -16,11 +16,11 @@ func TestListAndRetryFailedReviewAndFeedbackJobs(t *testing.T) {
 	if _, err := storage.AcceptEvent(ctx, readyEvent("failed-review")); err != nil {
 		t.Fatal(err)
 	}
-	reviewJob, err := storage.ClaimJob(ctx, "review-owner", now, time.Minute, 5)
+	reviewJob, err := storage.ClaimJob(ctx, now)
 	if err != nil || reviewJob == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", reviewJob, err)
 	}
-	if err := storage.FinishJob(ctx, reviewJob.ID, "review-owner", JobFailed, "review_failure", "review_failure", now.Add(time.Second)); err != nil {
+	if err := storage.FinishJob(ctx, reviewJob.ID, JobFailed, "review_failure", "review_failure", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -29,11 +29,11 @@ func TestListAndRetryFailedReviewAndFeedbackJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	feedbackJob, err := storage.ClaimFeedbackJob(ctx, "feedback-owner", now.Add(10*time.Second), time.Minute, 5)
+	feedbackJob, err := storage.ClaimFeedbackJob(ctx, now.Add(10*time.Second))
 	if err != nil || feedbackJob == nil || feedbackJob.ID != terminal.FeedbackJobID {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", feedbackJob, err)
 	}
-	if err := storage.FinishFeedbackJob(ctx, feedbackJob.ID, "feedback-owner", "feedback_failure", now.Add(11*time.Second)); err != nil {
+	if err := storage.FinishFeedbackJob(ctx, feedbackJob.ID, "feedback_failure", now.Add(11*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 

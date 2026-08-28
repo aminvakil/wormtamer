@@ -89,7 +89,6 @@ func (s *Store) RetryFailedReviewJob(ctx context.Context, jobID int64, now time.
 	result, err := tx.ExecContext(ctx, `
 UPDATE review_jobs
 SET state = ?, attempt_count = 0, next_attempt_at = ?,
-    lease_owner = NULL, lease_expires_at = NULL,
     last_error_category = NULL, last_error_message = NULL, updated_at = ?
 WHERE id = ? AND state = ?`,
 		JobQueued, formatTime(now), formatTime(now), jobID, JobFailed)
@@ -122,7 +121,6 @@ func (s *Store) RetryFailedFeedbackJob(ctx context.Context, jobID int64, now tim
 	result, err := tx.ExecContext(ctx, `
 UPDATE feedback_jobs
 SET state = ?, attempt_count = 0, next_attempt_at = ?,
-    lease_owner = NULL, lease_expires_at = NULL,
     last_error_category = NULL, updated_at = ?
 WHERE id = ? AND state = ?`,
 		FeedbackQueued, formatTime(now), formatTime(now), jobID, FeedbackFailed)

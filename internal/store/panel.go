@@ -13,7 +13,10 @@ import (
 
 const maxPanelPageSize = 100
 
-var ErrReviewRecordNotFound = errors.New("review record not found")
+var (
+	ErrReviewRecordNotFound   = errors.New("review record not found")
+	ErrFeedbackRecordNotFound = errors.New("feedback record not found")
+)
 
 type StateCount struct {
 	State string
@@ -67,12 +70,10 @@ type ReviewMemoryRetrievalRecord struct {
 
 type ReviewRecordDetail struct {
 	ReviewRecord
-	ReviewID             string
-	Result               *review.Result
-	GitLabNoteID         int64
-	Retrievals           []ReviewMemoryRetrievalRecord
-	Generations          []GenerationRecord
-	GenerationsTruncated bool
+	ReviewID     string
+	Result       *review.Result
+	GitLabNoteID int64
+	Retrievals   []ReviewMemoryRetrievalRecord
 }
 
 type FeedbackRecord struct {
@@ -346,10 +347,6 @@ ORDER BY retrieved_at, memory_id, memory_updated_at`, jobID)
 	if err := rows.Close(); err != nil {
 		return ReviewRecordDetail{}, fmt.Errorf("close panel memory retrievals: %w", err)
 	}
-	detail.Generations, detail.GenerationsTruncated, err = s.ListReviewGenerations(ctx, jobID, maxPanelPageSize)
-	if err != nil {
-		return ReviewRecordDetail{}, err
-	}
 	return detail, nil
 }
 
@@ -456,6 +453,20 @@ JOIN review_jobs r ON r.id = j.review_job_id`
 	return page, nil
 }
 
+func (s *Store) GetFeedbackRecord(ctx context.Context, jobID int64) (FeedbackRecord, error) {
+	if jobID <= 0 {
+		return FeedbackRecord{}, errors.New("invalid feedback record ID")
+	}
+	page, err := s.listFeedbackRecords(ctx, "j.id = ?", []any{jobID}, 1)
+	if err != nil {
+		return FeedbackRecord{}, err
+	}
+	if len(page.Records) == 0 {
+		return FeedbackRecord{}, ErrFeedbackRecordNotFound
+	}
+	return page.Records[0], nil
+}
+
 func (s *Store) ListMemoryRecords(ctx context.Context, beforeRowID int64, limit int) (MemoryRecordsPage, error) {
 	if !validPanelLimit(limit) || beforeRowID < 0 {
 		return MemoryRecordsPage{}, errors.New("invalid memory record query")
@@ -507,7 +518,7 @@ func validPanelLimit(limit int) bool {
 
 func validReviewState(state string) bool {
 	switch state {
-	case JobQueued, JobRunning, JobPublishing, JobCompleted, JobFailed, JobObsolete:
+	case JobQueued, JobRunning, JobCompleted, JobFailed, JobObsolete:
 		return true
 	default:
 		return false

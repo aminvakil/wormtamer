@@ -2,9 +2,8 @@ package feedback
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -13,24 +12,19 @@ import (
 	"github.com/aminvakil/wormtamer/internal/memory"
 	"github.com/aminvakil/wormtamer/internal/review"
 	"github.com/aminvakil/wormtamer/internal/store"
-	"github.com/aminvakil/wormtamer/internal/usage"
 )
 
 const (
-	pollInterval       = time.Second
-	leaseDuration      = 3 * time.Minute
-	leaseRenewInterval = 30 * time.Second
-	maxAttempts        = 5
-	initialBackoff     = 5 * time.Second
-	maxLocalBackoff    = 5 * time.Minute
+	pollInterval    = time.Second
+	initialBackoff  = 5 * time.Second
+	maxLocalBackoff = 5 * time.Minute
 )
 
 type JobStore interface {
-	ClaimFeedbackJob(context.Context, string, time.Time, time.Duration, int) (*store.FeedbackJob, error)
-	RenewFeedbackLease(context.Context, int64, string, time.Time, time.Duration) (bool, error)
-	CompleteFeedbackJob(context.Context, int64, string, string, string, string, time.Time) error
-	RetryFeedbackJob(context.Context, int64, string, time.Time, time.Time, int, string) (string, error)
-	FinishFeedbackJob(context.Context, int64, string, string, time.Time) error
+	ClaimFeedbackJob(context.Context, time.Time) (*store.FeedbackJob, error)
+	CompleteFeedbackJob(context.Context, int64, string, string, string, time.Time) error
+	RetryFeedbackJob(context.Context, int64, time.Time, time.Time, string) (string, error)
+	FinishFeedbackJob(context.Context, int64, string, time.Time) error
 }
 
 type GitLabBroker interface {
@@ -46,19 +40,11 @@ type Worker struct {
 	gitlab    GitLabBroker
 	evaluator Evaluator
 	logger    *slog.Logger
-	owner     string
 	now       func() time.Time
 }
 
-func New(storage JobStore, gitLab GitLabBroker, evaluator Evaluator, logger *slog.Logger) (*Worker, error) {
-	ownerBytes := make([]byte, 16)
-	if _, err := rand.Read(ownerBytes); err != nil {
-		return nil, errors.New("generate feedback worker lease owner")
-	}
-	return &Worker{
-		store: storage, gitlab: gitLab, evaluator: evaluator, logger: logger,
-		owner: hex.EncodeToString(ownerBytes), now: time.Now,
-	}, nil
+func New(storage JobStore, gitLab GitLabBroker, evaluator Evaluator, logger *slog.Logger) *Worker {
+	return &Worker{store: storage, gitlab: gitLab, evaluator: evaluator, logger: logger, now: time.Now}
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -66,18 +52,33 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		processed, err := w.ProcessOne(ctx)
+		job, err := w.claim(ctx)
 		if err != nil {
-			w.logger.Error("feedback processing failed", "reason", "persistence_failed")
+			w.logger.Error("feedback job claim failed", "reason", "persistence_failed")
+			if !wait(ctx, pollInterval) {
+				return nil
+			}
+			continue
 		}
-		if !processed && !wait(ctx, pollInterval) {
-			return nil
+		if job == nil {
+			if !wait(ctx, pollInterval) {
+				return nil
+			}
+			continue
+		}
+		w.logger.Info("feedback job started", logFields(job)...)
+		if err := w.processClaimed(ctx, job); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			w.logger.Error("feedback job processing failed", "feedback_job_id", job.ID, "reason", "persistence_failed")
+			return fmt.Errorf("process feedback job %d: %w", job.ID, err)
 		}
 	}
 }
 
 func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
-	job, err := w.store.ClaimFeedbackJob(ctx, w.owner, w.now().UTC(), leaseDuration, maxAttempts)
+	job, err := w.claim(ctx)
 	if err != nil || job == nil {
 		return false, err
 	}
@@ -85,42 +86,17 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	return true, w.processClaimed(ctx, job)
 }
 
+func (w *Worker) claim(ctx context.Context) (*store.FeedbackJob, error) {
+	return w.store.ClaimFeedbackJob(ctx, w.now().UTC())
+}
+
 func (w *Worker) processClaimed(ctx context.Context, job *store.FeedbackJob) error {
-	workCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	leaseLost := make(chan struct{}, 1)
-	renewalDone := make(chan struct{})
-	go func() {
-		defer close(renewalDone)
-		ticker := time.NewTicker(leaseRenewInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-workCtx.Done():
-				return
-			case <-ticker.C:
-				renewed, err := w.store.RenewFeedbackLease(workCtx, job.ID, w.owner, w.now().UTC(), leaseDuration)
-				if err != nil || !renewed {
-					select {
-					case leaseLost <- struct{}{}:
-					default:
-					}
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	err := w.execute(workCtx, job)
-	cancel()
-	<-renewalDone
-	select {
-	case <-leaseLost:
-		return store.ErrLeaseLost
-	default:
-	}
-	if errors.Is(err, store.ErrLeaseLost) || errors.Is(err, context.Canceled) {
+	err := w.execute(ctx, job)
+	if ctx.Err() != nil {
 		return nil
+	}
+	if errors.Is(err, store.ErrJobNotRunning) {
+		return err
 	}
 	if err != nil {
 		return w.handleFailure(ctx, job, err)
@@ -151,10 +127,7 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 		}
 		findings[index] = memory.Finding{TargetID: job.FindingIDs[index], Finding: result.Findings[index]}
 	}
-	evaluationCtx := usage.WithScope(ctx, usage.Scope{
-		RequestKind: usage.RequestFeedback, FeedbackJobID: job.ID, Attempt: job.AttemptCount,
-	})
-	assessment, err := w.evaluator.Evaluate(evaluationCtx, memory.Input{
+	assessment, err := w.evaluator.Evaluate(ctx, memory.Input{
 		ProjectID: job.ProjectID, ProjectPath: job.ProjectPath, MergeRequestIID: job.MergeRequestIID,
 		HeadSHA: job.HeadSHA, ReviewHeadSHA: job.ReviewHeadSHA, Files: evidence.Files,
 		Comments: evidence.Comments, Summary: result.Summary, Findings: findings,
@@ -167,7 +140,7 @@ func (w *Worker) execute(ctx context.Context, job *store.FeedbackJob) error {
 		memoryID = memory.ID(job.GitLabInstance, job.ProjectID, job.MergeRequestIID)
 		lesson = assessment.Lesson
 	}
-	return w.store.CompleteFeedbackJob(ctx, job.ID, w.owner, memoryID, lesson, evidence.SourceURL, w.now().UTC())
+	return w.store.CompleteFeedbackJob(ctx, job.ID, memoryID, lesson, evidence.SourceURL, w.now().UTC())
 }
 
 func (w *Worker) handleFailure(ctx context.Context, job *store.FeedbackJob, err error) error {
@@ -177,7 +150,7 @@ func (w *Worker) handleFailure(ctx context.Context, job *store.FeedbackJob, err 
 	}
 	now := w.now().UTC()
 	if !failureError.Retryable {
-		if err := w.store.FinishFeedbackJob(ctx, job.ID, w.owner, failureError.Category, now); err != nil {
+		if err := w.store.FinishFeedbackJob(ctx, job.ID, failureError.Category, now); err != nil {
 			return err
 		}
 		w.logger.Warn("feedback job failed", append(logFields(job), "outcome", store.FeedbackFailed, "reason", failureError.Category)...)
@@ -187,7 +160,7 @@ func (w *Worker) handleFailure(ctx context.Context, job *store.FeedbackJob, err 
 	if failureError.RetryAfter > delay {
 		delay = failureError.RetryAfter
 	}
-	state, retryErr := w.store.RetryFeedbackJob(ctx, job.ID, w.owner, now, now.Add(delay), maxAttempts, failureError.Category)
+	state, retryErr := w.store.RetryFeedbackJob(ctx, job.ID, now, now.Add(delay), failureError.Category)
 	if retryErr != nil {
 		return retryErr
 	}

@@ -13,7 +13,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const schemaVersion = 10
+const (
+	schemaVersion  = 11
+	MaxJobAttempts = 5
+)
 
 var (
 	ErrUnsupportedSchemaVersion  = errors.New("database schema version is unsupported")
@@ -31,12 +34,11 @@ const (
 )
 
 const (
-	JobQueued     = "queued"
-	JobRunning    = "running"
-	JobPublishing = "publishing"
-	JobCompleted  = "completed"
-	JobFailed     = "failed"
-	JobObsolete   = "obsolete"
+	JobQueued    = "queued"
+	JobRunning   = "running"
+	JobCompleted = "completed"
+	JobFailed    = "failed"
+	JobObsolete  = "obsolete"
 )
 
 const (
@@ -94,8 +96,6 @@ type Job struct {
 	MergeRequestIID     int64
 	HeadSHA             string
 	State               string
-	LeaseOwner          string
-	LeaseExpiresAt      time.Time
 	AttemptCount        int
 	PatchIDStatus       string
 	PatchIDSHA          string
@@ -430,64 +430,87 @@ WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_
 	return result, nil
 }
 
-func (s *Store) ClaimJob(ctx context.Context, owner string, now time.Time, leaseDuration time.Duration, maxAttempts int) (*Job, error) {
-	if owner == "" || leaseDuration <= 0 || maxAttempts <= 0 {
+func (s *Store) RecoverInterruptedJobs(ctx context.Context, now time.Time) error {
+	if now.IsZero() {
+		return errors.New("invalid interrupted job recovery")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin interrupted job recovery: %w", err)
+	}
+	defer tx.Rollback()
+
+	nowText := formatTime(now)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE review_jobs
+SET state = CASE WHEN attempt_count >= ? THEN ? ELSE ? END,
+    next_attempt_at = CASE WHEN attempt_count >= ? THEN next_attempt_at ELSE ? END,
+    last_error_category = CASE WHEN attempt_count >= ? THEN 'attempts_exhausted' ELSE last_error_category END,
+    last_error_message = CASE WHEN attempt_count >= ? THEN 'job attempts exhausted' ELSE last_error_message END,
+    updated_at = ?
+WHERE state = ?`,
+		MaxJobAttempts, JobFailed, JobQueued,
+		MaxJobAttempts, nowText, MaxJobAttempts, MaxJobAttempts, nowText, JobRunning); err != nil {
+		return fmt.Errorf("recover interrupted review jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE feedback_jobs
+SET state = CASE WHEN attempt_count >= ? THEN ? ELSE ? END,
+    next_attempt_at = CASE WHEN attempt_count >= ? THEN next_attempt_at ELSE ? END,
+    last_error_category = CASE WHEN attempt_count >= ? THEN 'attempts_exhausted' ELSE last_error_category END,
+    updated_at = ?
+WHERE state = ?`,
+		MaxJobAttempts, FeedbackFailed, FeedbackQueued,
+		MaxJobAttempts, nowText, MaxJobAttempts, nowText, FeedbackRunning); err != nil {
+		return fmt.Errorf("recover interrupted feedback jobs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit interrupted job recovery: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ClaimJob(ctx context.Context, now time.Time) (*Job, error) {
+	if now.IsZero() {
 		return nil, errors.New("invalid job claim")
 	}
 	nowText := formatTime(now)
-	leaseText := formatDeadline(now.Add(leaseDuration))
-
-	if _, err := s.db.ExecContext(ctx, `
-UPDATE review_jobs
-SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
-    last_error_category = 'attempts_exhausted',
-    last_error_message = 'job attempts exhausted', updated_at = ?
-WHERE state IN (?, ?) AND attempt_count >= ?
-  AND julianday(lease_expires_at) <= julianday(?)`,
-		JobFailed, nowText, JobRunning, JobPublishing, maxAttempts, nowText); err != nil {
-		return nil, fmt.Errorf("fail exhausted job: %w", err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin review job claim: %w", err)
 	}
+	defer tx.Rollback()
 
-	row := s.db.QueryRowContext(ctx, `
+	row := tx.QueryRowContext(ctx, `
 UPDATE review_jobs
-SET state = CASE
-        WHEN state = ? AND EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id) THEN ?
-        WHEN state = ? THEN ?
-        ELSE state
-    END,
-    lease_owner = ?, lease_expires_at = ?, attempt_count = attempt_count + 1,
+SET state = ?, attempt_count = attempt_count + 1,
     started_at = ?, updated_at = ?
 WHERE id = (
     SELECT id FROM review_jobs
-    WHERE attempt_count < ? AND (
-        (state = ? AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?)) OR
-        (state IN (?, ?) AND julianday(lease_expires_at) <= julianday(?))
-    )
+    WHERE state = ? AND attempt_count < ?
+      AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?)
     ORDER BY COALESCE(next_attempt_at, created_at), id
     LIMIT 1
 )
 RETURNING id, gitlab_instance, project_id, merge_request_iid, head_sha,
-          state, lease_owner, lease_expires_at, attempt_count,
-          patch_id_status, COALESCE(patch_id_sha, ''), COALESCE(equivalent_to_job_id, 0)`,
-		JobQueued, JobPublishing, JobQueued, JobRunning, owner, leaseText, nowText, nowText,
-		maxAttempts, JobQueued, nowText, JobRunning, JobPublishing, nowText)
+          state, attempt_count, patch_id_status,
+          COALESCE(patch_id_sha, ''), COALESCE(equivalent_to_job_id, 0)`,
+		JobRunning, nowText, nowText, JobQueued, MaxJobAttempts, nowText)
 
 	job := &Job{}
-	var leaseExpires string
 	if err := row.Scan(&job.ID, &job.GitLabInstance, &job.ProjectID, &job.MergeRequestIID,
-		&job.HeadSHA, &job.State, &job.LeaseOwner, &leaseExpires, &job.AttemptCount,
-		&job.PatchIDStatus, &job.PatchIDSHA, &job.EquivalentToJobID); err != nil {
+		&job.HeadSHA, &job.State, &job.AttemptCount, &job.PatchIDStatus,
+		&job.PatchIDSHA, &job.EquivalentToJobID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("claim review job: %w", err)
 	}
-	job.LeaseExpiresAt, _ = time.Parse(timestampLayout, leaseExpires)
-	if err := s.db.QueryRowContext(ctx, `SELECT result_json FROM review_results WHERE job_id = ?`, job.ID).Scan(&job.ValidatedResultJSON); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT result_json FROM review_results WHERE job_id = ?`, job.ID).Scan(&job.ValidatedResultJSON); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("read claimed review result: %w", err)
 	}
 	if len(job.ValidatedResultJSON) > 0 {
-		rows, err := s.db.QueryContext(ctx, `
+		rows, err := tx.QueryContext(ctx, `
 SELECT finding_index, finding_id
 FROM review_findings
 WHERE job_id = ?
@@ -508,44 +531,31 @@ ORDER BY finding_index`, job.ID)
 			job.FindingIDs = append(job.FindingIDs, id)
 		}
 		if err := rows.Err(); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("iterate claimed finding identifiers: %w", err)
 		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close claimed finding identifiers: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit review job claim: %w", err)
 	}
 	return job, nil
 }
 
-func (s *Store) RenewLease(ctx context.Context, jobID int64, owner string, now time.Time, leaseDuration time.Duration) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `
-UPDATE review_jobs
-SET lease_expires_at = ?, updated_at = ?
-WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
-  AND julianday(lease_expires_at) > julianday(?)`,
-		formatDeadline(now.Add(leaseDuration)), formatTime(now), jobID, owner,
-		JobRunning, JobPublishing, formatTime(now))
-	if err != nil {
-		return false, fmt.Errorf("renew job lease: %w", err)
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("inspect lease renewal: %w", err)
-	}
-	return updated == 1, nil
-}
-
-func (s *Store) DeferPendingPatchID(ctx context.Context, jobID int64, owner string, now, nextAttempt time.Time) error {
-	if jobID <= 0 || owner == "" || now.IsZero() || nextAttempt.Before(now) {
+func (s *Store) DeferPendingPatchID(ctx context.Context, jobID int64, now, nextAttempt time.Time) error {
+	if jobID <= 0 || now.IsZero() || nextAttempt.Before(now) {
 		return errors.New("invalid pending patch ID retry")
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE review_jobs
 SET state = ?, patch_id_status = ?, patch_id_sha = NULL,
-    next_attempt_at = ?, lease_owner = NULL, lease_expires_at = NULL,
-    last_error_category = 'merge_request_patch_id_pending',
+    next_attempt_at = ?, last_error_category = 'merge_request_patch_id_pending',
     last_error_message = 'merge_request_patch_id_pending', updated_at = ?
-WHERE id = ? AND state = ? AND lease_owner = ? AND patch_id_status = ?
-  AND julianday(lease_expires_at) > julianday(?)`,
+WHERE id = ? AND state = ? AND patch_id_status = ?`,
 		JobQueued, PatchIDPending, formatDeadline(nextAttempt), formatTime(now),
-		jobID, JobRunning, owner, PatchIDUnknown, formatTime(now))
+		jobID, JobRunning, PatchIDUnknown)
 	if err != nil {
 		return fmt.Errorf("defer pending patch ID: %w", err)
 	}
@@ -554,7 +564,7 @@ WHERE id = ? AND state = ? AND lease_owner = ? AND patch_id_status = ?
 		return fmt.Errorf("inspect pending patch ID retry: %w", err)
 	}
 	if updated != 1 {
-		return ErrLeaseLost
+		return ErrJobNotRunning
 	}
 	return nil
 }
@@ -589,8 +599,8 @@ LIMIT 1`, jobID, JobCompleted, PatchIDAvailable, patchIDSHA).Scan(&canonicalID)
 
 var errCanonicalReviewUnavailable = errors.New("canonical review unavailable")
 
-func (s *Store) CompleteEquivalentReview(ctx context.Context, jobID int64, owner string, canonicalJobID int64, patchIDSHA string, now time.Time) error {
-	if jobID <= 0 || owner == "" || canonicalJobID <= 0 || jobID == canonicalJobID ||
+func (s *Store) CompleteEquivalentReview(ctx context.Context, jobID, canonicalJobID int64, patchIDSHA string, now time.Time) error {
+	if jobID <= 0 || canonicalJobID <= 0 || jobID == canonicalJobID ||
 		now.IsZero() || !validPatchIDSHA(patchIDSHA) {
 		return errors.New("invalid equivalent review completion")
 	}
@@ -604,17 +614,16 @@ func (s *Store) CompleteEquivalentReview(ctx context.Context, jobID int64, owner
 	if err := tx.QueryRowContext(ctx, `
 SELECT EXISTS(
     SELECT 1 FROM review_jobs source
-    WHERE source.id = ? AND source.state = ? AND source.lease_owner = ?
-      AND julianday(source.lease_expires_at) > julianday(?)
+    WHERE source.id = ? AND source.state = ?
       AND source.patch_id_status IN (?, ?) AND source.patch_id_sha IS NULL
       AND source.equivalent_to_job_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM review_results r WHERE r.job_id = source.id)
       AND NOT EXISTS (SELECT 1 FROM publications p WHERE p.job_id = source.id)
-)`, jobID, JobRunning, owner, formatTime(now), PatchIDUnknown, PatchIDPending).Scan(&validSource); err != nil {
+)`, jobID, JobRunning, PatchIDUnknown, PatchIDPending).Scan(&validSource); err != nil {
 		return fmt.Errorf("validate equivalent review source: %w", err)
 	}
 	if validSource != 1 {
-		return ErrLeaseLost
+		return ErrJobNotRunning
 	}
 	var validCanonical int
 	if err := tx.QueryRowContext(ctx, `
@@ -639,12 +648,10 @@ SELECT EXISTS(
 	result, err := tx.ExecContext(ctx, `
 UPDATE review_jobs
 SET state = ?, patch_id_status = ?, patch_id_sha = ?, equivalent_to_job_id = ?,
-    lease_owner = NULL, lease_expires_at = NULL,
     last_error_category = NULL, last_error_message = NULL, updated_at = ?
-WHERE id = ? AND state = ? AND lease_owner = ?
-  AND julianday(lease_expires_at) > julianday(?)`,
+WHERE id = ? AND state = ?`,
 		JobCompleted, PatchIDAvailable, patchIDSHA, canonicalJobID, formatTime(now),
-		jobID, JobRunning, owner, formatTime(now))
+		jobID, JobRunning)
 	if err != nil {
 		return fmt.Errorf("complete equivalent review job: %w", err)
 	}
@@ -653,7 +660,7 @@ WHERE id = ? AND state = ? AND lease_owner = ?
 		return fmt.Errorf("inspect equivalent review completion: %w", err)
 	}
 	if updated != 1 {
-		return ErrLeaseLost
+		return ErrJobNotRunning
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit equivalent review transaction: %w", err)
@@ -661,8 +668,8 @@ WHERE id = ? AND state = ? AND lease_owner = ?
 	return nil
 }
 
-func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, owner string, resultJSON []byte, findingIDs []string, retrievals []ReviewMemoryRetrieval, patchIDStatus, patchIDSHA string, now time.Time) error {
-	if len(resultJSON) == 0 || len(resultJSON) > 65536 || len(findingIDs) > 20 ||
+func (s *Store) SaveReviewResult(ctx context.Context, jobID int64, resultJSON []byte, findingIDs []string, retrievals []ReviewMemoryRetrieval, patchIDStatus, patchIDSHA string, now time.Time) error {
+	if jobID <= 0 || now.IsZero() || len(resultJSON) == 0 || len(resultJSON) > 65536 || len(findingIDs) > 20 ||
 		!validReviewPatchID(patchIDStatus, patchIDSHA) {
 		return errors.New("invalid validated review result")
 	}
@@ -715,11 +722,10 @@ VALUES (?, ?, ?, ?)`, jobID, retrieval.MemoryID, formatTime(retrieval.MemoryUpda
 	}
 	update, err := tx.ExecContext(ctx, `
 UPDATE review_jobs
-SET state = ?, patch_id_status = ?, patch_id_sha = ?, updated_at = ?
-WHERE id = ? AND state = ? AND lease_owner = ? AND equivalent_to_job_id IS NULL
-  AND julianday(lease_expires_at) > julianday(?)`,
-		JobPublishing, patchIDStatus, nullablePatchIDSHA(patchIDSHA), formatTime(now),
-		jobID, JobRunning, owner, formatTime(now))
+SET patch_id_status = ?, patch_id_sha = ?, updated_at = ?
+WHERE id = ? AND state = ? AND equivalent_to_job_id IS NULL`,
+		patchIDStatus, nullablePatchIDSHA(patchIDSHA), formatTime(now),
+		jobID, JobRunning)
 	if err != nil {
 		return fmt.Errorf("checkpoint review result: %w", err)
 	}
@@ -728,7 +734,7 @@ WHERE id = ? AND state = ? AND lease_owner = ? AND equivalent_to_job_id IS NULL
 		return fmt.Errorf("inspect review result checkpoint: %w", err)
 	}
 	if updated != 1 {
-		return ErrLeaseLost
+		return ErrJobNotRunning
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit review result transaction: %w", err)
@@ -736,33 +742,31 @@ WHERE id = ? AND state = ? AND lease_owner = ? AND equivalent_to_job_id IS NULL
 	return nil
 }
 
-func (s *Store) RetryJob(ctx context.Context, jobID int64, owner string, now, nextAttempt time.Time, maxAttempts int, category, message string) (string, error) {
-	if !validFailure(category, message) || maxAttempts <= 0 || nextAttempt.Before(now) {
+func (s *Store) RetryJob(ctx context.Context, jobID int64, now, nextAttempt time.Time, category, message string) (string, error) {
+	if jobID <= 0 || now.IsZero() || !validFailure(category, message) || nextAttempt.Before(now) {
 		return "", errors.New("invalid retry record")
 	}
 	row := s.db.QueryRowContext(ctx, `
 UPDATE review_jobs
 SET state = CASE WHEN attempt_count >= ? THEN ? ELSE ? END,
     next_attempt_at = CASE WHEN attempt_count >= ? THEN next_attempt_at ELSE ? END,
-    lease_owner = NULL, lease_expires_at = NULL,
     last_error_category = ?, last_error_message = ?, updated_at = ?
-WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
-  AND julianday(lease_expires_at) > julianday(?)
+WHERE id = ? AND state = ?
 RETURNING state`,
-		maxAttempts, JobFailed, JobQueued, maxAttempts, formatDeadline(nextAttempt),
-		category, message, formatTime(now), jobID, owner, JobRunning, JobPublishing, formatTime(now))
+		MaxJobAttempts, JobFailed, JobQueued, MaxJobAttempts, formatDeadline(nextAttempt),
+		category, message, formatTime(now), jobID, JobRunning)
 	var state string
 	if err := row.Scan(&state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrLeaseLost
+			return "", ErrJobNotRunning
 		}
 		return "", fmt.Errorf("schedule job retry: %w", err)
 	}
 	return state, nil
 }
 
-func (s *Store) FinishJob(ctx context.Context, jobID int64, owner, state, category, message string, now time.Time) error {
-	if state != JobFailed && state != JobObsolete {
+func (s *Store) FinishJob(ctx context.Context, jobID int64, state, category, message string, now time.Time) error {
+	if jobID <= 0 || now.IsZero() || (state != JobFailed && state != JobObsolete) {
 		return errors.New("invalid terminal job state")
 	}
 	if !validFailure(category, message) {
@@ -770,12 +774,9 @@ func (s *Store) FinishJob(ctx context.Context, jobID int64, owner, state, catego
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE review_jobs
-SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
-    last_error_category = ?, last_error_message = ?, updated_at = ?
-WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
-  AND julianday(lease_expires_at) > julianday(?)`,
-		state, category, message, formatTime(now), jobID, owner,
-		JobRunning, JobPublishing, formatTime(now))
+SET state = ?, last_error_category = ?, last_error_message = ?, updated_at = ?
+WHERE id = ? AND state = ?`,
+		state, category, message, formatTime(now), jobID, JobRunning)
 	if err != nil {
 		return fmt.Errorf("finish review job: %w", err)
 	}
@@ -784,15 +785,15 @@ WHERE id = ? AND lease_owner = ? AND state IN (?, ?)
 		return fmt.Errorf("inspect finished review job: %w", err)
 	}
 	if updated != 1 {
-		return ErrLeaseLost
+		return ErrJobNotRunning
 	}
 	return nil
 }
 
-// CompletePublication checkpoints either a generated result in publishing state or an
-// existing external publication recovered by a running job without a local result.
-func (s *Store) CompletePublication(ctx context.Context, jobID int64, owner, marker string, noteID int64, now time.Time) error {
-	if marker == "" || len(marker) > 256 || noteID <= 0 {
+// CompletePublication checkpoints either a generated result or an existing external
+// publication recovered by a running job without a local result.
+func (s *Store) CompletePublication(ctx context.Context, jobID int64, marker string, noteID int64, now time.Time) error {
+	if jobID <= 0 || marker == "" || len(marker) > 256 || noteID <= 0 || now.IsZero() {
 		return errors.New("invalid publication record")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -811,19 +812,17 @@ ON CONFLICT(job_id) DO UPDATE SET
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE review_jobs
-SET patch_id_status = CASE WHEN state = ? THEN ? ELSE patch_id_status END,
-    patch_id_sha = CASE WHEN state = ? THEN NULL ELSE patch_id_sha END,
-    state = ?, lease_owner = NULL, lease_expires_at = NULL,
-    last_error_category = NULL, last_error_message = NULL, updated_at = ?
-WHERE id = ? AND lease_owner = ?
-  AND julianday(lease_expires_at) > julianday(?)
-  AND (
-      (state = ? AND EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id)) OR
-      (state = ? AND NOT EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id))
-  )
-  AND equivalent_to_job_id IS NULL`,
-		JobRunning, PatchIDUnknown, JobRunning,
-		JobCompleted, formatTime(now), jobID, owner, formatTime(now), JobPublishing, JobRunning)
+SET patch_id_status = CASE
+        WHEN EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id) THEN patch_id_status
+        ELSE ?
+    END,
+    patch_id_sha = CASE
+        WHEN EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id) THEN patch_id_sha
+        ELSE NULL
+    END,
+    state = ?, last_error_category = NULL, last_error_message = NULL, updated_at = ?
+WHERE id = ? AND state = ? AND equivalent_to_job_id IS NULL`,
+		PatchIDUnknown, JobCompleted, formatTime(now), jobID, JobRunning)
 	if err != nil {
 		return fmt.Errorf("complete published review job: %w", err)
 	}
@@ -832,7 +831,7 @@ WHERE id = ? AND lease_owner = ?
 		return fmt.Errorf("inspect completed review job: %w", err)
 	}
 	if updated != 1 {
-		return ErrLeaseLost
+		return ErrJobNotRunning
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit publication transaction: %w", err)
@@ -840,7 +839,7 @@ WHERE id = ? AND lease_owner = ?
 	return nil
 }
 
-var ErrLeaseLost = errors.New("job lease lost")
+var ErrJobNotRunning = errors.New("job is not running")
 
 func formatTime(value time.Time) string {
 	return value.UTC().Truncate(time.Second).Format(timestampLayout)

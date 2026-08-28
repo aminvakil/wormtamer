@@ -270,13 +270,9 @@ func TestOpenInitializesCurrentSchema(t *testing.T) {
 	got := strings.Join(schemaObjects(t, storage.db), "\n")
 	want := strings.Join([]string{
 		"index feedback_jobs_due_idx",
-		"index model_generations_feedback_idx",
-		"index model_generations_review_idx",
-		"index model_generations_time_idx",
 		"index review_jobs_due_idx",
 		"index review_jobs_patch_id_idx",
 		"table feedback_jobs",
-		"table model_generations",
 		"table publications",
 		"table review_findings",
 		"table review_jobs",
@@ -288,10 +284,30 @@ func TestOpenInitializesCurrentSchema(t *testing.T) {
 	if got != want {
 		t.Fatalf("schema objects:\n%s\nwant:\n%s", got, want)
 	}
+	for _, table := range []string{"review_jobs", "feedback_jobs"} {
+		rows, err := storage.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			if name == "lease_owner" || name == "lease_expires_at" {
+				rows.Close()
+				t.Fatalf("%s retains lease column %q", table, name)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestOpenRejectsUnsupportedSchema(t *testing.T) {
-	for _, version := range []int{1, 9, schemaVersion + 1} {
+	for _, version := range []int{1, 9, 10, schemaVersion + 1} {
 		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
 			ctx := context.Background()
 			path := filepath.Join(t.TempDir(), "wormtamer.db")
@@ -338,7 +354,7 @@ PRAGMA user_version = %d;`, version)); err != nil {
 	}
 }
 
-func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
+func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 	ctx := context.Background()
@@ -348,51 +364,48 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 	}
 
 	now := time.Now().UTC().Add(time.Hour)
-	job, err := storage.ClaimJob(ctx, "owner-1", now, 2*time.Minute, 5)
+	job, err := storage.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	if job.ID != accepted.JobID || job.State != JobRunning || job.AttemptCount != 1 || job.PatchIDStatus != PatchIDUnknown {
 		t.Fatalf("claimed job = %+v", job)
 	}
-	if other, err := storage.ClaimJob(ctx, "owner-2", now, 2*time.Minute, 5); err != nil || other != nil {
+	if other, err := storage.ClaimJob(ctx, now); err != nil || other != nil {
 		t.Fatalf("concurrent ClaimJob() = %+v, %v", other, err)
 	}
-	if renewed, err := storage.RenewLease(ctx, job.ID, "wrong-owner", now.Add(time.Second), 2*time.Minute); err != nil || renewed {
-		t.Fatalf("wrong-owner RenewLease() = %t, %v", renewed, err)
+
+	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
+	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, nil, nil, PatchIDUnavailable, "", now); err != nil {
+		t.Fatalf("SaveReviewResult() error = %v", err)
 	}
-	if renewed, err := storage.RenewLease(ctx, job.ID, "owner-1", now.Add(time.Second), 2*time.Minute); err != nil || !renewed {
-		t.Fatalf("RenewLease() = %t, %v", renewed, err)
+	var checkpointState string
+	if err := storage.db.QueryRow(`SELECT state FROM review_jobs WHERE id = ?`, job.ID).Scan(&checkpointState); err != nil {
+		t.Fatal(err)
+	}
+	if checkpointState != JobRunning {
+		t.Fatalf("checkpoint state = %q", checkpointState)
 	}
 
-	recoveredAt := now.Add(2*time.Minute + 2*time.Second)
-	recovered, err := storage.ClaimJob(ctx, "owner-2", recoveredAt, 2*time.Minute, 5)
+	recoveredAt := now.Add(time.Minute)
+	if err := storage.RecoverInterruptedJobs(ctx, recoveredAt); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := storage.ClaimJob(ctx, recoveredAt)
 	if err != nil || recovered == nil {
 		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
 	}
-	if recovered.AttemptCount != 2 || recovered.State != JobRunning {
+	if recovered.AttemptCount != 2 || recovered.State != JobRunning || string(recovered.ValidatedResultJSON) != string(resultJSON) {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
-	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-1", resultJSON, nil, nil, PatchIDUnavailable, "", recoveredAt); !errors.Is(err, ErrLeaseLost) {
-		t.Fatalf("wrong-owner SaveReviewResult() error = %v", err)
-	}
-	if err := storage.SaveReviewResult(ctx, recovered.ID, "owner-2", resultJSON, nil, nil, PatchIDUnavailable, "", recoveredAt); err != nil {
-		t.Fatalf("SaveReviewResult() error = %v", err)
-	}
-
-	publishing, err := storage.ClaimJob(ctx, "owner-3", recoveredAt.Add(2*time.Minute+time.Second), 2*time.Minute, 5)
-	if err != nil || publishing == nil {
-		t.Fatalf("publishing ClaimJob() = %+v, %v", publishing, err)
-	}
-	if publishing.State != JobPublishing || string(publishing.ValidatedResultJSON) != string(resultJSON) {
-		t.Fatalf("publishing job = %+v", publishing)
-	}
-	if err := storage.CompletePublication(ctx, publishing.ID, "owner-3", "<!-- marker -->", 99, recoveredAt.Add(2*time.Minute+time.Second)); err != nil {
+	if err := storage.CompletePublication(ctx, recovered.ID, "<!-- marker -->", 99, recoveredAt); err != nil {
 		t.Fatalf("CompletePublication() error = %v", err)
 	}
+	if err := storage.SaveReviewResult(ctx, recovered.ID, resultJSON, nil, nil, PatchIDUnavailable, "", recoveredAt); !errors.Is(err, ErrJobNotRunning) {
+		t.Fatalf("completed SaveReviewResult() error = %v", err)
+	}
 	var state string
-	if err := storage.db.QueryRow(`SELECT state FROM review_jobs WHERE id = ?`, publishing.ID).Scan(&state); err != nil {
+	if err := storage.db.QueryRow(`SELECT state FROM review_jobs WHERE id = ?`, recovered.ID).Scan(&state); err != nil {
 		t.Fatal(err)
 	}
 	if state != JobCompleted {
@@ -400,6 +413,117 @@ func TestClaimLeaseCheckpointAndPublication(t *testing.T) {
 	}
 	assertCount(t, storage.db, "review_results", 1)
 	assertCount(t, storage.db, "publications", 1)
+}
+
+func TestRecoverInterruptedJobsRequeuesOrFailsOnlyRunningWork(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Add(time.Hour)
+
+	publishReview := func(delivery string, iid int64, head string) int64 {
+		event := readyEvent(delivery)
+		event.MergeRequestIID, event.HeadSHA = iid, head
+		accepted, err := storage.AcceptEvent(ctx, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, err := storage.ClaimJob(ctx, now)
+		if err != nil || job == nil || job.ID != accepted.JobID {
+			t.Fatalf("ClaimJob(%s) = %+v, %v", delivery, job, err)
+		}
+		if err := storage.SaveReviewResult(ctx, job.ID, []byte(`{"summary":"done","findings":[]}`), nil, nil, PatchIDUnavailable, "", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.CompletePublication(ctx, job.ID, "<!-- "+delivery+" -->", job.ID, now); err != nil {
+			t.Fatal(err)
+		}
+		return job.ID
+	}
+	queueFeedback := func(delivery string, iid int64, head string) int64 {
+		event := terminalEvent(delivery, "close", "closed", head)
+		event.MergeRequestIID = iid
+		accepted, err := storage.AcceptEvent(ctx, event)
+		if err != nil || accepted.FeedbackJobID == 0 {
+			t.Fatalf("AcceptEvent(%s) = %+v, %v", delivery, accepted, err)
+		}
+		return accepted.FeedbackJobID
+	}
+
+	completedReviewID := publishReview("completed-review-7", 7, strings.Repeat("1", 40))
+	feedbackRunningID := queueFeedback("feedback-running", 7, strings.Repeat("2", 40))
+	if job, err := storage.ClaimFeedbackJob(ctx, now); err != nil || job == nil || job.ID != feedbackRunningID {
+		t.Fatalf("ClaimFeedbackJob(running) = %+v, %v", job, err)
+	}
+	publishReview("completed-review-8", 8, strings.Repeat("3", 40))
+	feedbackExhaustedID := queueFeedback("feedback-exhausted", 8, strings.Repeat("4", 40))
+	if job, err := storage.ClaimFeedbackJob(ctx, now); err != nil || job == nil || job.ID != feedbackExhaustedID {
+		t.Fatalf("ClaimFeedbackJob(exhausted) = %+v, %v", job, err)
+	}
+	if _, err := storage.db.Exec(`UPDATE feedback_jobs SET attempt_count = ? WHERE id = ?`, MaxJobAttempts, feedbackExhaustedID); err != nil {
+		t.Fatal(err)
+	}
+
+	createReview := func(delivery string, iid int64, state string) int64 {
+		event := readyEvent(delivery)
+		event.MergeRequestIID, event.HeadSHA = iid, strings.Repeat(fmt.Sprintf("%x", iid%16), 40)
+		accepted, err := storage.AcceptEvent(ctx, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state != JobQueued {
+			if _, err := storage.db.Exec(`UPDATE review_jobs SET state = ?, updated_at = ? WHERE id = ?`, state, formatTime(now), accepted.JobID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return accepted.JobID
+	}
+	runningReviewID := createReview("running-review", 9, JobQueued)
+	if job, err := storage.ClaimJob(ctx, now); err != nil || job == nil || job.ID != runningReviewID {
+		t.Fatalf("ClaimJob(running) = %+v, %v", job, err)
+	}
+	exhaustedReviewID := createReview("exhausted-review", 10, JobQueued)
+	if job, err := storage.ClaimJob(ctx, now); err != nil || job == nil || job.ID != exhaustedReviewID {
+		t.Fatalf("ClaimJob(exhausted) = %+v, %v", job, err)
+	}
+	if _, err := storage.db.Exec(`UPDATE review_jobs SET attempt_count = ? WHERE id = ?`, MaxJobAttempts, exhaustedReviewID); err != nil {
+		t.Fatal(err)
+	}
+	queuedReviewID := createReview("queued-review", 11, JobQueued)
+	failedReviewID := createReview("failed-review", 12, JobFailed)
+	obsoleteReviewID := createReview("obsolete-review", 13, JobObsolete)
+
+	recoveredAt := now.Add(time.Minute)
+	if err := storage.RecoverInterruptedJobs(ctx, recoveredAt); err != nil {
+		t.Fatal(err)
+	}
+	assertState := func(table string, id int64, want string) {
+		var state string
+		if err := storage.db.QueryRow(`SELECT state FROM `+table+` WHERE id = ?`, id).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		if state != want {
+			t.Fatalf("%s job %d state = %q, want %q", table, id, state, want)
+		}
+	}
+	assertState("review_jobs", runningReviewID, JobQueued)
+	assertState("review_jobs", exhaustedReviewID, JobFailed)
+	assertState("review_jobs", queuedReviewID, JobQueued)
+	assertState("review_jobs", failedReviewID, JobFailed)
+	assertState("review_jobs", obsoleteReviewID, JobObsolete)
+	assertState("review_jobs", completedReviewID, JobCompleted)
+	assertState("feedback_jobs", feedbackRunningID, FeedbackQueued)
+	assertState("feedback_jobs", feedbackExhaustedID, FeedbackFailed)
+
+	for table, id := range map[string]int64{"review_jobs": exhaustedReviewID, "feedback_jobs": feedbackExhaustedID} {
+		var category string
+		if err := storage.db.QueryRow(`SELECT last_error_category FROM `+table+` WHERE id = ?`, id).Scan(&category); err != nil {
+			t.Fatal(err)
+		}
+		if category != "attempts_exhausted" {
+			t.Fatalf("%s exhausted category = %q", table, category)
+		}
+	}
 }
 
 func TestPatchIDRetryAndEquivalentCompletion(t *testing.T) {
@@ -414,16 +538,16 @@ func TestPatchIDRetryAndEquivalentCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonicalJob, err := storage.ClaimJob(ctx, "canonical-owner", now, time.Minute, 5)
+	canonicalJob, err := storage.ClaimJob(ctx, now)
 	if err != nil || canonicalJob == nil {
 		t.Fatalf("ClaimJob(canonical) = %+v, %v", canonicalJob, err)
 	}
-	if err := storage.SaveReviewResult(ctx, canonicalJob.ID, "canonical-owner",
+	if err := storage.SaveReviewResult(ctx, canonicalJob.ID,
 		[]byte(`{"summary":"canonical","findings":[]}`), nil, nil,
 		PatchIDAvailable, patchID, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CompletePublication(ctx, canonicalJob.ID, "canonical-owner", "canonical-marker", 71, now.Add(2*time.Second)); err != nil {
+	if err := storage.CompletePublication(ctx, canonicalJob.ID, "canonical-marker", 71, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -433,14 +557,14 @@ func TestPatchIDRetryAndEquivalentCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := storage.ClaimJob(ctx, "equivalent-owner", now.Add(3*time.Second), time.Minute, 5)
+	claimed, err := storage.ClaimJob(ctx, now.Add(3*time.Second))
 	if err != nil || claimed == nil || claimed.ID != equivalent.JobID || claimed.PatchIDStatus != PatchIDUnknown {
 		t.Fatalf("ClaimJob(equivalent) = %+v, %v", claimed, err)
 	}
-	if err := storage.DeferPendingPatchID(ctx, claimed.ID, "equivalent-owner", now.Add(3*time.Second), now.Add(4*time.Second)); err != nil {
+	if err := storage.DeferPendingPatchID(ctx, claimed.ID, now.Add(3*time.Second), now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = storage.ClaimJob(ctx, "equivalent-owner-2", now.Add(5*time.Second), time.Minute, 5)
+	claimed, err = storage.ClaimJob(ctx, now.Add(5*time.Second))
 	if err != nil || claimed == nil || claimed.PatchIDStatus != PatchIDPending || claimed.AttemptCount != 2 {
 		t.Fatalf("ClaimJob(pending) = %+v, %v", claimed, err)
 	}
@@ -448,11 +572,11 @@ func TestPatchIDRetryAndEquivalentCompletion(t *testing.T) {
 	if err != nil || !found || canonicalID != canonical.JobID {
 		t.Fatalf("FindCanonicalReviewJob() = %d, %t, %v", canonicalID, found, err)
 	}
-	if err := storage.CompleteEquivalentReview(ctx, claimed.ID, "wrong-owner", canonicalID, patchID, now.Add(6*time.Second)); !errors.Is(err, ErrLeaseLost) {
-		t.Fatalf("wrong-owner CompleteEquivalentReview() error = %v", err)
-	}
-	if err := storage.CompleteEquivalentReview(ctx, claimed.ID, "equivalent-owner-2", canonicalID, patchID, now.Add(6*time.Second)); err != nil {
+	if err := storage.CompleteEquivalentReview(ctx, claimed.ID, canonicalID, patchID, now.Add(6*time.Second)); err != nil {
 		t.Fatal(err)
+	}
+	if err := storage.CompleteEquivalentReview(ctx, claimed.ID, canonicalID, patchID, now.Add(6*time.Second)); !errors.Is(err, ErrJobNotRunning) {
+		t.Fatalf("repeated CompleteEquivalentReview() error = %v", err)
 	}
 
 	var state, status, storedPatch string
@@ -500,11 +624,11 @@ func TestCanonicalReviewLookupRejectsIneligibleAndOtherMergeRequestJobs(t *testi
 	if _, err := storage.AcceptEvent(ctx, unpublishedEvent); err != nil {
 		t.Fatal(err)
 	}
-	unpublished, err := storage.ClaimJob(ctx, "unpublished-owner", now.Add(3*time.Second), time.Minute, 5)
+	unpublished, err := storage.ClaimJob(ctx, now.Add(3*time.Second))
 	if err != nil || unpublished == nil {
 		t.Fatalf("ClaimJob(unpublished) = %+v, %v", unpublished, err)
 	}
-	if err := storage.SaveReviewResult(ctx, unpublished.ID, "unpublished-owner",
+	if err := storage.SaveReviewResult(ctx, unpublished.ID,
 		[]byte(`{"summary":"unpublished","findings":[]}`), nil, nil,
 		PatchIDAvailable, patchID, now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
@@ -516,16 +640,16 @@ func TestCanonicalReviewLookupRejectsIneligibleAndOtherMergeRequestJobs(t *testi
 	if _, err := storage.AcceptEvent(ctx, otherEvent); err != nil {
 		t.Fatal(err)
 	}
-	other, err := storage.ClaimJob(ctx, "other-owner", now.Add(5*time.Second), time.Minute, 5)
+	other, err := storage.ClaimJob(ctx, now.Add(5*time.Second))
 	if err != nil || other == nil {
 		t.Fatalf("ClaimJob(other MR) = %+v, %v", other, err)
 	}
-	if err := storage.SaveReviewResult(ctx, other.ID, "other-owner",
+	if err := storage.SaveReviewResult(ctx, other.ID,
 		[]byte(`{"summary":"other","findings":[]}`), nil, nil,
 		PatchIDAvailable, patchID, now.Add(6*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CompletePublication(ctx, other.ID, "other-owner", "other-marker", 72, now.Add(7*time.Second)); err != nil {
+	if err := storage.CompletePublication(ctx, other.ID, "other-marker", 72, now.Add(7*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -549,18 +673,18 @@ func TestCompletePublicationWithoutLocalReviewResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	job, err := storage.ClaimJob(ctx, "publication-owner", now, time.Minute, 5)
+	job, err := storage.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if err := storage.DeferPendingPatchID(ctx, job.ID, "publication-owner", now, now.Add(time.Second)); err != nil {
+	if err := storage.DeferPendingPatchID(ctx, job.ID, now, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	job, err = storage.ClaimJob(ctx, "publication-owner-2", now.Add(2*time.Second), time.Minute, 5)
+	job, err = storage.ClaimJob(ctx, now.Add(2*time.Second))
 	if err != nil || job == nil || job.PatchIDStatus != PatchIDPending {
 		t.Fatalf("ClaimJob(pending) = %+v, %v", job, err)
 	}
-	if err := storage.CompletePublication(ctx, job.ID, "publication-owner-2", "<!-- existing -->", 73, now.Add(3*time.Second)); err != nil {
+	if err := storage.CompletePublication(ctx, job.ID, "<!-- existing -->", 73, now.Add(3*time.Second)); err != nil {
 		t.Fatalf("CompletePublication() error = %v", err)
 	}
 	var state, marker, patchIDStatus string
@@ -590,13 +714,13 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Add(time.Hour)
-	job, err := storage.ClaimJob(ctx, "owner-1", now, time.Minute, 5)
+	job, err := storage.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[{"priority":"P1","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
 	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
-	if err := storage.SaveReviewResult(ctx, job.ID, "owner-1", resultJSON, findingIDs, nil, PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, findingIDs, nil, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.Close(); err != nil {
@@ -608,11 +732,14 @@ func TestReviewCheckpointSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	recovered, err := reopened.ClaimJob(ctx, "owner-2", now.Add(time.Minute+time.Second), time.Minute, 5)
+	if err := reopened.RecoverInterruptedJobs(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := reopened.ClaimJob(ctx, now.Add(time.Minute+time.Second))
 	if err != nil || recovered == nil {
 		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
 	}
-	if recovered.State != JobPublishing || recovered.PatchIDStatus != PatchIDUnavailable ||
+	if recovered.State != JobRunning || recovered.PatchIDStatus != PatchIDUnavailable ||
 		string(recovered.ValidatedResultJSON) != string(resultJSON) ||
 		len(recovered.FindingIDs) != 1 || recovered.FindingIDs[0] != findingIDs[0] {
 		t.Fatalf("recovered job = %+v", recovered)
@@ -626,16 +753,45 @@ func TestSaveReviewResultRejectsMalformedFindingIdentifiers(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	job, err := storage.ClaimJob(context.Background(), "owner", now, time.Minute, 5)
+	job, err := storage.ClaimJob(context.Background(), now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(context.Background(), job.ID, "owner", resultJSON, []string{"model-id"}, nil, PatchIDUnavailable, "", now); err == nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, resultJSON, []string{"model-id"}, nil, PatchIDUnavailable, "", now); err == nil {
 		t.Fatal("SaveReviewResult() accepted a malformed finding identifier")
 	}
 	assertCount(t, storage.db, "review_results", 0)
 	assertCount(t, storage.db, "review_findings", 0)
+}
+
+func TestClaimJobRollsBackWhenStoredContextIsInvalid(t *testing.T) {
+	storage := openTestStore(t)
+	defer storage.Close()
+	ctx := context.Background()
+	accepted, err := storage.AcceptEvent(ctx, readyEvent("invalid-claim-context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(time.Hour)
+	if _, err := storage.db.Exec(`
+INSERT INTO review_results (job_id, result_json, created_at) VALUES (?, ?, ?);
+INSERT INTO review_findings (finding_id, job_id, finding_index) VALUES (?, ?, 1);`,
+		accepted.JobID, []byte(`{"summary":"stored","findings":[]}`), formatTime(now),
+		"WT-F-"+strings.Repeat("A", 26), accepted.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if job, err := storage.ClaimJob(ctx, now); err == nil || job != nil {
+		t.Fatalf("ClaimJob() = %+v, %v", job, err)
+	}
+	var state string
+	var attempts int
+	if err := storage.db.QueryRow(`SELECT state, attempt_count FROM review_jobs WHERE id = ?`, accepted.JobID).Scan(&state, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if state != JobQueued || attempts != 0 {
+		t.Fatalf("rolled-back claim state=%q attempts=%d", state, attempts)
+	}
 }
 
 func TestClaimJobIsAtomic(t *testing.T) {
@@ -654,7 +810,7 @@ func TestClaimJobIsAtomic(t *testing.T) {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
-			job, err := storage.ClaimJob(context.Background(), fmt.Sprintf("owner-%d", index), now, time.Minute, 5)
+			job, err := storage.ClaimJob(context.Background(), now)
 			jobs <- job
 			errors <- err
 		}(index)
@@ -688,7 +844,7 @@ func TestRetryJobIsDueAndExhaustsAttempts(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	for attempt := 1; attempt <= 5; attempt++ {
-		job, err := storage.ClaimJob(ctx, "owner", now, time.Minute, 5)
+		job, err := storage.ClaimJob(ctx, now)
 		if err != nil || job == nil {
 			t.Fatalf("attempt %d ClaimJob() = %+v, %v", attempt, job, err)
 		}
@@ -696,7 +852,7 @@ func TestRetryJobIsDueAndExhaustsAttempts(t *testing.T) {
 			t.Fatalf("attempt count = %d, want %d", job.AttemptCount, attempt)
 		}
 		next := now.Add(time.Minute)
-		state, err := storage.RetryJob(ctx, job.ID, "owner", now, next, 5, "temporary", "temporary failure")
+		state, err := storage.RetryJob(ctx, job.ID, now, next, "temporary", "temporary failure")
 		if err != nil {
 			t.Fatalf("RetryJob() error = %v", err)
 		}
@@ -706,7 +862,7 @@ func TestRetryJobIsDueAndExhaustsAttempts(t *testing.T) {
 		if attempt == 5 && state != JobFailed {
 			t.Fatalf("exhausted state = %q", state)
 		}
-		if early, err := storage.ClaimJob(ctx, "other", now.Add(30*time.Second), time.Minute, 5); err != nil || early != nil {
+		if early, err := storage.ClaimJob(ctx, now.Add(30*time.Second)); err != nil || early != nil {
 			t.Fatalf("early ClaimJob() = %+v, %v", early, err)
 		}
 		now = next

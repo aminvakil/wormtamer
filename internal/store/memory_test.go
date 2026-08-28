@@ -32,14 +32,14 @@ func TestSaveReviewResultPersistsVersionedMemoryRetrieval(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Add(time.Hour)
-	job, err := storage.ClaimJob(ctx, "owner", now, time.Minute, 5)
+	job, err := storage.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	retrieval := ReviewMemoryRetrieval{
 		MemoryID: "WT-M-" + strings.Repeat("A", 26), MemoryUpdatedAt: now.Add(-time.Hour), RetrievedAt: now.Add(-time.Second),
 	}
-	if err := storage.SaveReviewResult(ctx, job.ID, "owner", []byte(`{"summary":"ok","findings":[]}`), nil, []ReviewMemoryRetrieval{retrieval}, PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, []byte(`{"summary":"ok","findings":[]}`), nil, []ReviewMemoryRetrieval{retrieval}, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
 	var memoryID, updatedAt, retrievedAt string
@@ -61,15 +61,14 @@ func activateMemory(t *testing.T, storage *Store, instance string, projectID int
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := "review-owner-" + memoryID
-	job, err := storage.ClaimJob(context.Background(), owner, now, time.Minute, 5)
+	job, err := storage.ClaimJob(context.Background(), now)
 	if err != nil || job == nil || job.ID != accepted.JobID {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if err := storage.SaveReviewResult(context.Background(), job.ID, owner, []byte(`{"summary":"summary","findings":[]}`), nil, nil, PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(context.Background(), job.ID, []byte(`{"summary":"summary","findings":[]}`), nil, nil, PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CompletePublication(context.Background(), job.ID, owner, "<!-- "+memoryID+" -->", job.ID, now.Add(time.Second)); err != nil {
+	if err := storage.CompletePublication(context.Background(), job.ID, "<!-- "+memoryID+" -->", job.ID, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	terminal := Event{
@@ -81,12 +80,12 @@ func activateMemory(t *testing.T, storage *Store, instance string, projectID int
 	if err != nil {
 		t.Fatal(err)
 	}
-	feedbackJob, err := storage.ClaimFeedbackJob(context.Background(), "feedback-owner-"+memoryID, now.Add(2*time.Second), time.Minute, 5)
+	feedbackJob, err := storage.ClaimFeedbackJob(context.Background(), now.Add(2*time.Second))
 	if err != nil || feedbackJob == nil || feedbackJob.ID != feedback.FeedbackJobID {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", feedbackJob, err)
 	}
 	source := instance + "/" + projectPath + "/-/merge_requests/" + string(rune('0'+iid))
-	if err := storage.CompleteFeedbackJob(context.Background(), feedbackJob.ID, "feedback-owner-"+memoryID,
+	if err := storage.CompleteFeedbackJob(context.Background(), feedbackJob.ID,
 		memoryID, lesson, source, now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}

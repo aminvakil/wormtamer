@@ -17,14 +17,14 @@ func TestPanelReadsTerminalFeedbackAndMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := storage.ClaimFeedbackJob(ctx, "panel-feedback", now.Add(10*time.Second), time.Minute, 5)
+	job, err := storage.ClaimFeedbackJob(ctx, now.Add(10*time.Second))
 	if err != nil || job == nil {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", job, err)
 	}
 	memoryID := "WT-M-" + strings.Repeat("A", 26)
 	lesson := "Generated files are changed through their source generator."
 	source := "http://gitlab.internal/group/project/-/merge_requests/7"
-	if err := storage.CompleteFeedbackJob(ctx, job.ID, "panel-feedback", memoryID, lesson, source, now.Add(11*time.Second)); err != nil {
+	if err := storage.CompleteFeedbackJob(ctx, job.ID, memoryID, lesson, source, now.Add(11*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 

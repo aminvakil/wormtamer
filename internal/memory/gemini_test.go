@@ -15,7 +15,6 @@ import (
 	"github.com/aminvakil/wormtamer/internal/failure"
 	"github.com/aminvakil/wormtamer/internal/gitlab"
 	"github.com/aminvakil/wormtamer/internal/review"
-	"github.com/aminvakil/wormtamer/internal/usage"
 	"google.golang.org/genai"
 )
 
@@ -32,21 +31,17 @@ func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
 		gotPath = request.URL.Path
 		gotAPIKey = request.Header.Get("x-goog-api-key")
 		response.Header().Set("Content-Type", "application/json")
-		response.Header().Set("X-Litellm-Response-Cost", "0.000001")
 		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"create_memory\":false,\"lesson\":\"\"}"}],"role":"model"},"finishReason":"STOP"}]}`))
 	}))
 	defer server.Close()
 
-	recorder := &fakeUsageRecorder{}
-	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil, recorder)
+	evaluator, err := NewEvaluator(context.Background(), "gateway-key", server.URL, "gemini-proxy", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestFeedback, FeedbackJobID: 9, Attempt: 1})
-	result, err := evaluator.Evaluate(ctx, testInput())
-	if err != nil || result.CreateMemory || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" ||
-		len(recorder.completions) != 1 || recorder.completions[0].EndpointCostPicos == nil || *recorder.completions[0].EndpointCostPicos != 1_000_000 {
-		t.Fatalf("result=%+v error=%v path=%q key=%q completions=%+v", result, err, gotPath, gotAPIKey, recorder.completions)
+	result, err := evaluator.Evaluate(context.Background(), testInput())
+	if err != nil || result.CreateMemory || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
+		t.Fatalf("result=%+v error=%v path=%q key=%q", result, err, gotPath, gotAPIKey)
 	}
 }
 
@@ -117,28 +112,6 @@ func TestEvaluatorRejectsInvalidOrSensitiveEvidenceAndOutput(t *testing.T) {
 	}
 }
 
-func TestEvaluatorRecordsFeedbackGenerationMetadata(t *testing.T) {
-	generator := &fakeGenerator{
-		output: `{"create_memory":false,"lesson":""}`,
-		generation: review.Generation{
-			ModelVersion: "resolved-test", FinishReason: genai.FinishReasonStop,
-			PromptTokenCount: 80, CachedContentTokenCount: 10, CandidatesTokenCount: 20,
-			ThoughtsTokenCount: 5, TotalTokenCount: 105, UsageMetadataAvailable: true,
-		},
-	}
-	recorder := &fakeUsageRecorder{}
-	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
-	evaluator.recorder = recorder
-	ctx := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestFeedback, FeedbackJobID: 91, Attempt: 4})
-	if _, err := evaluator.Evaluate(ctx, testInput()); err != nil {
-		t.Fatal(err)
-	}
-	if len(recorder.starts) != 1 || recorder.starts[0].FeedbackJobID != 91 || len(recorder.completions) != 1 ||
-		recorder.completions[0].StructuredValidation != "valid" || recorder.completions[0].ResolvedModel != "resolved-test" {
-		t.Fatalf("starts=%+v completions=%+v", recorder.starts, recorder.completions)
-	}
-}
-
 func TestEvaluatorDiagnosticsRespectLogLevel(t *testing.T) {
 	secret := "configured\nsecret"
 	for _, test := range []struct {
@@ -178,17 +151,12 @@ func TestEvaluatorDiagnosticsRespectLogLevel(t *testing.T) {
 	}
 }
 
-func TestEvaluatorCheckpointsAfterWorkflowCancellation(t *testing.T) {
-	scoped := usage.WithScope(context.Background(), usage.Scope{RequestKind: usage.RequestFeedback, FeedbackJobID: 91, Attempt: 2})
-	ctx, cancel := context.WithCancel(scoped)
+func TestEvaluatorPropagatesWorkflowCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	generator := &fakeGenerator{err: context.Canceled, onGenerate: cancel}
-	recorder := &fakeUsageRecorder{}
-	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
-	evaluator.recorder = recorder
-	_, err := evaluator.Evaluate(ctx, testInput())
-	if !errors.Is(err, context.Canceled) || len(recorder.completions) != 1 || recorder.completionContextErrs[0] != nil ||
-		!recorder.completionHasDeadlines[0] || recorder.completions[0].State != usage.CompletionFailed {
-		t.Fatalf("error=%v completions=%+v", err, recorder.completions)
+	_, err := newEvaluator(generator, "gemini-test", nil, nil).Evaluate(ctx, testInput())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
 	}
 }
 
@@ -207,31 +175,10 @@ func testInput() Input {
 	}
 }
 
-type fakeUsageRecorder struct {
-	starts                 []usage.GenerationStart
-	completions            []usage.GenerationCompletion
-	completionContextErrs  []error
-	completionHasDeadlines []bool
-}
-
-func (r *fakeUsageRecorder) Start(_ context.Context, start usage.GenerationStart) (int64, error) {
-	r.starts = append(r.starts, start)
-	return int64(len(r.starts)), nil
-}
-
-func (r *fakeUsageRecorder) Complete(ctx context.Context, _ int64, completion usage.GenerationCompletion) error {
-	r.completions = append(r.completions, completion)
-	r.completionContextErrs = append(r.completionContextErrs, ctx.Err())
-	_, deadline := ctx.Deadline()
-	r.completionHasDeadlines = append(r.completionHasDeadlines, deadline)
-	return nil
-}
-
 type fakeGenerator struct {
 	output     string
 	prompt     string
 	config     *genai.GenerateContentConfig
-	generation review.Generation
 	err        error
 	onGenerate func()
 }
@@ -247,8 +194,7 @@ func (g *fakeGenerator) Generate(_ context.Context, _ string, contents []*genai.
 	if len(contents) == 1 && len(contents[0].Parts) == 1 {
 		g.prompt = contents[0].Parts[0].Text
 	}
-	generation := g.generation
-	generation.Content = genai.NewContentFromText(g.output, genai.RoleModel)
+	generation := review.Generation{Content: genai.NewContentFromText(g.output, genai.RoleModel)}
 	if generation.FinishReason == "" {
 		generation.FinishReason = genai.FinishReasonStop
 	}

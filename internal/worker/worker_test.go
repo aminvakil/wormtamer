@@ -31,10 +31,7 @@ func TestWorkerPreparesAndClosesWorkspaceBeforePublication(t *testing.T) {
 	broker := &fakeGitLab{}
 	workspaces := &fakeWorkspaces{}
 	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}}
-	worker, err := New(storage, broker, workspaces, reviewer, slog.Default(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	worker := New(storage, broker, workspaces, reviewer, slog.Default(), nil)
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
@@ -56,10 +53,7 @@ func TestWorkerPreservesReviewAndWorkspaceCleanupFailures(t *testing.T) {
 	reviewErr := failure.Retry("review_failed", 0)
 	closeErr := errors.New("close failed")
 	workspaces := &fakeWorkspaces{closeErr: closeErr}
-	worker, err := New(storage, &fakeGitLab{}, workspaces, &fakeReviewer{err: reviewErr}, slog.Default(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	worker := New(storage, &fakeGitLab{}, workspaces, &fakeReviewer{err: reviewErr}, slog.Default(), nil)
 	job, err := worker.claim(context.Background())
 	if err != nil || job == nil {
 		t.Fatalf("claim = %+v, %v", job, err)
@@ -307,11 +301,11 @@ func TestWorkerDoesNotDeferPendingPatchIDWithoutThreeReviewClaimsRemaining(t *te
 	ctx := context.Background()
 	now := time.Now().UTC().Add(time.Hour)
 	for attempt := 1; attempt <= 2; attempt++ {
-		job, err := storage.ClaimJob(ctx, "pre-patch-owner", now, time.Minute, maxAttempts)
+		job, err := storage.ClaimJob(ctx, now)
 		if err != nil || job == nil {
 			t.Fatalf("pre-patch ClaimJob(%d) = %+v, %v", attempt, job, err)
 		}
-		if _, err := storage.RetryJob(ctx, job.ID, "pre-patch-owner", now, now.Add(time.Second), maxAttempts,
+		if _, err := storage.RetryJob(ctx, job.ID, now, now.Add(time.Second),
 			"gitlab_network_failure", "gitlab_network_failure"); err != nil {
 			t.Fatal(err)
 		}
@@ -438,15 +432,15 @@ func TestWorkerOperatorRetryResumesPublicationWithoutReview(t *testing.T) {
 	queueJob(t, storage)
 	ctx := context.Background()
 	now := time.Now().UTC().Add(time.Hour)
-	job, err := storage.ClaimJob(ctx, "checkpoint-owner", now, time.Minute, maxAttempts)
+	job, err := storage.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	resultJSON := []byte(`{"summary":"Already reviewed.","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "checkpoint-owner", resultJSON, nil, nil, store.PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, nil, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.FinishJob(ctx, job.ID, "checkpoint-owner", store.JobFailed,
+	if err := storage.FinishJob(ctx, job.ID, store.JobFailed,
 		"gitlab_authorization_failed", "gitlab_authorization_failed", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +488,32 @@ func TestWorkerReconcilesLostPostResponse(t *testing.T) {
 	}
 }
 
+func TestWorkerRunFailsWhenRetryCheckpointCannotPersist(t *testing.T) {
+	storage, db := workerStore(t)
+	defer storage.Close()
+	defer db.Close()
+	queueJob(t, storage)
+	checkpointErr := errors.New("simulated retry checkpoint failure")
+	failing := &failingRetryStore{Store: storage, err: checkpointErr}
+	worker := newTestWorker(t, failing, &fakeGitLab{loadError: failure.Retry("gitlab_network_failure", 0)}, &fakeReviewer{}, nil)
+	now := time.Now().UTC().Add(time.Hour)
+	worker.now = func() time.Time { return now }
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := worker.Run(ctx); !errors.Is(err, checkpointErr) {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertJobState(t, db, store.JobRunning)
+	if err := storage.RecoverInterruptedJobs(context.Background(), now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := storage.ClaimJob(context.Background(), now.Add(time.Second))
+	if err != nil || recovered == nil || recovered.AttemptCount != 2 {
+		t.Fatalf("recovered job = %+v, %v", recovered, err)
+	}
+}
+
 func TestWorkerShutdownLeavesActiveJobRecoverable(t *testing.T) {
 	storage, db := workerStore(t)
 	defer storage.Close()
@@ -520,7 +540,11 @@ func TestWorkerShutdownLeavesActiveJobRecoverable(t *testing.T) {
 		t.Fatal("worker did not stop")
 	}
 	assertJobState(t, db, store.JobRunning)
-	recovered, err := storage.ClaimJob(context.Background(), "recovery-owner", time.Now().UTC().Add(3*time.Minute), leaseDuration, maxAttempts)
+	recoveredAt := time.Now().UTC().Add(time.Minute)
+	if err := storage.RecoverInterruptedJobs(context.Background(), recoveredAt); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := storage.ClaimJob(context.Background(), recoveredAt)
 	if err != nil || recovered == nil || recovered.AttemptCount != 2 {
 		t.Fatalf("recovered job = %+v, %v", recovered, err)
 	}
@@ -656,11 +680,7 @@ func newTestWorker(t *testing.T, storage JobStore, broker *fakeGitLab, reviewer 
 	if logs == nil {
 		logs = &bytes.Buffer{}
 	}
-	result, err := New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
+	return New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
 }
 
 func workerStore(t *testing.T) (*store.Store, *sql.DB) {
@@ -699,16 +719,16 @@ func prepareMemoryForWorker(t *testing.T, storage *store.Store, now time.Time) s
 	t.Helper()
 	ctx := context.Background()
 	queueJob(t, storage)
-	job, err := storage.ClaimJob(ctx, "memory-source-review", now, 2*time.Minute, 5)
+	job, err := storage.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
 	findingID := "WT-F-" + strings.Repeat("A", 26)
 	result := []byte(`{"summary":"source","findings":[{"priority":"P2","title":"title","explanation":"why","recommendation":"fix","path":"main.go"}]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, "memory-source-review", result, []string{findingID}, nil, store.PatchIDUnavailable, "", now); err != nil {
+	if err := storage.SaveReviewResult(ctx, job.ID, result, []string{findingID}, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CompletePublication(ctx, job.ID, "memory-source-review", "<!-- memory-source-review -->", 99, now.Add(time.Second)); err != nil {
+	if err := storage.CompletePublication(ctx, job.ID, "<!-- memory-source-review -->", 99, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, err := storage.AcceptEvent(ctx, store.Event{
@@ -720,12 +740,12 @@ func prepareMemoryForWorker(t *testing.T, storage *store.Store, now time.Time) s
 	if err != nil || accepted.FeedbackJobID == 0 {
 		t.Fatalf("AcceptEvent(feedback) = %+v, %v", accepted, err)
 	}
-	feedbackJob, err := storage.ClaimFeedbackJob(ctx, "memory-feedback-owner", now.Add(2*time.Second), 3*time.Minute, 5)
+	feedbackJob, err := storage.ClaimFeedbackJob(ctx, now.Add(2*time.Second))
 	if err != nil || feedbackJob == nil {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", feedbackJob, err)
 	}
 	memoryID := "WT-M-" + strings.Repeat("A", 26)
-	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, "memory-feedback-owner", memoryID,
+	if err := storage.CompleteFeedbackJob(ctx, feedbackJob.ID, memoryID,
 		"Generated source must be fixed through its generator.",
 		"http://gitlab.internal/group/project/-/merge_requests/7", now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
@@ -923,15 +943,24 @@ func (s *failingMemoryStore) ListReviewMemories(context.Context, string, int64) 
 	return nil, errors.New("simulated memory failure")
 }
 
+type failingRetryStore struct {
+	*store.Store
+	err error
+}
+
+func (s *failingRetryStore) RetryJob(context.Context, int64, time.Time, time.Time, string, string) (string, error) {
+	return "", s.err
+}
+
 type flakyCompletionStore struct {
 	*store.Store
 	failNext bool
 }
 
-func (s *flakyCompletionStore) CompletePublication(ctx context.Context, jobID int64, owner, marker string, noteID int64, now time.Time) error {
+func (s *flakyCompletionStore) CompletePublication(ctx context.Context, jobID int64, marker string, noteID int64, now time.Time) error {
 	if s.failNext {
 		s.failNext = false
 		return errors.New("simulated commit failure")
 	}
-	return s.Store.CompletePublication(ctx, jobID, owner, marker, noteID, now)
+	return s.Store.CompletePublication(ctx, jobID, marker, noteID, now)
 }

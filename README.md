@@ -13,8 +13,8 @@
 - Gives Gemini Pi-style `read` and unrestricted `bash` tools under a credential-free review identity
 - After an MR closes or merges, lets Gemini derive at most one repository-scoped advisory lesson from its diff, comments, and Wormtamer review
 - Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
-- Persists webhook, job, patch-equivalence, result, publication, feedback, advisory-memory, and model-usage state in SQLite
-- Shows persisted workflow, runtime-memory, and model-usage state in a built-in read-only web panel
+- Persists webhook, job, patch-equivalence, result, publication, feedback, and advisory-memory state in SQLite
+- Shows persisted workflow and runtime-memory state in a built-in read-only web panel
 
 Wormtamer supports GitLab 17 and newer. Each deployment serves one team and runs as one process and one replica.
 
@@ -70,7 +70,7 @@ Close and merge events let Wormtamer evaluate the terminal diff, current comment
 
 ### 5. View the panel
 
-Open `https://wormtamer.example/` to inspect persisted review activity, findings, feedback processing, runtime memory, application-observed model usage, and non-secret effective configuration. The panel is read-only and does not probe external services while rendering. Panel access and request limiting are deployment concerns described in [Container deployment](docs/deployment.md); content-bearing model diagnostics are available only through stderr at debug log level.
+Open `https://wormtamer.example/` to inspect persisted review activity, findings, feedback processing, runtime memory, and non-secret effective configuration. The panel is read-only and does not probe external services while rendering. Panel access and request limiting are deployment concerns described in [Container deployment](docs/deployment.md); content-bearing model diagnostics are available only through stderr at debug log level.
 
 See [Container deployment](docs/deployment.md) for complete configuration, webhook, permissions, TLS termination, health checking, shutdown, persistence, backup, and restore guidance.
 

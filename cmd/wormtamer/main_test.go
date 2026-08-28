@@ -198,11 +198,11 @@ func TestJobsCommandsDoNotStartServiceOrExposePrivateState(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Add(time.Hour)
-	job, err := storage.ClaimJob(context.Background(), "owner", now, time.Minute, 5)
+	job, err := storage.ClaimJob(context.Background(), now)
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	if err := storage.FinishJob(context.Background(), created.JobID, "owner", store.JobFailed,
+	if err := storage.FinishJob(context.Background(), created.JobID, store.JobFailed,
 		"gitlab_authorization_failed", "stored-private-error-message", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
