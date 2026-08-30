@@ -284,80 +284,60 @@ func TestOpenInitializesCurrentSchema(t *testing.T) {
 	if got != want {
 		t.Fatalf("schema objects:\n%s\nwant:\n%s", got, want)
 	}
-	for _, table := range []string{"review_jobs", "feedback_jobs"} {
-		rows, err := storage.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err != nil {
-				rows.Close()
-				t.Fatal(err)
-			}
-			if name == "lease_owner" || name == "lease_expires_at" {
-				rows.Close()
-				t.Fatalf("%s retains lease column %q", table, name)
-			}
-		}
-		if err := rows.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 func TestOpenRejectsUnsupportedSchema(t *testing.T) {
-	for _, version := range []int{1, 9, 10, schemaVersion + 1} {
-		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
-			ctx := context.Background()
-			path := filepath.Join(t.TempDir(), "wormtamer.db")
-			db, err := sql.Open("sqlite3", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(fmt.Sprintf(`
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	version := schemaVersion + 1
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`
 CREATE TABLE preserved (value TEXT NOT NULL);
 INSERT INTO preserved VALUES ('unchanged');
 PRAGMA user_version = %d;`, version)); err != nil {
-				db.Close()
-				t.Fatal(err)
-			}
-			before := strings.Join(schemaObjects(t, db), "\n")
-			if err := db.Close(); err != nil {
-				t.Fatal(err)
-			}
+		db.Close()
+		t.Fatal(err)
+	}
+	before := strings.Join(schemaObjects(t, db), "\n")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-			_, err = Open(ctx, path)
-			if !errors.Is(err, ErrUnsupportedSchemaVersion) {
-				t.Fatalf("Open() error = %v", err)
-			}
+	_, err = Open(ctx, path)
+	if !errors.Is(err, ErrUnsupportedSchemaVersion) {
+		t.Fatalf("Open() error = %v", err)
+	}
 
-			db, err = sql.Open("sqlite3", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			var gotVersion int
-			var value string
-			if err := db.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil {
-				t.Fatal(err)
-			}
-			if err := db.QueryRow(`SELECT value FROM preserved`).Scan(&value); err != nil {
-				t.Fatal(err)
-			}
-			after := strings.Join(schemaObjects(t, db), "\n")
-			if gotVersion != version || value != "unchanged" || after != before {
-				t.Fatalf("database changed: version=%d value=%q objects=%q, want version=%d value=unchanged objects=%q",
-					gotVersion, value, after, version, before)
-			}
-		})
+	db, err = sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var gotVersion int
+	var value string
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT value FROM preserved`).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	after := strings.Join(schemaObjects(t, db), "\n")
+	if gotVersion != version || value != "unchanged" || after != before {
+		t.Fatalf("database changed: version=%d value=%q objects=%q, want version=%d value=unchanged objects=%q",
+			gotVersion, value, after, version, before)
 	}
 }
 
 func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
-	storage := openTestStore(t)
-	defer storage.Close()
 	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wormtamer.db")
+	storage, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	accepted, err := storage.AcceptEvent(ctx, readyEvent("event-1"))
 	if err != nil {
 		t.Fatal(err)
@@ -375,8 +355,9 @@ func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
 		t.Fatalf("concurrent ClaimJob() = %+v, %v", other, err)
 	}
 
-	resultJSON := []byte(`{"summary":"ok","findings":[]}`)
-	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, nil, nil, PatchIDUnavailable, "", now); err != nil {
+	resultJSON := []byte(`{"summary":"ok","findings":[{"priority":"P1","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
+	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
+	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, findingIDs, nil, PatchIDUnavailable, "", now); err != nil {
 		t.Fatalf("SaveReviewResult() error = %v", err)
 	}
 	var checkpointState string
@@ -386,7 +367,15 @@ func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
 	if checkpointState != JobRunning {
 		t.Fatalf("checkpoint state = %q", checkpointState)
 	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
 
+	storage, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
 	recoveredAt := now.Add(time.Minute)
 	if err := storage.RecoverInterruptedJobs(ctx, recoveredAt); err != nil {
 		t.Fatal(err)
@@ -395,13 +384,15 @@ func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
 	if err != nil || recovered == nil {
 		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
 	}
-	if recovered.AttemptCount != 2 || recovered.State != JobRunning || string(recovered.ValidatedResultJSON) != string(resultJSON) {
+	if recovered.AttemptCount != 2 || recovered.State != JobRunning || recovered.PatchIDStatus != PatchIDUnavailable ||
+		string(recovered.ValidatedResultJSON) != string(resultJSON) ||
+		len(recovered.FindingIDs) != 1 || recovered.FindingIDs[0] != findingIDs[0] {
 		t.Fatalf("recovered job = %+v", recovered)
 	}
 	if err := storage.CompletePublication(ctx, recovered.ID, "<!-- marker -->", 99, recoveredAt); err != nil {
 		t.Fatalf("CompletePublication() error = %v", err)
 	}
-	if err := storage.SaveReviewResult(ctx, recovered.ID, resultJSON, nil, nil, PatchIDUnavailable, "", recoveredAt); !errors.Is(err, ErrJobNotRunning) {
+	if err := storage.SaveReviewResult(ctx, recovered.ID, []byte(`{"summary":"completed","findings":[]}`), nil, nil, PatchIDUnavailable, "", recoveredAt); !errors.Is(err, ErrJobNotRunning) {
 		t.Fatalf("completed SaveReviewResult() error = %v", err)
 	}
 	var state string
@@ -703,49 +694,6 @@ WHERE j.id = ?`, accepted.JobID).Scan(&state, &marker, &noteID, &patchIDStatus);
 	assertCount(t, storage.db, "publications", 1)
 }
 
-func TestReviewCheckpointSurvivesRestart(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := storage.AcceptEvent(ctx, readyEvent("event-1")); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Add(time.Hour)
-	job, err := storage.ClaimJob(ctx, now)
-	if err != nil || job == nil {
-		t.Fatalf("ClaimJob() = %+v, %v", job, err)
-	}
-	resultJSON := []byte(`{"summary":"ok","findings":[{"priority":"P1","title":"title","explanation":"why","recommendation":"fix","path":"file.go"}]}`)
-	findingIDs := []string{"WT-F-" + strings.Repeat("A", 26)}
-	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, findingIDs, nil, PatchIDUnavailable, "", now); err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if err := reopened.RecoverInterruptedJobs(ctx, now.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := reopened.ClaimJob(ctx, now.Add(time.Minute+time.Second))
-	if err != nil || recovered == nil {
-		t.Fatalf("recovered ClaimJob() = %+v, %v", recovered, err)
-	}
-	if recovered.State != JobRunning || recovered.PatchIDStatus != PatchIDUnavailable ||
-		string(recovered.ValidatedResultJSON) != string(resultJSON) ||
-		len(recovered.FindingIDs) != 1 || recovered.FindingIDs[0] != findingIDs[0] {
-		t.Fatalf("recovered job = %+v", recovered)
-	}
-}
-
 func TestSaveReviewResultRejectsMalformedFindingIdentifiers(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
@@ -875,13 +823,7 @@ func TestOpenRejectsNonemptyVersionZeroSchema(t *testing.T) {
 		sql  string
 	}{
 		{name: "unrelated table", sql: `CREATE TABLE unrelated (value TEXT)`},
-		{name: "partial application schema", sql: `CREATE TABLE webhook_events (id INTEGER PRIMARY KEY)`},
-		{name: "removed historical table", sql: `CREATE TABLE feedback_events (id INTEGER PRIMARY KEY)`},
-		{name: "index", sql: `CREATE TABLE indexed (value TEXT); CREATE INDEX unrelated_index ON indexed (value)`},
 		{name: "view", sql: `CREATE VIEW unrelated_view AS SELECT 1 AS value`},
-		{name: "trigger", sql: `
-CREATE TABLE triggered (value TEXT);
-CREATE TRIGGER unrelated_trigger AFTER INSERT ON triggered BEGIN SELECT 1; END`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

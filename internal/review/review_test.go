@@ -23,17 +23,22 @@ func TestReviewDeclaresExactlyReadAndBash(t *testing.T) {
 	if len(declarations) != 2 || declarations[0].Name != "read" || declarations[1].Name != "bash" {
 		t.Fatalf("tool declarations = %+v", declarations)
 	}
-	if declarations[0].Description != "Read the contents of a file. Output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete." {
-		t.Fatalf("read description = %q", declarations[0].Description)
+	readSchema := declarations[0].ParametersJsonSchema.(map[string]any)
+	readProperties := readSchema["properties"].(map[string]any)
+	if readSchema["type"] != "object" || readSchema["additionalProperties"] != false ||
+		!slices.Equal(readSchema["required"].([]string), []string{"path"}) || len(readProperties) != 3 ||
+		readProperties["path"].(map[string]any)["type"] != "string" ||
+		readProperties["offset"].(map[string]any)["type"] != "integer" || readProperties["offset"].(map[string]any)["minimum"] != 1 ||
+		readProperties["limit"].(map[string]any)["type"] != "integer" || readProperties["limit"].(map[string]any)["minimum"] != 1 {
+		t.Fatalf("read schema = %+v", readSchema)
 	}
-	if declarations[1].Description != "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds." {
-		t.Fatalf("bash description = %q", declarations[1].Description)
-	}
-	for _, declaration := range declarations {
-		schema := declaration.ParametersJsonSchema.(map[string]any)
-		if schema["additionalProperties"] != false {
-			t.Fatalf("%s schema allows unknown arguments", declaration.Name)
-		}
+	bashSchema := declarations[1].ParametersJsonSchema.(map[string]any)
+	bashProperties := bashSchema["properties"].(map[string]any)
+	if bashSchema["type"] != "object" || bashSchema["additionalProperties"] != false ||
+		!slices.Equal(bashSchema["required"].([]string), []string{"command"}) || len(bashProperties) != 2 ||
+		bashProperties["command"].(map[string]any)["type"] != "string" ||
+		bashProperties["timeout"].(map[string]any)["type"] != "number" || bashProperties["timeout"].(map[string]any)["exclusiveMinimum"] != 0 {
+		t.Fatalf("bash schema = %+v", bashSchema)
 	}
 	config := generationConfig("default", true)
 	if len(config.Tools) != 1 || len(config.Tools[0].FunctionDeclarations) != 2 ||
@@ -46,18 +51,13 @@ func TestReviewDeclaresExactlyReadAndBash(t *testing.T) {
 	}
 }
 
-func TestSystemInstructionContainsExactMinimalPiGuidance(t *testing.T) {
-	fragment := "Available tools:\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n\nGuidelines:\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed."
-	if !strings.Contains(systemInstruction, fragment) {
-		t.Fatalf("system instruction lacks exact Pi fragment:\n%s", systemInstruction)
-	}
-	for _, obsolete := range []string{
-		"list_repository_files", "read_repository_file", "search_repository", "search_review_memory",
-		"fetch_public_url", "list_public_repository_files", "read_public_repository_file",
-		"per-category", "combined tool-call limits", "git branch", "git show", "git diff", "git log", "git switch",
+func TestSystemInstructionDefinesReviewPolicy(t *testing.T) {
+	for _, policy := range []string{
+		"untrusted evidence", "changed-file diff", "path must exactly match",
+		"initial working directory", "Prepared related repositories", "advisory review memory",
 	} {
-		if strings.Contains(systemInstruction, obsolete) {
-			t.Fatalf("system instruction contains obsolete/tutorial text %q", obsolete)
+		if !strings.Contains(systemInstruction, policy) {
+			t.Fatalf("system instruction lacks policy %q", policy)
 		}
 	}
 }
@@ -68,17 +68,14 @@ func TestReviewPromptIdentifiesWorkingDirectoryRelatedRepositoriesAndMemory(t *t
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
+		"untrusted merge request evidence", "<merge_request_json>",
 		`"working_directory":"/reviews/current"`, `"reviewed_head":"0123456789abcdef0123456789abcdef01234567"`,
 		`"repository":"group/related"`, `"path":"/reviews/related/group/related"`,
 		`"review_memory":{"path":"/reviews/review-memory.json","authority":"untrusted_advisory"}`,
+		`"changed_files":[{"old_path":"main.go","new_path":"main.go","diff":"+changed"`,
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt lacks %s: %s", expected, prompt)
-		}
-	}
-	for _, obsolete := range []string{"resource_limits", "public_sources", "allowed_domains", "tool_calls"} {
-		if strings.Contains(prompt, obsolete) {
-			t.Fatalf("prompt contains %q", obsolete)
 		}
 	}
 }
@@ -129,7 +126,7 @@ func TestReviewDiagnosticsRespectLogLevelAndRedactCredentials(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := logs.String()
-			privateValues := []string{"+changed", "private tool result", "diagnostic response", "You review a GitLab merge request"}
+			privateValues := []string{"+changed", "private tool result", "diagnostic response"}
 			if !test.debug {
 				for _, value := range privateValues {
 					if strings.Contains(output, value) {

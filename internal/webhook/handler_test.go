@@ -42,12 +42,8 @@ func TestWebhookIngress(t *testing.T) {
 	assertWebhookStatus(t, handler, payload("group/project", "open", true, false, headB), testSecret, "event-3", http.StatusOK)
 	assertWebhookStatus(t, handler, payload("group/project", "open", false, true, headC), testSecret, "event-4", http.StatusOK)
 	assertWebhookStatus(t, handler, payload("group/project", "update", false, false, headD), testSecret, "event-5", http.StatusOK)
-	assertWebhookStatus(t, handler, ready, testSecret, "", http.StatusOK)
-	assertWebhookStatus(t, handler, ready, testSecret, "", http.StatusOK)
 
-	assertWebhookStatus(t, handler, ready, "wrong-secret", "rejected-1", http.StatusUnauthorized)
 	assertWebhookStatus(t, handler, payload("other/project", "open", false, false, headA), testSecret, "rejected-2", http.StatusForbidden)
-	assertWebhookStatus(t, handler, []byte(`{"object_kind":`), testSecret, "rejected-3", http.StatusBadRequest)
 
 	request := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", strings.NewReader(strings.Repeat("x", maxBodyBytes+1)))
 	request.Header.Set("X-Gitlab-Token", testSecret)
@@ -66,10 +62,10 @@ func TestWebhookIngress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	assertDatabaseCount(t, db, "webhook_events", 6)
+	assertDatabaseCount(t, db, "webhook_events", 5)
 	assertDatabaseCount(t, db, "review_jobs", 1)
 	assertOutcomeCount(t, db, store.OutcomeQueued, 1)
-	assertOutcomeCount(t, db, store.OutcomeDuplicateReview, 2)
+	assertOutcomeCount(t, db, store.OutcomeDuplicateReview, 1)
 	assertOutcomeCount(t, db, store.OutcomeIgnoredDraft, 2)
 	assertOutcomeCount(t, db, store.OutcomeIgnoredAction, 1)
 

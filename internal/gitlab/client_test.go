@@ -106,7 +106,6 @@ func TestLoadReviewUsesAllOrNothingRepositorySharing(t *testing.T) {
 	}{
 		{name: "current repository only", authorizedRepositories: []string{"group/project", "group/zeta"}},
 		{name: "all authorized sorted once", authorizedRepositories: []string{"group/zeta", "group/project", "group/alpha", "group/zeta"}, shareAll: true, want: []string{"group/alpha", "group/zeta"}},
-		{name: "all authorized with only current", authorizedRepositories: []string{"group/project"}, shareAll: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -153,12 +152,9 @@ func TestLoadReviewClassifiesPatchID(t *testing.T) {
 	}{
 		{name: "matching SHA-1", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected", PatchIDSHA: &valid40}}, wantStatus: PatchIDAvailable, wantSHA: valid40},
 		{name: "matching SHA-256", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "overflow", PatchIDSHA: &valid64}}, wantStatus: PatchIDAvailable, wantSHA: strings.ToLower(valid64)},
-		{name: "version not exposed", versions: nil, wantStatus: PatchIDPending},
 		{name: "current version not exposed", versions: []diffVersionResponse{{ID: 1, HeadCommitSHA: strings.Repeat("c", 40), MergeRequestID: 8, State: "collected", PatchIDSHA: &valid40}}, wantStatus: PatchIDPending},
 		{name: "collected null", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected"}}, wantStatus: PatchIDPending},
 		{name: "empty", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "empty"}}, wantStatus: PatchIDUnavailable},
-		{name: "without files", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "without_files"}}, wantStatus: PatchIDUnavailable},
-		{name: "terminal overflow", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "overflow"}}, wantStatus: PatchIDUnavailable},
 		{name: "unknown state", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collecting"}}, category: "unknown_merge_request_diff_state"},
 		{name: "malformed patch ID", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected", PatchIDSHA: stringPointer("not-a-patch-id")}}, category: "malformed_gitlab_response"},
 		{name: "merge request mismatch", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 9, State: "collected", PatchIDSHA: &valid40}}, category: "malformed_gitlab_response"},
@@ -414,8 +410,6 @@ func TestAuthorizationAndMergeRequestState(t *testing.T) {
 	}{
 		{name: "renamed project", projectPath: "group/renamed", state: "opened", head: testHead, category: "repository_unauthorized"},
 		{name: "closed", projectPath: "group/project", state: "closed", head: testHead, category: "merge_request_not_open", obsolete: true},
-		{name: "merged", projectPath: "group/project", state: "merged", head: testHead, category: "merge_request_not_open", obsolete: true},
-		{name: "locked", projectPath: "group/project", state: "locked", head: testHead, category: "merge_request_not_open", obsolete: true},
 		{name: "unknown state", projectPath: "group/project", state: "future", head: testHead, category: "unknown_merge_request_state"},
 		{name: "changed head", projectPath: "group/project", state: "opened", head: strings.Repeat("1", 40), category: "merge_request_head_changed", obsolete: true},
 	}

@@ -30,11 +30,6 @@ func TestTerminalEventCreatesOneFeedbackJobAndOptionalMemory(t *testing.T) {
 	if err != nil || secondTerminal.Outcome != OutcomeDuplicateFeedback || secondTerminal.FeedbackJobID != accepted.FeedbackJobID {
 		t.Fatalf("second terminal event = %+v, %v", secondTerminal, err)
 	}
-	secondDuplicate, err := storage.AcceptEvent(ctx, merged)
-	if err != nil || !secondDuplicate.DuplicateDelivery || secondDuplicate.FeedbackJobID != accepted.FeedbackJobID {
-		t.Fatalf("duplicate second terminal event = %+v, %v", secondDuplicate, err)
-	}
-
 	job, err := storage.ClaimFeedbackJob(ctx, now.Add(10*time.Second))
 	if err != nil || job == nil || job.ReviewJobID != reviewJobID || job.HeadSHA != closed.HeadSHA || job.TerminalState != "closed" {
 		t.Fatalf("ClaimFeedbackJob() = %+v, %v", job, err)

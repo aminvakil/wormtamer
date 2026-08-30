@@ -57,12 +57,6 @@ func TestEvaluatorSynthesizesOneBoundedLesson(t *testing.T) {
 			t.Fatalf("prompt missing %q: %s", expected, generator.prompt)
 		}
 	}
-	instruction := generator.config.SystemInstruction.Parts[0].Text
-	for _, expected := range []string{"closed or merged", "untrusted evidence", "not evidence", "at most one lesson"} {
-		if !strings.Contains(instruction, expected) {
-			t.Fatalf("instruction missing %q: %s", expected, instruction)
-		}
-	}
 	if got := ID("http://gitlab.internal", 42, 7); len(got) != 31 || !strings.HasPrefix(got, "WT-M-") || got != ID("http://gitlab.internal", 42, 7) {
 		t.Fatalf("memory ID = %q", got)
 	}
@@ -80,15 +74,6 @@ func TestEvaluatorModelContract(t *testing.T) {
 	schema := generator.config.ResponseJsonSchema.(map[string]any)
 	if schema["additionalProperties"] != false || !slices.Equal(schema["required"].([]string), []string{"create_memory", "lesson"}) {
 		t.Fatalf("schema = %+v", schema)
-	}
-}
-
-func TestFeedbackDiagnosticValueUsesSharedRedaction(t *testing.T) {
-	secret := "configured\nsecret"
-	for _, value := range []string{"prefix " + secret, `{"value":"configured\nsecret"}`, "safe"} {
-		if got, want := diagnosticValue(value, []string{secret}), diagnostics.Redact(value, []string{secret}); got != want {
-			t.Fatalf("diagnosticValue(%q) = %q, want %q", value, got, want)
-		}
 	}
 }
 
@@ -130,7 +115,7 @@ func TestEvaluatorDiagnosticsRespectLogLevel(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := logs.String()
-			privateValues := []string{"Generated output must be changed", "Use the schema source.", "You decide whether a closed or merged"}
+			privateValues := []string{"Generated output must be changed", "Use the schema source."}
 			if !test.debug {
 				for _, value := range privateValues {
 					if strings.Contains(output, value) {

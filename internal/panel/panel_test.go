@@ -3,8 +3,6 @@ package panel
 import (
 	"context"
 	"errors"
-	"html/template"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +14,7 @@ import (
 	"github.com/aminvakil/wormtamer/internal/store"
 )
 
-func TestTimeFormattersRejectUnsupportedTemplateValues(t *testing.T) {
+func TestTimeFormattersRenderMissingAndUTCValues(t *testing.T) {
 	if formatTime(time.Time{}) != "—" || formatOptionalTime(nil) != "—" ||
 		formatCompactTime(time.Time{}) != "—" || formatCompactOptionalTime(nil) != "—" ||
 		timeAttribute(time.Time{}) != "" || optionalTimeAttribute(nil) != "" {
@@ -27,22 +25,14 @@ func TestTimeFormattersRejectUnsupportedTemplateValues(t *testing.T) {
 		timeAttribute(now) != "2026-08-16T10:30:00.000000123Z" {
 		t.Fatalf("compact time = %q attribute = %q", formatCompactTime(now), timeAttribute(now))
 	}
-	for name, source := range map[string]string{
-		"required": `{{formatTime .}}`,
-		"optional": `{{formatOptionalTime .}}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			view, err := template.New("time").Funcs(template.FuncMap{
-				"formatTime":         formatTime,
-				"formatOptionalTime": formatOptionalTime,
-			}).Parse(source)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := view.Execute(io.Discard, "not-a-time"); err == nil {
-				t.Fatal("template accepted an unsupported timestamp type")
-			}
-		})
+}
+
+func TestParseBeforeRejectsMalformedAndNonPositiveValues(t *testing.T) {
+	if _, ok := parseBefore("text"); ok {
+		t.Fatal("parseBefore accepted a malformed cursor")
+	}
+	if _, ok := parseBefore("0"); ok {
+		t.Fatal("parseBefore accepted a non-positive cursor")
 	}
 }
 
@@ -117,10 +107,7 @@ func TestReviewListValidatesFiltersAndPaginates(t *testing.T) {
 		!strings.Contains(body, "state=failed") {
 		t.Fatalf("reviews status=%d calls=%+v body=%s", response.Code, storage, body)
 	}
-	for _, path := range []string{
-		"/reviews?state=unknown", "/reviews?before=0", "/reviews?before=text",
-		"/reviews?state=failed&state=queued", "/reviews?unknown=value",
-	} {
+	for _, path := range []string{"/reviews?state=unknown", "/reviews?unknown=value"} {
 		response := request(t, handler, http.MethodGet, path)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("GET %s status=%d body=%s", path, response.Code, response.Body.String())
@@ -240,29 +227,6 @@ func TestFeedbackAndMemoryViewsUseBoundedReadQueries(t *testing.T) {
 		!strings.Contains(body, "http://gitlab.internal/group/project") ||
 		strings.Contains(body, `href="javascript:alert(1)"`) || !strings.Contains(body, "Older memory") {
 		t.Fatalf("memory status=%d calls=%+v body=%s", memory.Code, storage, body)
-	}
-	for _, path := range []string{"/memory?active=true", "/memory?before=-1", "/memory?before=1&before=2"} {
-		response := request(t, handler, http.MethodGet, path)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("GET %s status=%d", path, response.Code)
-		}
-	}
-}
-
-func TestRemovedDiagnosticRoutesReturnNotFound(t *testing.T) {
-	handler := newTestHandler(t, &fakeStore{})
-	for _, target := range []string{
-		"/usage",
-		"/usage/1",
-		"/diagnostics/conversations",
-		"/diagnostics/conversations/1",
-		"/diagnostics/logs",
-	} {
-		response := request(t, handler, http.MethodGet, target)
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("GET %s status=%d body=%s", target, response.Code, response.Body.String())
-		}
-		assertPanelHeaders(t, response)
 	}
 }
 

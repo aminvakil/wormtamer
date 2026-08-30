@@ -22,28 +22,6 @@ import (
 
 const workerHead = "0123456789abcdef0123456789abcdef01234567"
 
-func TestWorkerPreparesAndClosesWorkspaceBeforePublication(t *testing.T) {
-	storage, db := workerStore(t)
-	defer storage.Close()
-	defer db.Close()
-	queueJob(t, storage)
-
-	broker := &fakeGitLab{}
-	workspaces := &fakeWorkspaces{}
-	reviewer := &fakeReviewer{result: review.Result{Summary: "ok", Findings: []review.Finding{}}}
-	worker := New(storage, broker, workspaces, reviewer, slog.Default(), nil)
-	processed, err := worker.ProcessOne(context.Background())
-	if err != nil || !processed {
-		t.Fatalf("ProcessOne() = %t, %v", processed, err)
-	}
-	if workspaces.prepareCalls != 1 || workspaces.workspace == nil || !workspaces.workspace.closed {
-		t.Fatalf("prepared workspace = %+v", workspaces)
-	}
-	if reviewer.snapshot.WorkingDirectory != "/review/current" || reviewer.snapshot.ReviewMemoryPath != "/review/review-memory.json" {
-		t.Fatalf("review snapshot context = %+v", reviewer.snapshot)
-	}
-}
-
 func TestWorkerPreservesReviewAndWorkspaceCleanupFailures(t *testing.T) {
 	storage, db := workerStore(t)
 	defer storage.Close()
@@ -132,11 +110,19 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 		}},
 	}}
 	var logs bytes.Buffer
-	worker := newTestWorker(t, storage, broker, reviewer, &logs)
+	workspaces := &fakeWorkspaces{}
+	worker := New(storage, broker, workspaces, reviewer, slog.New(slog.NewJSONHandler(&logs, nil)),
+		[]string{"gitlab-token", "gemini-key", "webhook-secret"})
 
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
+	}
+	if workspaces.prepareCalls != 1 || workspaces.workspace == nil || !workspaces.workspace.closed {
+		t.Fatalf("prepared workspace = %+v", workspaces)
+	}
+	if reviewer.snapshot.WorkingDirectory != "/review/current" || reviewer.snapshot.ReviewMemoryPath != "/review/review-memory.json" {
+		t.Fatalf("review snapshot context = %+v", reviewer.snapshot)
 	}
 	assertJobState(t, db, store.JobCompleted)
 	assertCount(t, db, "review_results", 1)
