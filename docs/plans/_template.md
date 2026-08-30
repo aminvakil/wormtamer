@@ -20,4 +20,4 @@ Risks are not automatic scope. Include only material concerns that may block a s
 
 ## Verification
 
-Define observable behavior that demonstrates the outcome and important failure handling. Do not list routine repository hygiene checks.
+Define observable behavior that demonstrates the outcome and important failure handling. Verification describes outcomes, not a one-test-per-bullet matrix. Follow the repository [Test Discipline](../../AGENTS.md#test-discipline); do not enumerate equivalent permutations or turn accepted limitations and deferred protections into executable requirements. Do not list routine repository hygiene checks.
