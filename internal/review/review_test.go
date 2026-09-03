@@ -227,7 +227,27 @@ func TestReviewerPropagatesToolCancellation(t *testing.T) {
 	}
 }
 
-func TestReviewerClassifiesInternalDeadline(t *testing.T) {
+func TestReviewerPropagatesGenerationCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := NewGeminiReviewerWithGenerator(deadlineGenerator{}, "gemini-test", nil).Review(ctx, testSnapshot(), &fakeToolBroker{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+}
+
+func TestReviewerClassifiesGenerationDeadline(t *testing.T) {
+	reviewer := NewGeminiReviewerWithGenerator(deadlineGenerator{}, "gemini-test", nil)
+	reviewer.generationTimeout = 10 * time.Millisecond
+	reviewer.reviewTimeout = time.Minute
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), &fakeToolBroker{})
+	var failureError *failure.Error
+	if !errors.As(err, &failureError) || failureError.Category != "gemini_timeout" || !failureError.Retryable {
+		t.Fatalf("generation deadline error = %v", err)
+	}
+}
+
+func TestReviewerClassifiesReviewDeadline(t *testing.T) {
 	tests := []struct {
 		name      string
 		generator Generator
@@ -245,11 +265,12 @@ func TestReviewerClassifiesInternalDeadline(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			reviewer := NewGeminiReviewerWithGenerator(test.generator, "gemini-test", nil)
-			reviewer.requestTimeout = 10 * time.Millisecond
+			reviewer.generationTimeout = time.Minute
+			reviewer.reviewTimeout = 10 * time.Millisecond
 			_, _, err := reviewer.Review(context.Background(), testSnapshot(), test.tools)
 			var failureError *failure.Error
 			if !errors.As(err, &failureError) || failureError.Category != "review_timeout" || !failureError.Retryable {
-				t.Fatalf("deadline error = %v", err)
+				t.Fatalf("review deadline error = %v", err)
 			}
 		})
 	}
