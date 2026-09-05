@@ -8,7 +8,7 @@ Every roadmap item follows the repository-wide [KISS rules](../../AGENTS.md#kiss
 
 ## Roadmap
 
-No approved plans are currently queued.
+- [Wait for successful CI before review](wait-on-ci.md) — proposed.
 
 ## Format
 
