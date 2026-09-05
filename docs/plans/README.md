@@ -19,7 +19,7 @@ Every roadmap item follows the repository-wide [KISS rules](../../AGENTS.md#kiss
 
 ## Lifecycle
 
-Use `proposed`, `approved`, or `in-progress` as the status. Keep the plan accurate when material scope or decisions change.
+Use `proposed`, `approved`, or `in-progress` as the status. An explicit request to implement or execute a named plan approves its documented local scope, even if the file still says `proposed`; mark it `in-progress` when implementation starts. A request to discuss, review, or write a plan is not implementation approval. Ask before materially changing the approved scope, and keep the plan accurate as decisions change.
 
 After implementation:
 

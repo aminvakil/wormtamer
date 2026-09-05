@@ -34,7 +34,7 @@ Read only the documents relevant to the subsystem being changed.
 
 ## Working Rules
 
-- Prefer the smallest change that satisfies the documented requirements.
+- Carry explicit implementation requests through local implementation and focused verification. Ask when a material scope, design, or authorization decision is unresolved; routine implementation and test choices do not require separate approval.
 - Keep GitLab integration, model reasoning, authorization, persistence, and repository access as separate concerns.
 - Make external side effects recoverable and idempotent.
 - Follow the [compatibility baseline](docs/agents/architecture.md#compatibility-baseline). Do not investigate hypothetical Gemini-version compatibility: versions earlier than 3 are out of scope, and other compatibility work requires an explicit task or concrete failure.
@@ -44,16 +44,13 @@ Read only the documents relevant to the subsystem being changed.
 
 ## Test Discipline
 
-- Test code and fixtures follow the same KISS and focused-change rules as production code. Add the smallest set that proves the requested behavior or reproduces a concrete regression.
-- Before adding tests, inspect the existing suite. For each new behavioral scenario, identify the requirement or regression, the stable boundary that owns it, existing coverage, and the distinct failure it would catch. If no distinct failure exists, do not add it.
-- Test each invariant once at its owning boundary. Repeat it at another layer only when that layer independently transforms data, maps errors, crosses a process or persistence boundary, or enforces a distinct security or compatibility contract.
-- Use one representative per equivalence class or code branch. Test exact limits only when inclusive or exclusive behavior is an explicit contract. Do not enumerate equivalent malformed inputs, every non-success status, or pass-through configuration values.
-- A plan's Verification section defines observable outcomes, not one executable test per bullet. Review findings also do not automatically require new tests; update or consolidate existing coverage first.
-- Prefer observable behavior over implementation details. Avoid tests of private call order, copied prompt or configuration prose, standard-library behavior, or accepted limitations and deferred protections unless they are explicit external contracts. Never add a test whose purpose is to prove that a deferred protection remains absent.
-- For a bug fix, add one focused regression test by default. For a feature, start with one happy path and add only independently meaningful failure scenarios.
-- Reuse focused test support and do not duplicate identical non-trivial helpers or subprocess fixtures. Do not create a generic test framework.
-- Do not add tests solely to increase coverage, and do not present test or subtest counts as evidence of quality. Report the distinct behaviors verified and whether the relevant commands passed.
-- If a change appears to require more than five new behavioral scenarios or a new subprocess fixture, stop before implementation and request approval with a short test matrix. Parameterized cases and subtests count as scenarios.
+- Inspect existing coverage first. Add or extend a test only for a required behavior or credible regression not already covered. A code change or review finding does not automatically require a new test.
+- Test each invariant at its stable owning boundary. Repeat coverage only when another layer independently transforms data, maps errors, crosses a process or persistence boundary, or enforces a distinct security or compatibility contract.
+- Use representative inputs for distinct behavior rather than enumerating equivalent malformed inputs, statuses, or configuration values. Test exact limits only when their boundary behavior is part of the contract.
+- Prefer observable contracts over private call order, incidental prompt or configuration wording, or standard-library behavior. Do not add tests merely to document accepted limitations or prove a deferred protection remains absent. Plan verification bullets describe outcomes, not a test matrix.
+- Keep test code and fixtures minimal. Reuse existing helpers; add small task-specific fixtures when needed, not generic test frameworks.
+- There is no numerical scenario limit or automatic approval requirement for a new fixture. Use the smallest meaningful coverage within the authorized task; do not inflate or suppress tests to satisfy a count.
+- Run checks appropriate to the changed behavior and complete required repository checks. Once they pass, broaden or repeat them only for new changes, failures, or concrete unresolved concerns. Report the behaviors verified and whether the relevant commands passed, not test counts.
 
 ## Documentation Discipline
 
@@ -64,6 +61,8 @@ Read only the documents relevant to the subsystem being changed.
 - Add lessons only after a concrete bug, test, incident, or verified behavior. Move permanent rules to the relevant focused document.
 
 ## Commands
+
+For documentation-only changes, verify document consistency and links; Go builds and tests are not required.
 
 - Build: `make build`
 - Test: `make test`

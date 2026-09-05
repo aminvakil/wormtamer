@@ -72,7 +72,7 @@ On implementation, move the accepted scheduling and retry rules into Reliability
 
 ## Verification
 
-Inspect and extend the existing configuration, GitLab, store, worker, and panel coverage according to [Test Discipline](../../AGENTS.md#test-discipline). These are observable outcomes, not one test per bullet; obtain approval before implementation if the focused matrix needs more than five new behavioral scenarios.
+Verify these outcomes using existing configuration, GitLab, store, worker, and panel coverage, adding tests only for meaningful coverage gaps according to [Test Discipline](../../AGENTS.md#test-discipline).
 
 - Configuration distinguishes disabled/default behavior from enabled CI gating and rejects invalid values rather than silently defaulting.
 - Validated pipeline metadata yields the agreed eligibility decisions for the current revision; an old successful run, unknown status, or failed lookup cannot unlock review. Confirm the selected association works for supported merged-results metadata.

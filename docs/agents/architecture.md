@@ -14,15 +14,15 @@ One installation runs as one process and replica because SQLite and local reposi
 - Gemini through `google.golang.org/genai`, using the Developer API directly or a configured Gemini Developer API-compatible endpoint, as the only model backend
 - A small explicit Gemini function-calling loop with no general agent framework or automatic tool execution
 
-A narrow Gemini client interface is used as a test seam, not as a provider abstraction. SQLite compatibility has a hard stop at [v0.28.0](https://github.com/aminvakil/wormtamer/releases/tag/v0.28.0); state created by earlier releases is unsupported. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
+A narrow Gemini client interface is used as a test seam, not as a provider abstraction. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
 
 ## Compatibility Baseline
 
 Compatibility with Gemini versions earlier than 3 is explicitly out of scope. Do not add fallbacks, tests, or review findings for those versions. Otherwise, investigate model-version compatibility only for a concrete observed failure or an explicit task.
 
-No release or production deployment compatibility baseline exists yet. Until one is explicitly established, changes do not need to preserve configuration formats, application interfaces, or SQLite state created by earlier development builds; recreating development configuration or state is acceptable when it keeps the current design simpler and correct. This does not relax correctness, durability, or recovery requirements for a running version.
+No backward-compatibility guarantee exists for development releases. Changes do not need to preserve configuration formats, application interfaces, or SQLite state from earlier builds unless the current task explicitly requires it. Existing release tags and deployments do not establish an upgrade-support policy. This does not relax correctness, durability, or recovery requirements for a running version.
 
-Establish an upgrade and compatibility policy before the first production deployment.
+Recreating or migrating an existing installation's configuration or state requires explicit operator approval. A one-off migration does not require adding general migration machinery to the application.
 
 ## Deployment Configuration
 
