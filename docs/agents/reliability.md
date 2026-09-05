@@ -16,7 +16,7 @@ The system provides at-least-once review execution with idempotent external effe
 
 Never acknowledge an accepted merge request event before commit. Duplicate delivery must resolve to the same event or job and return success without creating another job. Use `X-Gitlab-Event-UUID` as the delivery identifier when available; otherwise derive a deterministic SHA-256 identifier from the GitLab instance and raw bounded payload.
 
-An `open` action that is not marked draft or work-in-progress creates a review job directly from webhook ingress. Eligible `close` and `merge` actions create feedback jobs as described below. Authenticated and authorized draft openings and all other merge request actions are persisted as ignored events without jobs. Periodic reconciliation discovers an open merge request if it is ready during a later scan.
+An `open` action or an `update` action whose state is `opened` creates a review job directly from webhook ingress when not marked draft or work-in-progress. This includes pushed and rebased heads and transitions to ready; same-head updates remain idempotent. Eligible `close` and `merge` actions create feedback jobs as described below. Draft openings and updates, updates not in `opened` state, and all other merge request actions are persisted as ignored events without jobs. Periodic reconciliation discovers an open merge request if it is ready during a later scan.
 
 Reject a missing or invalid webhook secret with `401`, an unlisted project namespace with `403`, malformed input with `400`, an oversized request with `413`, and authenticated overload with retryable `503` and `Retry-After` responses. A persistence failure returns a server error rather than acknowledging the event. Rejections log bounded operational identifiers and reasons without logging secrets or payload bodies. Graceful shutdown stops accepting new requests and gives active ingress transactions a bounded opportunity to finish.
 
@@ -35,6 +35,14 @@ GitLab instance + project ID + merge request IID + head SHA
 ```
 
 The numeric project ID from the webhook remains the durable identity even though configuration authorizes repositories by namespace path. Deduplicate events for the same head SHA. Before publication or equivalent completion, confirm that the reviewed SHA remains current; obsolete findings must not be presented as current.
+
+## Review Grace Period
+
+The deployment-wide `grace_period` is a non-negative Go duration string such as `"1m"` or `"90s"`. It defaults to `"1m"` when omitted; `"0s"` disables the initial delay. Invalid or negative durations fail startup. This delay applies independently of CI to every new review identity, whether admitted by webhook or discovered by reconciliation, measured from local job creation rather than commit or MR creation time.
+
+Persist the initial deadline in `next_attempt_at` with job insertion, rounding positive-delay deadlines up to whole seconds. Jobs remain queued without occupying the worker or consuming claims until due. Duplicate deliveries, same-head updates, repeated scans, and restarts do not move that deadline. Configuration changes affect only newly created jobs; ordinary retries, operator retries, and recovery of previously running jobs keep their existing scheduling semantics. Feedback jobs have no review grace period.
+
+A newly observed head receives its own full delay. At execution, fresh GitLab validation rejects an old head or a no-longer-open MR before repository preparation or Gemini. Superseded jobs remain visible as queued until this validation marks them obsolete; webhook arrival order alone must not cancel another identity because deliveries and reconciliation observations can be stale. For heads first observed at 0s and 20s with a one-minute grace period, the first is checked and discarded at or after 60s, and the second cannot be reviewed before 80s. Already-running reviews are not interrupted by new arrivals and retain the current-head checks before publication.
 
 ## Patch Equivalence
 

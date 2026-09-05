@@ -69,7 +69,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger, output io.Writ
 			return err
 		}
 	}
-	storage, err := store.Open(ctx, cfg.DatabasePath)
+	storage, err := store.Open(ctx, cfg.DatabasePath, cfg.GracePeriod)
 	if err != nil {
 		return err
 	}
@@ -90,6 +90,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger, output io.Writ
 		GeminiModel:                    cfg.Gemini.Model,
 		GeminiThinkingLevel:            cfg.Gemini.ThinkingLevel,
 		LogLevel:                       cfg.LogLevel,
+		GracePeriod:                    cfg.GracePeriod,
 		AuthorizedRepositories:         cfg.AuthorizedRepositories,
 		ShareAllAuthorizedRepositories: cfg.ShareAllAuthorizedRepositories,
 	}, logger.With("component", "panel"))

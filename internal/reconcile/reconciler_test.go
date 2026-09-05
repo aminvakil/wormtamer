@@ -179,7 +179,7 @@ func TestRunScansImmediatelyAndStops(t *testing.T) {
 
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
-	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"))
+	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

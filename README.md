@@ -8,6 +8,7 @@
 
 - Accepts authenticated GitLab merge request webhooks
 - Reconciles open merge requests periodically so missed webhooks do not lose reviews
+- Delays new revisions by a configurable [grace period](docs/agents/reliability.md#review-grace-period) to avoid reviewing quickly superseded heads
 - Starts reviews with bounded merge request metadata and changed-file diffs
 - Prepares disposable Git working directories for the current repository and, when enabled, every other authorized repository
 - Gives Gemini Pi-style `read` and unrestricted `bash` tools under a credential-free review identity

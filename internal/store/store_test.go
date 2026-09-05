@@ -48,13 +48,16 @@ WHERE j.id = ?`, accepted.JobID).Scan(&receivedAt, &createdAt); err != nil {
 	}
 }
 
-func TestAcceptEventIsDurableAndIdempotent(t *testing.T) {
+func TestReviewGracePeriodIsDurableAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := Open(ctx, path)
+	storage, err := Open(ctx, path, time.Minute)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
+	now := time.Date(2026, 9, 5, 14, 0, 0, 0, time.UTC)
+	due := now.Add(time.Minute)
+	storage.now = func() time.Time { return now }
 
 	event := readyEvent("event-1")
 	first, err := storage.AcceptEvent(ctx, event)
@@ -65,6 +68,7 @@ func TestAcceptEventIsDurableAndIdempotent(t *testing.T) {
 		t.Fatalf("AcceptEvent(first) = %+v", first)
 	}
 
+	now = now.Add(20 * time.Second)
 	duplicate, err := storage.AcceptEvent(ctx, event)
 	if err != nil {
 		t.Fatalf("AcceptEvent(duplicate delivery) error = %v", err)
@@ -82,19 +86,26 @@ func TestAcceptEventIsDurableAndIdempotent(t *testing.T) {
 		t.Fatalf("AcceptEvent(duplicate review) = %+v, first = %+v", duplicateReview, first)
 	}
 
-	assertCount(t, storage.db, "webhook_events", 2)
-	assertCount(t, storage.db, "review_jobs", 1)
+	newRevision := readyEvent("event-3")
+	newRevision.HeadSHA = strings.Repeat("b", 40)
+	latest, err := storage.AcceptEvent(ctx, newRevision)
+	if err != nil || latest.JobID == first.JobID || latest.Outcome != OutcomeQueued {
+		t.Fatalf("AcceptEvent(new revision) = %+v, %v", latest, err)
+	}
+
+	assertCount(t, storage.db, "webhook_events", 3)
+	assertCount(t, storage.db, "review_jobs", 2)
 	if err := storage.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	reopened, err := Open(ctx, path)
+	reopened, err := Open(ctx, path, 0)
 	if err != nil {
 		t.Fatalf("Open(restart) error = %v", err)
 	}
 	defer reopened.Close()
-	assertCount(t, reopened.db, "webhook_events", 2)
-	assertCount(t, reopened.db, "review_jobs", 1)
+	assertCount(t, reopened.db, "webhook_events", 3)
+	assertCount(t, reopened.db, "review_jobs", 2)
 
 	var payload string
 	if err := reopened.db.QueryRow(`SELECT payload_json FROM webhook_events WHERE id = ?`, first.EventID).Scan(&payload); err != nil {
@@ -102,6 +113,23 @@ func TestAcceptEventIsDurableAndIdempotent(t *testing.T) {
 	}
 	if payload != string(event.Payload) {
 		t.Fatalf("stored payload = %q, want %q", payload, event.Payload)
+	}
+	if err := reopened.RecoverInterruptedJobs(ctx, due.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if job, err := reopened.ClaimJob(ctx, due.Add(-time.Second)); err != nil || job != nil {
+		t.Fatalf("early ClaimJob() = %+v, %v", job, err)
+	}
+	job, err := reopened.ClaimJob(ctx, due)
+	if err != nil || job == nil || job.ID != first.JobID || job.AttemptCount != 1 {
+		t.Fatalf("due ClaimJob() = %+v, %v", job, err)
+	}
+	if job, err := reopened.ClaimJob(ctx, due.Add(19*time.Second)); err != nil || job != nil {
+		t.Fatalf("early latest ClaimJob() = %+v, %v", job, err)
+	}
+	job, err = reopened.ClaimJob(ctx, due.Add(20*time.Second))
+	if err != nil || job == nil || job.ID != latest.JobID || job.AttemptCount != 1 {
+		t.Fatalf("latest ClaimJob() = %+v, %v", job, err)
 	}
 }
 
@@ -281,7 +309,7 @@ PRAGMA user_version = %d;`, version)); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = Open(ctx, path)
+	_, err = Open(ctx, path, 0)
 	if !errors.Is(err, ErrUnsupportedSchemaVersion) {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -309,7 +337,7 @@ PRAGMA user_version = %d;`, version)); err != nil {
 func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := Open(ctx, path)
+	storage, err := Open(ctx, path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +374,7 @@ func TestClaimCheckpointRecoveryAndPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	storage, err = Open(ctx, path)
+	storage, err = Open(ctx, path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +844,7 @@ func TestOpenRejectsNonemptyVersionZeroSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err = Open(context.Background(), path)
+			_, err = Open(context.Background(), path, 0)
 			if !errors.Is(err, ErrNonemptyVersionZeroSchema) {
 				t.Fatalf("Open() error = %v", err)
 			}
@@ -840,7 +868,7 @@ func TestOpenRejectsNonemptyVersionZeroSchema(t *testing.T) {
 
 func TestOpenFailsForUnavailablePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "wormtamer.db")
-	_, err := Open(context.Background(), path)
+	_, err := Open(context.Background(), path, 0)
 	if err == nil {
 		t.Fatal("Open() error = nil")
 	}
@@ -862,7 +890,7 @@ func readyEvent(deliveryID string) Event {
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	storage, err := Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"))
+	storage, err := Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"), 0)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}

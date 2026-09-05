@@ -126,6 +126,7 @@
         <dt>Model</dt><dd>{{.Config.GeminiModel}}</dd>
         <dt>Thinking level</dt><dd>{{.Config.GeminiThinkingLevel}}</dd>
         <dt>Log level</dt><dd>{{.Config.LogLevel}}</dd>
+        <dt>Grace period</dt><dd>{{.Config.GracePeriod}}</dd>
       </dl></article>
       <article class="panel-card"><h3>Authorized repositories</h3><ul class="plain-list">{{range .Config.AuthorizedRepositories}}<li><code>{{.}}</code></li>{{else}}<li class="muted">None</li>{{end}}</ul></article>
       <article class="panel-card"><h3>Repository sharing</h3><p>{{.Config.SharingMode}}</p></article>

@@ -41,6 +41,7 @@ type Config struct {
 	GeminiModel                    string
 	GeminiThinkingLevel            string
 	LogLevel                       string
+	GracePeriod                    time.Duration
 	AuthorizedRepositories         []string
 	ShareAllAuthorizedRepositories bool
 }
@@ -60,6 +61,7 @@ type configView struct {
 	GeminiModel            string
 	GeminiThinkingLevel    string
 	LogLevel               string
+	GracePeriod            string
 	AuthorizedRepositories []string
 	SharingMode            string
 }
@@ -391,6 +393,7 @@ func panelConfig(config Config) configView {
 		GeminiModel:            config.GeminiModel,
 		GeminiThinkingLevel:    config.GeminiThinkingLevel,
 		LogLevel:               config.LogLevel,
+		GracePeriod:            config.GracePeriod.String(),
 		AuthorizedRepositories: append([]string(nil), config.AuthorizedRepositories...),
 	}
 	if view.GeminiEndpoint == "" {

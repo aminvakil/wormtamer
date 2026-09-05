@@ -62,7 +62,7 @@ Treat every persisted value rendered by the panel as untrusted, including review
 
 Panel responses use no third-party assets or JavaScript and set a restrictive content security policy, framing denial, no-referrer policy, content-type sniffing denial, and `Cache-Control: no-store` for state pages. Collection queries have fixed page limits and validated state and cursor filters.
 
-Build the displayed configuration from an explicit type containing only the GitLab base URL, configured Gemini endpoint and model, thinking level, log level, authorized repositories, the effective current-only or all-authorized sharing mode, and the fixed review tool names. Workflow and memory views must not select raw webhook payloads, transient diff or comment bodies, stored error messages, publication markers, prompts, model responses, model conversations, tool arguments or results, repository content, logs, credentials, or filesystem paths. The panel has no mutation routes and performs no external requests.
+Build the displayed configuration from an explicit type containing only the GitLab base URL, configured Gemini endpoint and model, thinking level, log level, review grace period, authorized repositories, the effective current-only or all-authorized sharing mode, and the fixed review tool names. Workflow and memory views must not select raw webhook payloads, transient diff or comment bodies, stored error messages, publication markers, prompts, model responses, model conversations, tool arguments or results, repository content, logs, credentials, or filesystem paths. The panel has no mutation routes and performs no external requests.
 
 ## Publication and Logging
 

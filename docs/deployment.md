@@ -29,6 +29,8 @@ Leave `gemini.base_url` empty or omit it to use the Gemini Developer API directl
 
 A custom endpoint must accept and return the native Gemini Developer API behavior Wormtamer uses, including function calling, structured JSON response schemas, and thinking configuration. An OpenAI-compatible endpoint serving a Gemini model is not sufficient. The endpoint receives private merge request content and tool results and must serve the configured Gemini 3 or newer model. Wormtamer rejects model endpoint redirects and base URLs containing credentials, queries, or fragments. Use HTTPS unless the endpoint is confined to an appropriate local network.
 
+Set `grace_period` to control the initial delay before reviewing each newly observed MR revision; see [Review grace period](agents/reliability.md#review-grace-period) for its format, default, and supersession behavior.
+
 Use a GitLab personal access token with `api` scope whose user has at least the Reporter role on every authorized project.
 
 `share_all_authorized_repositories` defaults to `false`, which prepares only the repository under review. Enabling it makes every other authorized repository available as related context in every review; the current repository is never duplicated as related context. **Enable it only when every person able to view merge requests in any authorized repository may receive information derived from every other authorized repository.** Keep it disabled when repository audiences differ. The setting does not authorize unlisted repositories or request eager or exhaustive model inspection.

@@ -187,7 +187,7 @@ func TestJobsCommandsDoNotStartServiceOrExposePrivateState(t *testing.T) {
 	}
 
 	databasePath := filepath.Join(directory, "wormtamer.db")
-	storage, err := store.Open(context.Background(), databasePath)
+	storage, err := store.Open(context.Background(), databasePath, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

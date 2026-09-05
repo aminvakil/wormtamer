@@ -28,7 +28,7 @@ const (
 
 func TestWebhookIngress(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,11 +63,11 @@ func TestWebhookIngress(t *testing.T) {
 	}
 	defer db.Close()
 	assertDatabaseCount(t, db, "webhook_events", 5)
-	assertDatabaseCount(t, db, "review_jobs", 1)
-	assertOutcomeCount(t, db, store.OutcomeQueued, 1)
+	assertDatabaseCount(t, db, "review_jobs", 2)
+	assertOutcomeCount(t, db, store.OutcomeQueued, 2)
 	assertOutcomeCount(t, db, store.OutcomeDuplicateReview, 1)
 	assertOutcomeCount(t, db, store.OutcomeIgnoredDraft, 2)
-	assertOutcomeCount(t, db, store.OutcomeIgnoredAction, 1)
+	assertOutcomeCount(t, db, store.OutcomeIgnoredAction, 0)
 
 	logOutput := logs.String()
 	if strings.Contains(logOutput, testSecret) || strings.Contains(logOutput, string(ready)) {
@@ -255,7 +255,7 @@ func TestMalformedAndUnsupportedInputs(t *testing.T) {
 
 func TestSQLiteCommitFailureReturnsServerError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,17 +350,25 @@ func assertWebhookStatus(t *testing.T, handler http.Handler, body []byte, secret
 }
 
 func payload(projectPath, action string, draft, workInProgress bool, headSHA string) []byte {
+	state := "opened"
+	switch action {
+	case "close":
+		state = "closed"
+	case "merge":
+		state = "merged"
+	}
 	return []byte(fmt.Sprintf(`{
   "object_kind":"merge_request",
   "project":{"id":42,"path_with_namespace":%q},
   "object_attributes":{
     "iid":7,
     "action":%q,
+    "state":%q,
     "draft":%t,
     "work_in_progress":%t,
     "last_commit":{"id":%q}
   }
-}`, projectPath, action, draft, workInProgress, headSHA))
+}`, projectPath, action, state, draft, workInProgress, headSHA))
 }
 
 func notePayloadJSON(projectPath, action string, system, internal bool, comment string) []byte {

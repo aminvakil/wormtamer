@@ -52,6 +52,7 @@ type mergeRequestPayload struct {
 	ObjectAttributes struct {
 		IID            int64  `json:"iid"`
 		Action         string `json:"action"`
+		State          string `json:"state"`
 		Draft          bool   `json:"draft"`
 		WorkInProgress bool   `json:"work_in_progress"`
 		LastCommit     struct {
@@ -172,11 +173,13 @@ func (h *Handler) mergeRequestEvent(w http.ResponseWriter, request *http.Request
 		Payload:         body,
 	}
 	switch payload.ObjectAttributes.Action {
-	case "open":
+	case "open", "update":
 		if payload.ObjectAttributes.Draft || payload.ObjectAttributes.WorkInProgress {
 			event.IgnoredOutcome = store.OutcomeIgnoredDraft
-		} else {
+		} else if payload.ObjectAttributes.Action == "open" || payload.ObjectAttributes.State == "opened" {
 			event.QueueReview = true
+		} else {
+			event.IgnoredOutcome = store.OutcomeIgnoredAction
 		}
 	case "close":
 		event.QueueFeedback = true

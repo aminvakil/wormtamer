@@ -14,7 +14,7 @@ import (
 )
 
 func TestExecuteJobsCommandListsEmptyDatabase(t *testing.T) {
-	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"))
+	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestExecuteJobsCommandListsEmptyDatabase(t *testing.T) {
 }
 
 func TestExecuteJobsCommandPreservesRetryErrors(t *testing.T) {
-	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"))
+	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestExecuteJobsCommandPreservesRetryErrors(t *testing.T) {
 }
 
 func TestExecuteJobsCommandRetriesFeedback(t *testing.T) {
-	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"))
+	storage, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wormtamer.db"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

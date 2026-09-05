@@ -19,7 +19,7 @@ import (
 
 func TestWorkerSynthesizesMemoryFromTerminalEvidence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ FROM review_memories m JOIN feedback_jobs j ON j.id = m.feedback_job_id`).Scan(&
 
 func TestWorkerCompletesWithoutMemoryWhenModelDeclines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestWorkerCompletesWithoutMemoryWhenModelDeclines(t *testing.T) {
 
 func TestWorkerRunFailsWhenRetryCheckpointCannotPersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

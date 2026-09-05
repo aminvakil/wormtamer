@@ -34,6 +34,7 @@ func TestOverviewRendersStateAndConfiguration(t *testing.T) {
 		!strings.Contains(body, "No queued synthesis") || !strings.Contains(body, "group/project") ||
 		!strings.Contains(body, `<time datetime="2026-08-16T10:30:00.000000123Z">2026 Aug 16 · 10:30 UTC</time>`) ||
 		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "Current repository only") ||
+		!strings.Contains(body, "<dt>Grace period</dt><dd>1m30s</dd>") ||
 		!strings.Contains(body, "Review tools") || !strings.Contains(body, "<code>read</code>") ||
 		!strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
@@ -248,6 +249,7 @@ func newTestHandler(t *testing.T, storage Store) http.Handler {
 	handler, err := New(storage, Config{
 		GitLabBaseURL:  "http://gitlab.internal",
 		GeminiEndpoint: "http://gemini.internal",
+		GracePeriod:    90 * time.Second,
 		GeminiModel:    "gemini-test", GeminiThinkingLevel: "high", LogLevel: "info",
 		AuthorizedRepositories: []string{"group/project", "group/shared"},
 	}, slog.New(slog.DiscardHandler))

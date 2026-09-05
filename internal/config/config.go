@@ -12,20 +12,22 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var repositoryPathPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$`)
 
 type Config struct {
-	ListenAddress                  string   `json:"listen_address"`
-	DatabasePath                   string   `json:"database_path"`
-	ReviewWorkspacePath            string   `json:"review_workspace_path"`
-	LogLevel                       string   `json:"log_level"`
-	GitLab                         GitLab   `json:"gitlab"`
-	Gemini                         Gemini   `json:"gemini"`
-	AuthorizedRepositories         []string `json:"authorized_repositories"`
-	ShareAllAuthorizedRepositories bool     `json:"share_all_authorized_repositories"`
-	ConfigPath                     string   `json:"-"`
+	ListenAddress                  string        `json:"listen_address"`
+	DatabasePath                   string        `json:"database_path"`
+	ReviewWorkspacePath            string        `json:"review_workspace_path"`
+	LogLevel                       string        `json:"log_level"`
+	GracePeriod                    time.Duration `json:"-"`
+	GitLab                         GitLab        `json:"gitlab"`
+	Gemini                         Gemini        `json:"gemini"`
+	AuthorizedRepositories         []string      `json:"authorized_repositories"`
+	ShareAllAuthorizedRepositories bool          `json:"share_all_authorized_repositories"`
+	ConfigPath                     string        `json:"-"`
 }
 
 type GitLab struct {
@@ -57,13 +59,25 @@ func Load(path string) (Config, error) {
 	defer file.Close()
 
 	var cfg Config
+	defaultGracePeriod := "1m"
+	input := struct {
+		*Config
+		GracePeriod *string `json:"grace_period"`
+	}{Config: &cfg, GracePeriod: &defaultGracePeriod}
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := decoder.Decode(&input); err != nil {
 		return Config{}, fmt.Errorf("decode configuration: %w", err)
 	}
 	if err := ensureEOF(decoder); err != nil {
 		return Config{}, err
+	}
+	if input.GracePeriod == nil {
+		return Config{}, errors.New("grace_period must not be null")
+	}
+	cfg.GracePeriod, err = time.ParseDuration(*input.GracePeriod)
+	if err != nil || cfg.GracePeriod < 0 {
+		return Config{}, errors.New("grace_period must be a non-negative duration string")
 	}
 	if err := validate(&cfg); err != nil {
 		return Config{}, err

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validConfiguration = `{
@@ -42,6 +43,9 @@ func TestLoad(t *testing.T) {
 	if cfg.ReviewWorkspacePath != wantWorkspacePath {
 		t.Fatalf("ReviewWorkspacePath = %q, want %q", cfg.ReviewWorkspacePath, wantWorkspacePath)
 	}
+	if cfg.GracePeriod != time.Minute {
+		t.Fatalf("GracePeriod = %v, want 1m", cfg.GracePeriod)
+	}
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
 	}
@@ -53,6 +57,25 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.ShareAllAuthorizedRepositories {
 		t.Fatal("ShareAllAuthorizedRepositories = true when omitted")
+	}
+}
+
+func TestLoadGracePeriod(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  time.Duration
+	}{{"90s", 90 * time.Second}, {"0s", 0}} {
+		t.Run(test.value, func(t *testing.T) {
+			contents := strings.Replace(validConfiguration, `"listen_address": ":8080",`, `"listen_address": ":8080", "grace_period": "`+test.value+`",`, 1)
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil || cfg.GracePeriod != test.want {
+				t.Fatalf("Load() grace period = %v, error = %v", cfg.GracePeriod, err)
+			}
+		})
 	}
 }
 
@@ -143,6 +166,9 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "workspace inside private database directory", replace: `"../wormtamer-reviews"`, with: `"data/reviews"`, want: "must be outside service-private"},
 		{name: "workspace contains private directories", replace: `"../wormtamer-reviews"`, with: `".."`, want: "must be outside service-private"},
 		{name: "invalid log level", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "log_level": "trace",`, want: "log_level must be"},
+		{name: "malformed grace period", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "grace_period": "soon",`, want: "grace_period must be"},
+		{name: "negative grace period", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "grace_period": "-1m",`, want: "grace_period must be"},
+		{name: "null grace period", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "grace_period": null,`, want: "grace_period must not be null"},
 		{name: "invalid URL scheme", replace: `"http://gitlab.internal"`, with: `"ftp://gitlab.internal"`, want: "HTTP or HTTPS"},
 		{name: "URL credentials", replace: `"http://gitlab.internal"`, with: `"http://user:pass@gitlab.internal"`, want: "must not contain credentials"},
 		{name: "empty URL query", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal?"`, want: "must not contain credentials"},

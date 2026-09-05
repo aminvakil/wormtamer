@@ -149,7 +149,7 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 
 func TestWorkerCompletesEquivalentPatchWithoutReviewOrPublication(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestWorkerCompletesEquivalentPatchWithoutReviewOrPublication(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	storage, err = store.Open(context.Background(), path)
+	storage, err = store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestWorkerClassifiesTerminalFailures(t *testing.T) {
 		failure   error
 		wantState string
 	}{
-		{name: "obsolete", failure: failure.Obsolete("merge_request_not_open"), wantState: store.JobObsolete},
+		{name: "obsolete", failure: failure.Obsolete("merge_request_head_changed"), wantState: store.JobObsolete},
 		{name: "authorization", failure: failure.Failed("repository_unauthorized"), wantState: store.JobFailed},
 	}
 	for _, test := range tests {
@@ -618,12 +618,17 @@ func TestWorkerClassifiesTerminalFailures(t *testing.T) {
 			defer db.Close()
 			queueJob(t, storage)
 			broker := &fakeGitLab{loadError: test.failure}
-			worker := newTestWorker(t, storage, broker, &fakeReviewer{}, nil)
+			workspaces := &fakeWorkspaces{}
+			reviewer := &fakeReviewer{}
+			worker := New(storage, broker, workspaces, reviewer, slog.New(slog.DiscardHandler), nil)
 			processed, err := worker.ProcessOne(context.Background())
 			if err != nil || !processed {
 				t.Fatalf("ProcessOne() = %t, %v", processed, err)
 			}
 			assertJobState(t, db, test.wantState)
+			if workspaces.prepareCalls != 0 || reviewer.calls != 0 || broker.postCalls != 0 {
+				t.Fatalf("terminal failure: preparations=%d reviews=%d posts=%d", workspaces.prepareCalls, reviewer.calls, broker.postCalls)
+			}
 		})
 	}
 }
@@ -672,7 +677,7 @@ func newTestWorker(t *testing.T, storage JobStore, broker *fakeGitLab, reviewer 
 func workerStore(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "wormtamer.db")
-	storage, err := store.Open(context.Background(), path)
+	storage, err := store.Open(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

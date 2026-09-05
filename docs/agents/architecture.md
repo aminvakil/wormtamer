@@ -34,6 +34,7 @@ The process starts with an explicit JSON configuration path, for example `wormta
   "database_path": "data/wormtamer.db",
   "review_workspace_path": "/var/lib/wormtamer-reviews",
   "log_level": "info",
+  "grace_period": "1m",
   "gitlab": {
     "base_url": "https://gitlab.example",
     "webhook_secret": "replace-me",
@@ -49,6 +50,8 @@ The process starts with an explicit JSON configuration path, for example `wormta
   "share_all_authorized_repositories": false
 }
 ```
+
+Review scheduling is configured by [`grace_period`](reliability.md#review-grace-period), which is shown in the panel's non-secret effective configuration.
 
 Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and bounds which internal repositories can be disclosed to and inspected by the model. Authorization remains independent from repository sharing, so an unlisted path is never eligible for trusted preparation.
 
@@ -71,7 +74,7 @@ Read-only web panel ---------------------------------------> SQLite
 
 ### Webhook ingress
 
-Validates and durably records merge request webhooks. Ready openings create idempotent review jobs. Close and merge actions create at most one feedback synthesis job for the merge request when a completed, locally validated and published Wormtamer review is available. Eligible work is acknowledged only after the applicable transaction commits; Note Hooks create no work.
+Validates and durably records merge request webhooks. Ready openings and open-MR updates create idempotent review jobs with the configured [grace period](reliability.md#review-grace-period). Close and merge actions create at most one feedback synthesis job for the merge request when a completed, locally validated and published Wormtamer review is available. Eligible work is acknowledged only after the applicable transaction commits; Note Hooks create no work.
 
 ### Review worker
 

@@ -3,6 +3,7 @@
   "database_path": "/var/lib/wormtamer/wormtamer.db",
   "review_workspace_path": "/var/lib/wormtamer-reviews",
   "log_level": "info",
+  "grace_period": "1m",
   "gitlab": {
     "base_url": "https://gitlab.example",
     "webhook_secret": "replace-me",

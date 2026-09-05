@@ -51,7 +51,9 @@ const (
 const timestampLayout = time.RFC3339
 
 type Store struct {
-	db *sql.DB
+	db          *sql.DB
+	gracePeriod time.Duration
+	now         func() time.Time
 }
 
 type Event struct {
@@ -117,7 +119,7 @@ type ReviewMemoryRetrieval struct {
 	RetrievedAt     time.Time
 }
 
-func Open(ctx context.Context, path string) (*Store, error) {
+func Open(ctx context.Context, path string, gracePeriod time.Duration) (*Store, error) {
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, errors.New("resolve database path")
@@ -136,7 +138,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
 
-	store := &Store{db: db}
+	store := &Store{db: db, gracePeriod: gracePeriod, now: time.Now}
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
@@ -291,34 +293,18 @@ WHERE e.delivery_id = ?`, OutcomeQueued, OutcomeDuplicateReview,
 	result.Outcome = outcome
 
 	if event.QueueReview {
-		jobInsert, err := tx.ExecContext(ctx, `
-INSERT INTO review_jobs (
-    source_event_id, gitlab_instance, project_id, merge_request_iid, head_sha, state
-) VALUES (?, ?, ?, ?, ?, 'queued')
-ON CONFLICT(gitlab_instance, project_id, merge_request_iid, head_sha) DO NOTHING`,
-			result.EventID, event.GitLabInstance, event.ProjectID, event.MergeRequestIID, event.HeadSHA)
+		job, err := s.createReviewJob(ctx, tx, result.EventID, ReconciledReview{
+			GitLabInstance: event.GitLabInstance, ProjectID: event.ProjectID,
+			MergeRequestIID: event.MergeRequestIID, HeadSHA: event.HeadSHA,
+		})
 		if err != nil {
-			return result, fmt.Errorf("insert review job: %w", err)
+			return result, err
 		}
-		jobInserted, err := jobInsert.RowsAffected()
-		if err != nil {
-			return result, fmt.Errorf("inspect review job insertion: %w", err)
-		}
-		if jobInserted == 1 {
-			result.JobID, err = jobInsert.LastInsertId()
-			if err != nil {
-				return result, fmt.Errorf("read review job ID: %w", err)
-			}
-		} else {
+		result.JobID = job.JobID
+		if !job.NewlyQueued {
 			result.Outcome = OutcomeDuplicateReview
 			if _, err := tx.ExecContext(ctx, `UPDATE webhook_events SET outcome = ? WHERE id = ?`, result.Outcome, result.EventID); err != nil {
 				return result, fmt.Errorf("mark duplicate review event: %w", err)
-			}
-			if err := tx.QueryRowContext(ctx, `
-SELECT id FROM review_jobs
-WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_sha = ?`,
-				event.GitLabInstance, event.ProjectID, event.MergeRequestIID, event.HeadSHA).Scan(&result.JobID); err != nil {
-				return result, fmt.Errorf("read existing review job: %w", err)
 			}
 		}
 	} else if event.QueueFeedback {
@@ -399,18 +385,36 @@ func (s *Store) CreateReconciledJob(ctx context.Context, review ReconciledReview
 	}
 	defer tx.Rollback()
 
+	result, err = s.createReviewJob(ctx, tx, 0, review)
+	if err != nil {
+		return result, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ReconciledResult{}, fmt.Errorf("commit reconciled job transaction: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Store) createReviewJob(ctx context.Context, tx *sql.Tx, sourceEventID int64, review ReconciledReview) (result ReconciledResult, err error) {
+	now := s.now()
+	nextAttempt := formatTime(now)
+	if s.gracePeriod > 0 {
+		nextAttempt = formatDeadline(now.Add(s.gracePeriod))
+	}
 	insert, err := tx.ExecContext(ctx, `
 INSERT INTO review_jobs (
-    source_event_id, gitlab_instance, project_id, merge_request_iid, head_sha, state
-) VALUES (NULL, ?, ?, ?, ?, 'queued')
+    source_event_id, gitlab_instance, project_id, merge_request_iid, head_sha, state,
+    created_at, next_attempt_at
+) VALUES (NULLIF(?, 0), ?, ?, ?, ?, 'queued', ?, ?)
 ON CONFLICT(gitlab_instance, project_id, merge_request_iid, head_sha) DO NOTHING`,
-		review.GitLabInstance, review.ProjectID, review.MergeRequestIID, review.HeadSHA)
+		sourceEventID, review.GitLabInstance, review.ProjectID, review.MergeRequestIID, review.HeadSHA,
+		formatTime(now), nextAttempt)
 	if err != nil {
-		return result, fmt.Errorf("insert reconciled review job: %w", err)
+		return result, fmt.Errorf("insert review job: %w", err)
 	}
 	inserted, err := insert.RowsAffected()
 	if err != nil {
-		return result, fmt.Errorf("inspect reconciled review job insertion: %w", err)
+		return result, fmt.Errorf("inspect review job insertion: %w", err)
 	}
 	result.NewlyQueued = inserted == 1
 	if result.NewlyQueued {
@@ -422,10 +426,7 @@ WHERE gitlab_instance = ? AND project_id = ? AND merge_request_iid = ? AND head_
 			review.GitLabInstance, review.ProjectID, review.MergeRequestIID, review.HeadSHA).Scan(&result.JobID)
 	}
 	if err != nil {
-		return ReconciledResult{}, fmt.Errorf("read reconciled review job ID: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return ReconciledResult{}, fmt.Errorf("commit reconciled job transaction: %w", err)
+		return ReconciledResult{}, fmt.Errorf("read review job ID: %w", err)
 	}
 	return result, nil
 }
