@@ -32,7 +32,7 @@ func TestWorkerPreservesReviewAndWorkspaceCleanupFailures(t *testing.T) {
 	closeErr := errors.New("close failed")
 	workspaces := &fakeWorkspaces{closeErr: closeErr}
 	worker := New(storage, &fakeGitLab{}, workspaces, &fakeReviewer{err: reviewErr}, slog.Default(), nil)
-	job, err := worker.claim(context.Background())
+	job, err := storage.ClaimJob(context.Background(), time.Now().UTC())
 	if err != nil || job == nil {
 		t.Fatalf("claim = %+v, %v", job, err)
 	}
@@ -841,7 +841,7 @@ func (m *fakeWorkspaces) Prepare(_ context.Context, snapshot gitlab.Snapshot, me
 	m.workspace = &fakeWorkspace{
 		memories: append([]repository.Memory(nil), memories...), closeErr: m.closeErr,
 		context: repository.ReviewContext{
-			WorkingDirectory: "/review/current", ReviewedHead: snapshot.Identity.HeadSHA,
+			WorkingDirectory: "/review/current",
 			RelatedRepositories: []repository.PreparedRepository{{
 				Repository: "group/related", Path: "/review/related/group/related", InitialRevision: strings.Repeat("b", 40),
 			}},

@@ -143,6 +143,7 @@ func TestLoadReviewUsesAllOrNothingRepositorySharing(t *testing.T) {
 func TestLoadReviewClassifiesPatchID(t *testing.T) {
 	valid40 := strings.Repeat("a", 40)
 	valid64 := strings.Repeat("B", 64)
+	invalid := "not-a-patch-id"
 	tests := []struct {
 		name       string
 		versions   []diffVersionResponse
@@ -156,7 +157,7 @@ func TestLoadReviewClassifiesPatchID(t *testing.T) {
 		{name: "collected null", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected"}}, wantStatus: PatchIDPending},
 		{name: "empty", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "empty"}}, wantStatus: PatchIDUnavailable},
 		{name: "unknown state", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collecting"}}, category: "unknown_merge_request_diff_state"},
-		{name: "malformed patch ID", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected", PatchIDSHA: stringPointer("not-a-patch-id")}}, category: "malformed_gitlab_response"},
+		{name: "malformed patch ID", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 8, State: "collected", PatchIDSHA: &invalid}}, category: "malformed_gitlab_response"},
 		{name: "merge request mismatch", versions: []diffVersionResponse{{ID: 2, HeadCommitSHA: testHead, MergeRequestID: 9, State: "collected", PatchIDSHA: &valid40}}, category: "malformed_gitlab_response"},
 	}
 	for _, test := range tests {
@@ -634,10 +635,6 @@ func newTestClient(t *testing.T, baseURL, token string, httpClient *http.Client)
 
 func testIdentity(baseURL string) Identity {
 	return Identity{GitLabInstance: baseURL, ProjectID: 42, MergeRequestIID: 7, HeadSHA: testHead}
-}
-
-func stringPointer(value string) *string {
-	return &value
 }
 
 func testNote(id int64, body string, authorID int64) noteResponse {

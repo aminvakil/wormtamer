@@ -183,14 +183,7 @@ func (s *Store) readOptionalTime(ctx context.Context, query string, arguments ..
 	if err := s.db.QueryRowContext(ctx, query, arguments...).Scan(&text); err != nil {
 		return nil, err
 	}
-	if !text.Valid {
-		return nil, nil
-	}
-	parsed, err := parseStoredTime(text.String)
-	if err != nil {
-		return nil, err
-	}
-	return &parsed, nil
+	return parseOptionalStoredTime(text)
 }
 
 func (s *Store) ListReviewRecords(ctx context.Context, state string, beforeID int64, limit int) (ReviewRecordsPage, error) {
@@ -331,11 +324,11 @@ ORDER BY retrieved_at, memory_id, memory_updated_at`, jobID)
 		if err := rows.Scan(&retrieval.MemoryID, &updated, &retrieved); err != nil {
 			return ReviewRecordDetail{}, fmt.Errorf("scan panel memory retrieval: %w", err)
 		}
-		retrieval.MemoryUpdatedAt, err = parseStoredTime(updated)
+		retrieval.MemoryUpdatedAt, err = time.Parse(timestampLayout, updated)
 		if err != nil {
 			return ReviewRecordDetail{}, fmt.Errorf("parse panel memory update time: %w", err)
 		}
-		retrieval.RetrievedAt, err = parseStoredTime(retrieved)
+		retrieval.RetrievedAt, err = time.Parse(timestampLayout, retrieved)
 		if err != nil {
 			return ReviewRecordDetail{}, fmt.Errorf("parse panel memory retrieval time: %w", err)
 		}
@@ -366,7 +359,7 @@ func scanReviewRecord(row rowScanner) (ReviewRecord, error) {
 		return ReviewRecord{}, err
 	}
 	var err error
-	record.CreatedAt, err = parseStoredTime(created)
+	record.CreatedAt, err = time.Parse(timestampLayout, created)
 	if err != nil {
 		return ReviewRecord{}, fmt.Errorf("parse panel review creation time: %w", err)
 	}
@@ -431,11 +424,11 @@ JOIN review_jobs r ON r.id = j.review_job_id`
 			&received, &updated, &record.LastErrorCategory, &memoryCreated, &instance, &reviewHeadSHA); err != nil {
 			return FeedbackRecordsPage{}, fmt.Errorf("scan feedback record: %w", err)
 		}
-		record.ReceivedAt, err = parseStoredTime(received)
+		record.ReceivedAt, err = time.Parse(timestampLayout, received)
 		if err != nil {
 			return FeedbackRecordsPage{}, fmt.Errorf("parse feedback receipt time: %w", err)
 		}
-		record.UpdatedAt, err = parseStoredTime(updated)
+		record.UpdatedAt, err = time.Parse(timestampLayout, updated)
 		if err != nil {
 			return FeedbackRecordsPage{}, fmt.Errorf("parse feedback update time: %w", err)
 		}
@@ -496,7 +489,7 @@ JOIN feedback_jobs j ON j.id = m.feedback_job_id`
 			&record.MergeRequestIID, &record.Lesson, &record.SourceURL, &created); err != nil {
 			return MemoryRecordsPage{}, fmt.Errorf("scan memory record: %w", err)
 		}
-		record.UpdatedAt, err = parseStoredTime(created)
+		record.UpdatedAt, err = time.Parse(timestampLayout, created)
 		if err != nil {
 			return MemoryRecordsPage{}, fmt.Errorf("parse memory creation time: %w", err)
 		}
@@ -534,15 +527,11 @@ func validFeedbackState(state string) bool {
 	}
 }
 
-func parseStoredTime(text string) (time.Time, error) {
-	return time.Parse(timestampLayout, text)
-}
-
 func parseOptionalStoredTime(text sql.NullString) (*time.Time, error) {
 	if !text.Valid {
 		return nil, nil
 	}
-	parsed, err := parseStoredTime(text.String)
+	parsed, err := time.Parse(timestampLayout, text.String)
 	if err != nil {
 		return nil, err
 	}

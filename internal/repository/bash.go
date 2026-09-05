@@ -62,7 +62,9 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 	}
 	_ = writer.Close()
 	pid := command.Process.Pid
-	capture := newBashCapture(w)
+	capture := &bashCapture{
+		workspace: w, limitReached: make(chan struct{}), infrastructureFailure: make(chan struct{}),
+	}
 	readDone := make(chan error, 1)
 	go func() {
 		_, copyErr := io.Copy(capture, reader)
@@ -101,7 +103,6 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 		terminateProcessGroup(pid)
 		waitErr = <-waitDone
 	}
-	_ = waitErr
 
 	var readErr error
 	readerClosed := false
@@ -125,13 +126,13 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 	if outcome == "capture_failure" || (readErr != nil && !expectedClosedReader && !errors.Is(readErr, errBashOutputLimit) && !errors.Is(readErr, errBashSpool)) {
 		return ToolResult{}, fmt.Errorf("capture bash output: %w", failure.Retry("bash_output_spool_failed", 0))
 	}
-	formatted := capture.formatted(outcome != "output_limit")
+	text := capture.formatted(outcome != "output_limit")
 	if outcome == "output_limit" || errors.Is(readErr, errBashOutputLimit) {
 		capture.removeSpool()
-		return correctableCategorizedError("bash_output_limit_exceeded", formatted.text), nil
+		return correctableCategorizedError("bash_output_limit_exceeded", text), nil
 	}
 	if outcome == "timeout" {
-		message := formatted.text
+		message := text
 		if message != "" {
 			message += "\n\n"
 		}
@@ -143,14 +144,13 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 		if !errors.As(waitErr, &exitError) {
 			return ToolResult{}, fmt.Errorf("wait for bash: %w", failure.Retry("bash_execution_failed", 0))
 		}
-		message := formatted.text
+		message := text
 		if message != "" {
 			message += "\n\n"
 		}
 		message += "Command exited with code " + strconv.Itoa(exitError.ExitCode())
 		return correctableError(message), nil
 	}
-	text := formatted.text
 	if text == "" {
 		text = "(no output)"
 	}
@@ -171,7 +171,7 @@ func positiveSeconds(value any) (float64, bool) {
 	default:
 		return 0, false
 	}
-	return seconds, seconds > 0 && seconds <= float64((1<<63-1)/int64(time.Second)) && seconds == seconds
+	return seconds, seconds > 0 && seconds <= float64((1<<63-1)/int64(time.Second))
 }
 
 type bashCapture struct {
@@ -195,12 +195,6 @@ type bashCapture struct {
 	infrastructureFailure chan struct{}
 	limitOnce             sync.Once
 	failureOnce           sync.Once
-}
-
-func newBashCapture(workspace *localWorkspace) *bashCapture {
-	return &bashCapture{
-		workspace: workspace, limitReached: make(chan struct{}), infrastructureFailure: make(chan struct{}),
-	}
 }
 
 func (c *bashCapture) Write(contents []byte) (int, error) {
@@ -231,7 +225,7 @@ func (c *bashCapture) Write(contents []byte) (int, error) {
 			}
 		} else {
 			_, _ = c.prefix.Write(accepted)
-			if c.exceedsVisibleLimit() {
+			if c.totalBytes > MaxToolBytes || c.totalLines() > MaxToolLines {
 				c.truncated = true
 				if err := c.startSpool(); err != nil {
 					if errors.Is(err, errBashOutputLimit) {
@@ -268,14 +262,6 @@ func (c *bashCapture) addOutput(contents []byte) {
 	if len(c.tail) > retained {
 		c.tail = append([]byte(nil), c.tail[len(c.tail)-retained:]...)
 	}
-}
-
-func (c *bashCapture) exceedsVisibleLimit() bool {
-	lines := c.newlines
-	if !c.lastByteNewline && c.totalBytes > 0 {
-		lines++
-	}
-	return c.totalBytes > MaxToolBytes || lines > MaxToolLines
 }
 
 func (c *bashCapture) startSpool() error {
@@ -373,18 +359,16 @@ func (c *bashCapture) removeSpool() {
 	}
 }
 
-type formattedBashOutput struct{ text string }
-
-func (c *bashCapture) formatted(includeSpool bool) formattedBashOutput {
+func (c *bashCapture) formatted(includeSpool bool) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	content, outputLines, lastLinePartial := tailContent(c.tail, c.totalBytes, c.totalLines())
 	text := strings.ToValidUTF8(string(content), "�")
 	if !c.truncated && c.totalBytes <= MaxToolBytes && c.totalLines() <= MaxToolLines {
-		return formattedBashOutput{text: text}
+		return text
 	}
 	if !includeSpool || c.spoolPath == "" {
-		return formattedBashOutput{text: text}
+		return text
 	}
 	endLine := c.totalLines()
 	if lastLinePartial {
@@ -396,7 +380,7 @@ func (c *bashCapture) formatted(includeSpool bool) formattedBashOutput {
 		text += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
 			endLine-int64(outputLines)+1, endLine, endLine, formatSize(MaxToolBytes), c.spoolPath)
 	}
-	return formattedBashOutput{text: text}
+	return text
 }
 
 func (c *bashCapture) totalLines() int64 {

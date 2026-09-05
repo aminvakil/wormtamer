@@ -88,26 +88,7 @@ func TestLoadPassesThroughGeminiThinkingLevel(t *testing.T) {
 	}
 }
 
-func TestLoadShareAllAuthorizedRepositories(t *testing.T) {
-	contents := strings.Replace(validConfiguration,
-		`"authorized_repositories": ["group/project", "parent/team/project"]`,
-		`"authorized_repositories": ["group/project", "parent/team/project", "group/third"],
-  "share_all_authorized_repositories": true`, 1)
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.ShareAllAuthorizedRepositories {
-		t.Fatal("ShareAllAuthorizedRepositories = false")
-	}
-}
-
-func TestCanonicalGitLabURL(t *testing.T) {
+func TestCanonicalHTTPBaseURL(t *testing.T) {
 	tests := []struct {
 		raw  string
 		want string
@@ -120,12 +101,12 @@ func TestCanonicalGitLabURL(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.raw, func(t *testing.T) {
-			got, err := canonicalGitLabURL(test.raw)
+			got, err := canonicalHTTPBaseURL(test.raw, "gitlab.base_url")
 			if err != nil {
-				t.Fatalf("canonicalGitLabURL() error = %v", err)
+				t.Fatalf("canonicalHTTPBaseURL() error = %v", err)
 			}
 			if got != test.want {
-				t.Fatalf("canonicalGitLabURL() = %q, want %q", got, test.want)
+				t.Fatalf("canonicalHTTPBaseURL() = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -172,7 +153,6 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "empty personal access token", replace: `"gitlab-token"`, with: `""`, want: "personal_access_token is required"},
 		{name: "empty Gemini API key", replace: `"gemini-key"`, with: `""`, want: "gemini.api_key is required"},
 		{name: "invalid Gemini base URL scheme", replace: `"api_key": "gemini-key",`, with: `"api_key": "gemini-key", "base_url": "ftp://gateway.example",`, want: "gemini.base_url must be an HTTP or HTTPS URL"},
-		{name: "empty Gemini model", replace: `"gemini-test"`, with: `""`, want: "gemini.model is required"},
 		{name: "blank Gemini model", replace: `"gemini-test"`, with: `"  "`, want: "gemini.model is required"},
 		{name: "long Gemini model", replace: `"gemini-test"`, with: `"` + strings.Repeat("m", 257) + `"`, want: "must not exceed 256 bytes"},
 		{name: "Gemini model control character", replace: `"gemini-test"`, with: `"gemini\ntest"`, want: "must not contain control characters"},

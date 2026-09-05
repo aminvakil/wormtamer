@@ -42,17 +42,17 @@ func ReviewID(gitLabInstance string, projectID, mergeRequestIID int64, headSHA s
 		strconv.FormatInt(mergeRequestIID, 10), strings.ToLower(headSHA))
 }
 
-func ValidReviewID(id string) bool {
-	return validScopedID(id, "WT-R-")
-}
-
 func FindingID(gitLabInstance string, projectID, mergeRequestIID int64, headSHA string, ordinal int) string {
 	return scopedID("WT-F-", "wormtamer:finding:v1", gitLabInstance, strconv.FormatInt(projectID, 10),
 		strconv.FormatInt(mergeRequestIID, 10), strings.ToLower(headSHA), strconv.Itoa(ordinal))
 }
 
 func ValidFindingID(id string) bool {
-	return validScopedID(id, "WT-F-")
+	if len(id) != 31 || !strings.HasPrefix(id, "WT-F-") {
+		return false
+	}
+	_, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(id[5:])
+	return err == nil
 }
 
 func scopedID(prefix string, values ...string) string {
@@ -62,14 +62,6 @@ func scopedID(prefix string, values ...string) string {
 		_, _ = digest.Write([]byte{0})
 	}
 	return prefix + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest.Sum(nil)[:16])
-}
-
-func validScopedID(id, prefix string) bool {
-	if len(id) != 31 || !strings.HasPrefix(id, prefix) {
-		return false
-	}
-	_, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(id[5:])
-	return err == nil
 }
 
 func DecodeAndValidate(contents []byte, changedPaths map[string]struct{}, forbidden []string) (Result, []byte, error) {

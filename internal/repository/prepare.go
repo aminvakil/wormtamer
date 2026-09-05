@@ -78,21 +78,21 @@ func (m *Manager) prepare(ctx context.Context, snapshot gitlab.Snapshot, memorie
 	if err != nil {
 		return nil, err
 	}
-	if err := m.git(ctx, staging, serviceHome, true, "clone", "--no-checkout", "--origin", "origin", "--", currentURL, currentDirectory); err != nil {
+	if _, err := m.runGit(ctx, staging, serviceHome, true, "clone", "--no-checkout", "--origin", "origin", "--", currentURL, currentDirectory); err != nil {
 		return nil, err
 	}
 	mergeRequestRef := "refs/merge-requests/" + strconv.FormatInt(snapshot.Identity.MergeRequestIID, 10) + "/head"
-	if err := m.git(ctx, staging, serviceHome, true, "-C", currentDirectory, "fetch", "--no-tags", "origin", "+"+mergeRequestRef+":refs/remotes/origin/merge-request-head"); err != nil {
+	if _, err := m.runGit(ctx, staging, serviceHome, true, "-C", currentDirectory, "fetch", "--no-tags", "origin", "+"+mergeRequestRef+":refs/remotes/origin/merge-request-head"); err != nil {
 		return nil, err
 	}
-	resolvedHead, err := m.gitOutput(ctx, staging, serviceHome, false, "-C", currentDirectory, "rev-parse", "--verify", "refs/remotes/origin/merge-request-head^{commit}")
+	resolvedHead, err := m.runGit(ctx, staging, serviceHome, false, "-C", currentDirectory, "rev-parse", "--verify", "refs/remotes/origin/merge-request-head^{commit}")
 	if err != nil {
 		return nil, err
 	}
 	if !strings.EqualFold(strings.TrimSpace(resolvedHead), snapshot.Identity.HeadSHA) {
 		return nil, failure.Obsolete("merge_request_head_changed")
 	}
-	if err := m.git(ctx, staging, serviceHome, false, "-C", currentDirectory, "checkout", "--detach", "--force", strings.ToLower(snapshot.Identity.HeadSHA)); err != nil {
+	if _, err := m.runGit(ctx, staging, serviceHome, false, "-C", currentDirectory, "checkout", "--detach", "--force", strings.ToLower(snapshot.Identity.HeadSHA)); err != nil {
 		return nil, err
 	}
 
@@ -109,10 +109,10 @@ func (m *Manager) prepare(ctx context.Context, snapshot gitlab.Snapshot, memorie
 		if err := os.MkdirAll(filepath.Dir(relatedDirectory), 0o700); err != nil {
 			return nil, err
 		}
-		if err := m.git(ctx, staging, serviceHome, true, "clone", "--no-checkout", "--origin", "origin", "--", relatedURL, relatedDirectory); err != nil {
+		if _, err := m.runGit(ctx, staging, serviceHome, true, "clone", "--no-checkout", "--origin", "origin", "--", relatedURL, relatedDirectory); err != nil {
 			return nil, err
 		}
-		revision, err := m.gitOutput(ctx, staging, serviceHome, false, "-C", relatedDirectory, "rev-parse", "--verify", "refs/remotes/origin/HEAD^{commit}")
+		revision, err := m.runGit(ctx, staging, serviceHome, false, "-C", relatedDirectory, "rev-parse", "--verify", "refs/remotes/origin/HEAD^{commit}")
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +120,7 @@ func (m *Manager) prepare(ctx context.Context, snapshot gitlab.Snapshot, memorie
 		if !commitPattern.MatchString(revision) {
 			return nil, errors.New("related repository default branch has an invalid revision")
 		}
-		if err := m.git(ctx, staging, serviceHome, false, "-C", relatedDirectory, "checkout", "--detach", "--force", revision); err != nil {
+		if _, err := m.runGit(ctx, staging, serviceHome, false, "-C", relatedDirectory, "checkout", "--detach", "--force", revision); err != nil {
 			return nil, err
 		}
 		preparedRelated = append(preparedRelated, PreparedRepository{
@@ -169,10 +169,10 @@ func (m *Manager) prepare(ctx context.Context, snapshot gitlab.Snapshot, memorie
 		preparedRelated[index].Path = translate(preparedRelated[index].Path)
 	}
 	workspace := &localWorkspace{
-		manager: m, root: finalRoot, cwd: translate(currentDirectory), toolUID: m.toolUID,
+		root: finalRoot, cwd: translate(currentDirectory), toolUID: m.toolUID,
 		toolGID: m.toolGID, executable: m.executable,
 		context: ReviewContext{
-			WorkingDirectory: translate(currentDirectory), ReviewedHead: strings.ToLower(snapshot.Identity.HeadSHA),
+			WorkingDirectory:    translate(currentDirectory),
 			RelatedRepositories: preparedRelated, MemoryPath: translate(memoryPath),
 		},
 	}
@@ -182,7 +182,6 @@ func (m *Manager) prepare(ctx context.Context, snapshot gitlab.Snapshot, memorie
 		_ = os.RemoveAll(finalRoot)
 		return nil, errors.New("repository workspace manager is closed")
 	}
-	m.open[finalRoot] = struct{}{}
 	m.mu.Unlock()
 	return workspace, nil
 }
@@ -212,15 +211,6 @@ func repositoryURL(baseURL, repository string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
-}
-
-func (m *Manager) git(ctx context.Context, cwd, home string, authenticated bool, arguments ...string) error {
-	_, err := m.runGit(ctx, cwd, home, authenticated, arguments...)
-	return err
-}
-
-func (m *Manager) gitOutput(ctx context.Context, cwd, home string, authenticated bool, arguments ...string) (string, error) {
-	return m.runGit(ctx, cwd, home, authenticated, arguments...)
 }
 
 func (m *Manager) runGit(ctx context.Context, cwd, home string, authenticated bool, arguments ...string) (string, error) {
@@ -302,7 +292,7 @@ func processGroupExists(pid int) bool {
 }
 
 func (m *Manager) validateGitConfiguration(ctx context.Context, cwd, home, repositoryDirectory string) error {
-	output, err := m.gitOutput(ctx, cwd, home, false, "-C", repositoryDirectory, "config", "--local", "--null", "--list")
+	output, err := m.runGit(ctx, cwd, home, false, "-C", repositoryDirectory, "config", "--local", "--null", "--list")
 	if err != nil {
 		return err
 	}

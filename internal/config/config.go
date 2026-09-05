@@ -120,7 +120,7 @@ func validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.GitLab.BaseURL) == "" {
 		return errors.New("gitlab.base_url is required")
 	}
-	canonicalBaseURL, err := canonicalGitLabURL(cfg.GitLab.BaseURL)
+	canonicalBaseURL, err := canonicalHTTPBaseURL(cfg.GitLab.BaseURL, "gitlab.base_url")
 	if err != nil {
 		return err
 	}
@@ -183,10 +183,6 @@ func validateListenAddress(address string) error {
 		return errors.New("listen_address has an invalid port")
 	}
 	return nil
-}
-
-func canonicalGitLabURL(raw string) (string, error) {
-	return canonicalHTTPBaseURL(raw, "gitlab.base_url")
 }
 
 func canonicalHTTPBaseURL(raw, field string) (string, error) {

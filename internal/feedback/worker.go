@@ -52,7 +52,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		job, err := w.claim(ctx)
+		job, err := w.store.ClaimFeedbackJob(ctx, w.now().UTC())
 		if err != nil {
 			w.logger.Error("feedback job claim failed", "reason", "persistence_failed")
 			if !wait(ctx, pollInterval) {
@@ -78,16 +78,12 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
-	job, err := w.claim(ctx)
+	job, err := w.store.ClaimFeedbackJob(ctx, w.now().UTC())
 	if err != nil || job == nil {
 		return false, err
 	}
 	w.logger.Info("feedback job started", logFields(job)...)
 	return true, w.processClaimed(ctx, job)
-}
-
-func (w *Worker) claim(ctx context.Context) (*store.FeedbackJob, error) {
-	return w.store.ClaimFeedbackJob(ctx, w.now().UTC())
 }
 
 func (w *Worker) processClaimed(ctx context.Context, job *store.FeedbackJob) error {

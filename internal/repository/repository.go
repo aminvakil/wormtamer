@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +43,6 @@ type PreparedRepository struct {
 
 type ReviewContext struct {
 	WorkingDirectory    string
-	ReviewedHead        string
 	RelatedRepositories []PreparedRepository
 	MemoryPath          string
 }
@@ -82,7 +82,6 @@ type Manager struct {
 
 	mu     sync.Mutex
 	closed bool
-	open   map[string]struct{}
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -134,14 +133,13 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	return &Manager{
 		root: root, stagingRoot: stagingRoot, baseURL: config.GitLabBaseURL,
 		token: config.PersonalAccessToken, toolUID: config.ToolUID, toolGID: config.ToolGID,
-		executable: config.Executable, setupTimeout: config.SetupTimeout, open: make(map[string]struct{}),
+		executable: config.Executable, setupTimeout: config.SetupTimeout,
 	}, nil
 }
 
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	m.closed = true
-	m.open = make(map[string]struct{})
 	m.mu.Unlock()
 	if err := cleanDirectory(m.root); err != nil {
 		return fmt.Errorf("clean repository workspace root: %w", err)
@@ -163,7 +161,6 @@ func cleanDirectory(root string) error {
 }
 
 type localWorkspace struct {
-	manager    *Manager
 	root       string
 	cwd        string
 	context    ReviewContext
@@ -202,22 +199,13 @@ func (w *localWorkspace) Close() error {
 		if err := os.RemoveAll(w.root); err != nil {
 			w.closeErr = fmt.Errorf("remove review workspace: %w", err)
 		}
-		if w.manager != nil {
-			w.manager.mu.Lock()
-			delete(w.manager.open, w.root)
-			w.manager.mu.Unlock()
-		}
 	})
 	return w.closeErr
 }
 
 func onlyArguments(arguments map[string]any, allowed ...string) bool {
-	set := make(map[string]struct{}, len(allowed))
-	for _, key := range allowed {
-		set[key] = struct{}{}
-	}
 	for key := range arguments {
-		if _, ok := set[key]; !ok {
+		if !slices.Contains(allowed, key) {
 			return false
 		}
 	}

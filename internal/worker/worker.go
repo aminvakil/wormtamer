@@ -76,7 +76,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		job, err := w.claim(ctx)
+		job, err := w.store.ClaimJob(ctx, w.now().UTC())
 		if err != nil {
 			w.logger.Error("review job claim failed", "reason", "persistence_failed")
 			if !wait(ctx, pollInterval) {
@@ -127,15 +127,11 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
-	job, err := w.claim(ctx)
+	job, err := w.store.ClaimJob(ctx, w.now().UTC())
 	if err != nil || job == nil {
 		return false, err
 	}
 	return true, w.processClaimed(ctx, job)
-}
-
-func (w *Worker) claim(ctx context.Context) (*store.Job, error) {
-	return w.store.ClaimJob(ctx, w.now().UTC())
 }
 
 func (w *Worker) processClaimed(ctx context.Context, job *store.Job) error {

@@ -240,7 +240,7 @@ func readText(request readRequest, input io.Reader) readHelperResponse {
 				return oversizedReadLine(request.Path, offset)
 			}
 			return truncatedRead(offset, headTruncation{
-				content: strings.Join(selected, "\n"), lines: len(selected), truncated: true, byBytes: true,
+				content: strings.Join(selected, "\n"), lines: len(selected), byBytes: true,
 			})
 		}
 
@@ -368,18 +368,17 @@ func helperError(message string) readHelperResponse {
 type headTruncation struct {
 	content          string
 	lines            int
-	truncated        bool
 	byBytes          bool
 	firstLineExceeds bool
 }
 
 func truncateHead(content string) headTruncation {
 	lines := splitCountedLines(content)
-	if len(lines) <= MaxToolLines && len([]byte(content)) <= MaxToolBytes {
+	if len(lines) <= MaxToolLines && len(content) <= MaxToolBytes {
 		return headTruncation{content: content, lines: len(lines)}
 	}
-	if len(lines) > 0 && len([]byte(lines[0])) > MaxToolBytes {
-		return headTruncation{truncated: true, byBytes: true, firstLineExceeds: true}
+	if len(lines) > 0 && len(lines[0]) > MaxToolBytes {
+		return headTruncation{byBytes: true, firstLineExceeds: true}
 	}
 	selected := make([]string, 0, min(len(lines), MaxToolLines))
 	bytesUsed := 0
@@ -388,7 +387,7 @@ func truncateHead(content string) headTruncation {
 		if index >= MaxToolLines {
 			break
 		}
-		lineBytes := len([]byte(line))
+		lineBytes := len(line)
 		if len(selected) > 0 {
 			lineBytes++
 		}
@@ -399,7 +398,7 @@ func truncateHead(content string) headTruncation {
 		selected = append(selected, line)
 		bytesUsed += lineBytes
 	}
-	return headTruncation{content: strings.Join(selected, "\n"), lines: len(selected), truncated: true, byBytes: byBytes}
+	return headTruncation{content: strings.Join(selected, "\n"), lines: len(selected), byBytes: byBytes}
 }
 
 func splitCountedLines(content string) []string {

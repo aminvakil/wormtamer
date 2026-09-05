@@ -70,13 +70,19 @@ type GeminiReviewer struct {
 type sdkGenerator struct{ client *genai.Client }
 
 func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLevel string, forbidden []string, logger *slog.Logger) (*GeminiReviewer, error) {
+	if baseURL == "" {
+		baseURL = geminiDeveloperAPIBaseURL
+	}
 	httpClient := &http.Client{
 		Timeout:       geminiHTTPTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: apiKey, Backend: genai.BackendGeminiAPI, HTTPClient: httpClient,
-		HTTPOptions: genai.HTTPOptions{BaseURL: resolvedGeminiBaseURL(baseURL), RetryOptions: geminiRetryOptions()},
+		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, RetryOptions: &genai.HTTPRetryOptions{
+			Attempts: genai.Ptr(int32(5)), InitialDelay: genai.Ptr(1.0), MaxDelay: genai.Ptr(8.0),
+			ExpBase: genai.Ptr(2.0), Jitter: genai.Ptr(1.0), HTTPStatusCodes: []int32{408, 429, 500, 502, 503, 504},
+		}},
 	})
 	if err != nil {
 		return nil, errors.New("initialize Gemini client")
@@ -84,24 +90,6 @@ func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLeve
 	reviewer := newGeminiReviewer(&sdkGenerator{client: client}, model, forbidden, logger)
 	reviewer.thinkingLevel = thinkingLevel
 	return reviewer, nil
-}
-
-func resolvedGeminiBaseURL(configured string) string {
-	if configured == "" {
-		return geminiDeveloperAPIBaseURL
-	}
-	return configured
-}
-
-func geminiRetryOptions() *genai.HTTPRetryOptions {
-	return &genai.HTTPRetryOptions{
-		Attempts: genai.Ptr(int32(5)), InitialDelay: genai.Ptr(1.0), MaxDelay: genai.Ptr(8.0),
-		ExpBase: genai.Ptr(2.0), Jitter: genai.Ptr(1.0), HTTPStatusCodes: []int32{408, 429, 500, 502, 503, 504},
-	}
-}
-
-func NewGeminiReviewerWithGenerator(generator Generator, model string, forbidden []string) *GeminiReviewer {
-	return newGeminiReviewer(generator, model, forbidden, slog.New(slog.DiscardHandler))
 }
 
 func newGeminiReviewer(generator Generator, model string, forbidden []string, logger *slog.Logger) *GeminiReviewer {
@@ -126,14 +114,14 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 	defer cancel()
 	contents := []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)}
 	logger := r.logger.With(
-		"model", diagnosticValue(r.model, r.forbidden), "project_id", snapshot.Identity.ProjectID,
-		"merge_request_iid", snapshot.Identity.MergeRequestIID, "head_sha", diagnosticValue(snapshot.Identity.HeadSHA, r.forbidden))
+		"model", diagnostics.Redact(r.model, r.forbidden), "project_id", snapshot.Identity.ProjectID,
+		"merge_request_iid", snapshot.Identity.MergeRequestIID, "head_sha", diagnostics.Redact(snapshot.Identity.HeadSHA, r.forbidden))
 	toolBytes := 0
 	finalOnly := false
 	for turn := 0; ; turn++ {
 		if turn == 0 && logger.Enabled(reviewCtx, slog.LevelDebug) {
 			logger.DebugContext(reviewCtx, "Gemini review prompt",
-				"system_instruction", diagnosticValue(systemInstruction, r.forbidden), "prompt", diagnosticValue(prompt, r.forbidden))
+				"system_instruction", diagnostics.Redact(systemInstruction, r.forbidden), "prompt", diagnostics.Redact(prompt, r.forbidden))
 		}
 		config := generationConfig(r.thinkingLevel, !finalOnly)
 		generationCtx, generationCancel := context.WithTimeout(reviewCtx, r.generationTimeout)
@@ -232,13 +220,12 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			}
 			toolBytes += len(serialized)
 			responses = append(responses, &genai.Part{FunctionResponse: functionResponse})
-			diagnosticText := string(serializedResult)
 			logger.InfoContext(reviewCtx, "Gemini review tool completed", "turn", turn,
 				"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256), "outcome", "completed")
 			if logger.Enabled(reviewCtx, slog.LevelDebug) {
 				logger.DebugContext(reviewCtx, "Gemini review tool result", "turn", turn,
 					"tool_call_id", boundedDiagnosticValue(call.ID, r.forbidden, 256), "tool", boundedDiagnosticValue(call.Name, r.forbidden, 256),
-					"result", diagnosticValue(diagnosticText, r.forbidden))
+					"result", diagnostics.Redact(string(serializedResult), r.forbidden))
 			}
 		}
 		contents = append(contents, genai.NewContentFromParts(responses, genai.RoleUser))
@@ -303,7 +290,7 @@ func diagnosticJSON(value any, forbidden []string, limit int) string {
 }
 
 func boundedDiagnosticValue(value string, forbidden []string, limit int) string {
-	value = diagnosticValue(value, forbidden)
+	value = diagnostics.Redact(value, forbidden)
 	if len(value) <= limit {
 		return value
 	}
@@ -312,10 +299,6 @@ func boundedDiagnosticValue(value string, forbidden []string, limit int) string 
 		value = value[:len(value)-1]
 	}
 	return value + "[truncated]"
-}
-
-func diagnosticValue(value string, forbidden []string) string {
-	return diagnostics.Redact(value, forbidden)
 }
 
 func (r *GeminiReviewer) logGeneration(logger *slog.Logger, ctx context.Context, turn int, generation Generation, latency time.Duration, calls []*genai.FunctionCall, validation string) {

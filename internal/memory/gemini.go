@@ -75,6 +75,9 @@ type sdkGenerator struct {
 }
 
 func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden []string, logger *slog.Logger) (*Evaluator, error) {
+	if baseURL == "" {
+		baseURL = geminiDeveloperAPIBaseURL
+	}
 	httpClient := &http.Client{
 		Timeout: requestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -83,23 +86,12 @@ func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden 
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: apiKey, Backend: genai.BackendGeminiAPI, HTTPClient: httpClient,
-		HTTPOptions: genai.HTTPOptions{BaseURL: resolvedGeminiBaseURL(baseURL)},
+		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL},
 	})
 	if err != nil {
 		return nil, errors.New("initialize Gemini memory evaluator")
 	}
 	return newEvaluator(&sdkGenerator{client: client}, model, forbidden, logger), nil
-}
-
-func resolvedGeminiBaseURL(configured string) string {
-	if configured == "" {
-		return geminiDeveloperAPIBaseURL
-	}
-	return configured
-}
-
-func NewEvaluatorWithGenerator(generator Generator, model string, forbidden []string) *Evaluator {
-	return newEvaluator(generator, model, forbidden, slog.New(slog.DiscardHandler))
 }
 
 func newEvaluator(generator Generator, model string, forbidden []string, logger *slog.Logger) *Evaluator {
@@ -126,14 +118,14 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	logger := e.logger.With(
-		"model", diagnosticValue(e.model, e.forbidden),
+		"model", diagnostics.Redact(e.model, e.forbidden),
 		"project_id", input.ProjectID,
 		"merge_request_iid", input.MergeRequestIID,
-		"head_sha", diagnosticValue(input.HeadSHA, e.forbidden))
+		"head_sha", diagnostics.Redact(input.HeadSHA, e.forbidden))
 	if logger.Enabled(requestCtx, slog.LevelDebug) {
 		logger.DebugContext(requestCtx, "Gemini feedback prompt",
-			"system_instruction", diagnosticValue(systemInstruction, e.forbidden),
-			"prompt", diagnosticValue(prompt, e.forbidden))
+			"system_instruction", diagnostics.Redact(systemInstruction, e.forbidden),
+			"prompt", diagnostics.Redact(prompt, e.forbidden))
 	}
 	requestContents := []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)}
 	requestConfig := generationConfig()
@@ -156,10 +148,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Result, error) {
 		logger.DebugContext(requestCtx, "Gemini feedback response", "response", result)
 	}
 	return result, nil
-}
-
-func diagnosticValue(value string, forbidden []string) string {
-	return diagnostics.Redact(value, forbidden)
 }
 
 func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (review.Generation, error) {

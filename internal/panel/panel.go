@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -110,7 +111,6 @@ type reviewsPage struct {
 	Page       string
 	Title      string
 	Records    []reviewView
-	State      string
 	NextURL    string
 	StateLinks []filterLink
 }
@@ -128,7 +128,6 @@ type feedbackPage struct {
 	Page       string
 	Title      string
 	Records    []feedbackView
-	State      string
 	NextURL    string
 	StateLinks []filterLink
 }
@@ -166,15 +165,12 @@ func New(storage Store, config Config, logger *slog.Logger) (*Handler, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	templates, err := template.New("panel").Funcs(template.FuncMap{
-		"formatTime":                formatTime,
-		"formatOptionalTime":        formatOptionalTime,
-		"formatCompactTime":         formatCompactTime,
-		"formatCompactOptionalTime": formatCompactOptionalTime,
-		"timeAttribute":             timeAttribute,
-		"optionalTimeAttribute":     optionalTimeAttribute,
-		"sourceLabel":               sourceLabel,
-		"patchStatusLabel":          patchStatusLabel,
-		"shortSHA":                  shortSHA,
+		"formatTime":        formatTime,
+		"formatCompactTime": formatCompactTime,
+		"timeAttribute":     timeAttribute,
+		"sourceLabel":       sourceLabel,
+		"patchStatusLabel":  patchStatusLabel,
+		"shortSHA":          shortSHA,
 	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse panel templates: %w", err)
@@ -218,8 +214,8 @@ func (h *Handler) overview(w http.ResponseWriter, request *http.Request) {
 	page := overviewPage{
 		Page: "overview", Title: "Overview · Wormtamer", Config: h.config,
 		Metrics:        overviewMetrics(dashboard),
-		ReviewStates:   reviewStateViews(dashboard.ReviewCounts),
-		FeedbackStates: feedbackStateViews(dashboard.FeedbackCounts),
+		ReviewStates:   orderedStateViews(dashboard.ReviewCounts, reviewStates(), "/reviews"),
+		FeedbackStates: orderedStateViews(dashboard.FeedbackCounts, feedbackStates(), "/feedback"),
 		OldestReview:   dashboard.OldestQueuedReview,
 		OldestFeedback: dashboard.OldestQueuedFeedback,
 		RecentReviews:  h.reviewViews(dashboard.RecentReviews),
@@ -241,11 +237,11 @@ func (h *Handler) reviews(w http.ResponseWriter, request *http.Request) {
 	}
 	page := reviewsPage{
 		Page: "reviews", Title: "Reviews · Wormtamer",
-		Records: h.reviewViews(pageRecords.Records), State: state,
+		Records:    h.reviewViews(pageRecords.Records),
 		StateLinks: stateLinks("/reviews", state, reviewStates()),
 	}
 	if pageRecords.NextBefore > 0 {
-		page.NextURL = listURL("/reviews", state, pageRecords.NextBefore, "state")
+		page.NextURL = listURL("/reviews", state, pageRecords.NextBefore)
 	}
 	h.render(w, "reviews", page)
 }
@@ -294,11 +290,11 @@ func (h *Handler) feedback(w http.ResponseWriter, request *http.Request) {
 	}
 	page := feedbackPage{
 		Page: "feedback", Title: "Feedback · Wormtamer",
-		Records: h.feedbackViews(pageRecords.Records), State: state,
+		Records:    h.feedbackViews(pageRecords.Records),
 		StateLinks: stateLinks("/feedback", state, feedbackStates()),
 	}
 	if pageRecords.NextBefore > 0 {
-		page.NextURL = listURL("/feedback", state, pageRecords.NextBefore, "state")
+		page.NextURL = listURL("/feedback", state, pageRecords.NextBefore)
 	}
 	h.render(w, "feedback", page)
 }
@@ -346,13 +342,12 @@ func (h *Handler) memory(w http.ResponseWriter, request *http.Request) {
 		Records: h.memoryViews(pageRecords.Records),
 	}
 	if pageRecords.NextBefore > 0 {
-		page.NextURL = listURL("/memory", "", pageRecords.NextBefore, "")
+		page.NextURL = listURL("/memory", "", pageRecords.NextBefore)
 	}
 	h.render(w, "memory", page)
 }
 
 func (h *Handler) stylesheet(w http.ResponseWriter, _ *http.Request) {
-	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(h.css)
@@ -365,9 +360,7 @@ func (h *Handler) render(w http.ResponseWriter, name string, data any) {
 		h.writeError(w, http.StatusInternalServerError)
 		return
 	}
-	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
 	_, _ = output.WriteTo(w)
 }
 
@@ -381,9 +374,6 @@ func (h *Handler) internalError(w http.ResponseWriter, page string) {
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, status int) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, http.StatusText(status), status)
 }
 
@@ -414,19 +404,8 @@ func panelConfig(config Config) configView {
 	return view
 }
 
-func reviewStateViews(counts []store.StateCount) []stateView {
-	return orderedStateViews(counts, reviewStates(), "/reviews")
-}
-
-func feedbackStateViews(counts []store.StateCount) []stateView {
-	return orderedStateViews(counts, feedbackStates(), "/feedback")
-}
-
 func orderedStateViews(counts []store.StateCount, states []string, path string) []stateView {
-	byState := make(map[string]int, len(counts))
-	for _, count := range counts {
-		byState[count.State] = count.Count
-	}
+	byState := stateCounts(counts)
 	views := make([]stateView, len(states))
 	for index, state := range states {
 		views[index] = stateView{
@@ -480,7 +459,7 @@ func parseListQuery(values url.Values, states []string) (string, int64, bool) {
 		return "", 0, false
 	}
 	state := values.Get("state")
-	if state != "" && !contains(states, state) {
+	if state != "" && !slices.Contains(states, state) {
 		return "", 0, false
 	}
 	before, ok := parseBefore(values.Get("before"))
@@ -496,20 +475,11 @@ func parseMemoryQuery(values url.Values) (int64, bool) {
 
 func onlyQueryKeys(values url.Values, allowed ...string) bool {
 	for key := range values {
-		if !contains(allowed, key) {
+		if !slices.Contains(allowed, key) {
 			return false
 		}
 	}
 	return true
-}
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func parseBefore(value string) (int64, bool) {
@@ -520,10 +490,10 @@ func parseBefore(value string) (int64, bool) {
 	return parsed, err == nil && parsed > 0
 }
 
-func listURL(path, filter string, before int64, filterName string) string {
+func listURL(path, state string, before int64) string {
 	values := url.Values{"before": {strconv.FormatInt(before, 10)}}
-	if filter != "" {
-		values.Set(filterName, filter)
+	if state != "" {
+		values.Set("state", state)
 	}
 	return path + "?" + values.Encode()
 }
@@ -602,13 +572,6 @@ func formatTime(timestamp time.Time) string {
 	return timestamp.UTC().Format("2006-01-02 15:04:05 UTC")
 }
 
-func formatOptionalTime(timestamp *time.Time) string {
-	if timestamp == nil {
-		return "—"
-	}
-	return formatTime(*timestamp)
-}
-
 func formatCompactTime(timestamp time.Time) string {
 	if timestamp.IsZero() {
 		return "—"
@@ -616,25 +579,11 @@ func formatCompactTime(timestamp time.Time) string {
 	return timestamp.UTC().Format("2006 Jan 02 · 15:04 UTC")
 }
 
-func formatCompactOptionalTime(timestamp *time.Time) string {
-	if timestamp == nil {
-		return "—"
-	}
-	return formatCompactTime(*timestamp)
-}
-
 func timeAttribute(timestamp time.Time) string {
 	if timestamp.IsZero() {
 		return ""
 	}
 	return timestamp.UTC().Format(time.RFC3339Nano)
-}
-
-func optionalTimeAttribute(timestamp *time.Time) string {
-	if timestamp == nil {
-		return ""
-	}
-	return timeAttribute(*timestamp)
 }
 
 func sourceLabel(source string) string {

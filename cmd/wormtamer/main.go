@@ -43,17 +43,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:], logger); err != nil {
+	if err := run(ctx, os.Args[1:], logger, os.Stdout); err != nil {
 		logger.Error("wormtamer stopped", "error", bounded(err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, logger *slog.Logger) error {
-	return runWithOutput(ctx, args, logger, os.Stdout)
-}
-
-func runWithOutput(ctx context.Context, args []string, logger *slog.Logger, output io.Writer) error {
+func run(ctx context.Context, args []string, logger *slog.Logger, output io.Writer) error {
 	invocation, err := parseInvocation(args)
 	if err != nil {
 		return err

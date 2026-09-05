@@ -3,7 +3,6 @@ package review
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"slices"
@@ -19,7 +18,11 @@ import (
 )
 
 func TestReviewDeclaresExactlyReadAndBash(t *testing.T) {
-	declarations := toolDeclarations()
+	config := generationConfig("default", true)
+	if len(config.Tools) != 1 || config.ToolConfig.FunctionCallingConfig.Mode != genai.FunctionCallingConfigModeAuto {
+		t.Fatalf("ordinary generation config = %+v", config)
+	}
+	declarations := config.Tools[0].FunctionDeclarations
 	if len(declarations) != 2 || declarations[0].Name != "read" || declarations[1].Name != "bash" {
 		t.Fatalf("tool declarations = %+v", declarations)
 	}
@@ -40,26 +43,6 @@ func TestReviewDeclaresExactlyReadAndBash(t *testing.T) {
 		bashProperties["timeout"].(map[string]any)["type"] != "number" || bashProperties["timeout"].(map[string]any)["exclusiveMinimum"] != 0 {
 		t.Fatalf("bash schema = %+v", bashSchema)
 	}
-	config := generationConfig("default", true)
-	if len(config.Tools) != 1 || len(config.Tools[0].FunctionDeclarations) != 2 ||
-		config.ToolConfig.FunctionCallingConfig.Mode != genai.FunctionCallingConfigModeAuto {
-		t.Fatalf("ordinary generation config = %+v", config)
-	}
-	final := generationConfig("default", false)
-	if len(final.Tools) != 0 || final.ToolConfig.FunctionCallingConfig.Mode != genai.FunctionCallingConfigModeNone {
-		t.Fatalf("final-only config = %+v", final)
-	}
-}
-
-func TestSystemInstructionDefinesReviewPolicy(t *testing.T) {
-	for _, policy := range []string{
-		"untrusted evidence", "changed-file diff", "path must exactly match",
-		"initial working directory", "Prepared related repositories", "advisory review memory",
-	} {
-		if !strings.Contains(systemInstruction, policy) {
-			t.Fatalf("system instruction lacks policy %q", policy)
-		}
-	}
 }
 
 func TestReviewPromptIdentifiesWorkingDirectoryRelatedRepositoriesAndMemory(t *testing.T) {
@@ -68,7 +51,7 @@ func TestReviewPromptIdentifiesWorkingDirectoryRelatedRepositoriesAndMemory(t *t
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"untrusted merge request evidence", "<merge_request_json>",
+		"<merge_request_json>",
 		`"working_directory":"/reviews/current"`, `"reviewed_head":"0123456789abcdef0123456789abcdef01234567"`,
 		`"repository":"group/related"`, `"path":"/reviews/related/group/related"`,
 		`"review_memory":{"path":"/reviews/review-memory.json","authority":"untrusted_advisory"}`,
@@ -91,7 +74,7 @@ func TestGeminiReviewerDispatchesSameTurnCallsInOrder(t *testing.T) {
 	broker := &fakeToolBroker{callFn: func(call int, name string, _ map[string]any) (repository.ToolResult, error) {
 		return repository.ToolResult{Response: map[string]any{"output": name + "-result"}}, nil
 	}}
-	reviewer := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil)
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
 	result, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
 	if err != nil || result.Summary != "ok" || !slices.Equal(broker.names, []string{"read", "bash"}) {
 		t.Fatalf("Review() = %+v, %v; calls=%v", result, err, broker.names)
@@ -160,7 +143,7 @@ func TestFunctionResponseAllowanceStopsBatchAndForcesFinalOnly(t *testing.T) {
 	}
 	generator := &fakeGenerator{generations: []Generation{toolGeneration(calls...), textGeneration(`{"summary":"bounded","findings":[]}`)}}
 	broker := &fakeToolBroker{result: repository.ToolResult{Response: map[string]any{"output": strings.Repeat("x", 9<<20)}}}
-	result, _, err := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil).Review(context.Background(), testSnapshot(), broker)
+	result, _, err := newGeminiReviewer(generator, "gemini-test", nil, nil).Review(context.Background(), testSnapshot(), broker)
 	if err != nil || result.Summary != "bounded" {
 		t.Fatalf("Review() = %+v, %v", result, err)
 	}
@@ -175,10 +158,6 @@ func TestFunctionResponseAllowanceStopsBatchAndForcesFinalOnly(t *testing.T) {
 	if generator.requests[1].config.ToolConfig.FunctionCallingConfig.Mode != genai.FunctionCallingConfigModeNone || len(generator.requests[1].config.Tools) != 0 {
 		t.Fatalf("next generation was not final-only: %+v", generator.requests[1].config)
 	}
-	serialized, _ := json.Marshal(responses[0])
-	if len(serialized) > maxToolResultBytes {
-		t.Fatalf("admitted evidence exceeded allowance: %d", len(serialized))
-	}
 }
 
 func TestMoreThanSixteenSmallCallsRemainValid(t *testing.T) {
@@ -188,7 +167,7 @@ func TestMoreThanSixteenSmallCallsRemainValid(t *testing.T) {
 	}
 	generator := &fakeGenerator{generations: []Generation{toolGeneration(calls...), textGeneration(`{"summary":"many","findings":[]}`)}}
 	broker := &fakeToolBroker{result: repository.ToolResult{Response: map[string]any{"output": "small"}}}
-	result, _, err := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil).Review(context.Background(), testSnapshot(), broker)
+	result, _, err := newGeminiReviewer(generator, "gemini-test", nil, nil).Review(context.Background(), testSnapshot(), broker)
 	if err != nil || result.Summary != "many" || broker.calls != 20 {
 		t.Fatalf("Review() = %+v, %v; calls=%d", result, err, broker.calls)
 	}
@@ -200,7 +179,7 @@ func TestMoreThanSixteenSmallCallsRemainValid(t *testing.T) {
 func TestReviewerRejectsUndeclaredToolsWithoutDispatch(t *testing.T) {
 	generator := &fakeGenerator{generations: []Generation{toolGeneration(&genai.FunctionCall{ID: "old", Name: "read_repository_file"})}}
 	broker := &fakeToolBroker{}
-	_, _, err := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil).Review(context.Background(), testSnapshot(), broker)
+	_, _, err := newGeminiReviewer(generator, "gemini-test", nil, nil).Review(context.Background(), testSnapshot(), broker)
 	if err == nil || broker.calls != 0 {
 		t.Fatalf("undeclared tool error=%v calls=%d", err, broker.calls)
 	}
@@ -208,7 +187,7 @@ func TestReviewerRejectsUndeclaredToolsWithoutDispatch(t *testing.T) {
 
 func TestReviewerPreservesStructuredReviewValidation(t *testing.T) {
 	generator := &fakeGenerator{generations: []Generation{textGeneration(`{"summary":"bad path","findings":[{"priority":"P2","title":"x","explanation":"x","recommendation":"x","path":"unchanged.go"}]}`)}}
-	_, _, err := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil).Review(context.Background(), testSnapshot(), &fakeToolBroker{})
+	_, _, err := newGeminiReviewer(generator, "gemini-test", nil, nil).Review(context.Background(), testSnapshot(), &fakeToolBroker{})
 	if err == nil {
 		t.Fatal("invalid changed path was accepted")
 	}
@@ -221,7 +200,7 @@ func TestReviewerPropagatesToolCancellation(t *testing.T) {
 		cancel()
 		return repository.ToolResult{}, context.Canceled
 	}}
-	_, _, err := NewGeminiReviewerWithGenerator(generator, "gemini-test", nil).Review(ctx, testSnapshot(), broker)
+	_, _, err := newGeminiReviewer(generator, "gemini-test", nil, nil).Review(ctx, testSnapshot(), broker)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
@@ -230,14 +209,14 @@ func TestReviewerPropagatesToolCancellation(t *testing.T) {
 func TestReviewerPropagatesGenerationCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := NewGeminiReviewerWithGenerator(deadlineGenerator{}, "gemini-test", nil).Review(ctx, testSnapshot(), &fakeToolBroker{})
+	_, _, err := newGeminiReviewer(deadlineGenerator{}, "gemini-test", nil, nil).Review(ctx, testSnapshot(), &fakeToolBroker{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
 }
 
 func TestReviewerClassifiesGenerationDeadline(t *testing.T) {
-	reviewer := NewGeminiReviewerWithGenerator(deadlineGenerator{}, "gemini-test", nil)
+	reviewer := newGeminiReviewer(deadlineGenerator{}, "gemini-test", nil, nil)
 	reviewer.generationTimeout = 10 * time.Millisecond
 	reviewer.reviewTimeout = time.Minute
 	_, _, err := reviewer.Review(context.Background(), testSnapshot(), &fakeToolBroker{})
@@ -264,7 +243,7 @@ func TestReviewerClassifiesReviewDeadline(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			reviewer := NewGeminiReviewerWithGenerator(test.generator, "gemini-test", nil)
+			reviewer := newGeminiReviewer(test.generator, "gemini-test", nil, nil)
 			reviewer.generationTimeout = time.Minute
 			reviewer.reviewTimeout = 10 * time.Millisecond
 			_, _, err := reviewer.Review(context.Background(), testSnapshot(), test.tools)

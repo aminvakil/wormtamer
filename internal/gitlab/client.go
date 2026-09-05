@@ -174,12 +174,11 @@ type diffResponse struct {
 }
 
 type noteResponse struct {
-	ID        int64  `json:"id"`
-	Body      string `json:"body"`
-	System    bool   `json:"system"`
-	Internal  bool   `json:"internal"`
-	UpdatedAt string `json:"updated_at"`
-	Author    struct {
+	ID       int64  `json:"id"`
+	Body     string `json:"body"`
+	System   bool   `json:"system"`
+	Internal bool   `json:"internal"`
+	Author   struct {
 		ID int64 `json:"id"`
 	} `json:"author"`
 }
@@ -222,29 +221,21 @@ func New(baseURL, token string, authorizedRepositories []string, shareAll bool, 
 }
 
 func (c *Client) ResolveProject(ctx context.Context, projectPath string) (int64, error) {
-	project, err := c.resolveProject(ctx, projectPath)
-	if err != nil {
-		return 0, err
-	}
-	return project.ID, nil
-}
-
-func (c *Client) resolveProject(ctx context.Context, projectPath string) (projectResponse, error) {
 	if _, allowed := c.authorized[projectPath]; !allowed {
-		return projectResponse{}, failure.Failed("repository_unauthorized")
+		return 0, failure.Failed("repository_unauthorized")
 	}
 	var project projectResponse
 	endpoint := "/projects/" + url.PathEscape(projectPath)
 	if _, err := c.get(ctx, endpoint, nil, metadataResponseLimit, &project); err != nil {
-		return projectResponse{}, err
+		return 0, err
 	}
 	if project.ID <= 0 || project.PathWithNamespace == "" {
-		return projectResponse{}, failure.Failed("malformed_gitlab_response")
+		return 0, failure.Failed("malformed_gitlab_response")
 	}
 	if project.PathWithNamespace != projectPath {
-		return projectResponse{}, failure.Failed("repository_unauthorized")
+		return 0, failure.Failed("repository_unauthorized")
 	}
-	return project, nil
+	return project.ID, nil
 }
 
 func (c *Client) ListOpenMergeRequests(ctx context.Context, projectID int64, page int) ([]ReconciliationMergeRequest, int, error) {
@@ -684,42 +675,6 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, lim
 }
 
 func (c *Client) request(ctx context.Context, method, endpoint string, query url.Values, body []byte, limit int64, target any) (http.Header, error) {
-	response, err := c.do(ctx, method, endpoint, query, body, "application/json")
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, failure.Retry("gitlab_response_read_failed", 0)
-	}
-	if int64(len(contents)) > limit {
-		return nil, failure.Failed("gitlab_response_limit_exceeded")
-	}
-	if err := json.Unmarshal(contents, target); err != nil {
-		return nil, failure.Failed("malformed_gitlab_response")
-	}
-	return response.Header, nil
-}
-
-func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, body []byte, accept string) (*http.Response, error) {
-	response, err := c.send(ctx, method, endpoint, query, body, accept)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		response.Body.Close()
-		return nil, failure.Failed("gitlab_redirect_rejected")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		err := c.statusError(response)
-		response.Body.Close()
-		return nil, err
-	}
-	return response, nil
-}
-
-func (c *Client) send(ctx context.Context, method, endpoint string, query url.Values, body []byte, accept string) (*http.Response, error) {
 	if err := c.waitForGate(ctx); err != nil {
 		return nil, err
 	}
@@ -742,7 +697,7 @@ func (c *Client) send(ctx context.Context, method, endpoint string, query url.Va
 		return nil, failure.Failed("gitlab_request_invalid")
 	}
 	request.Header.Set("PRIVATE-TOKEN", c.token)
-	request.Header.Set("Accept", accept)
+	request.Header.Set("Accept", "application/json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -753,7 +708,24 @@ func (c *Client) send(ctx context.Context, method, endpoint string, query url.Va
 		}
 		return nil, failure.Retry("gitlab_network_failure", 0)
 	}
-	return response, nil
+	defer response.Body.Close()
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		return nil, failure.Failed("gitlab_redirect_rejected")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, c.statusError(response)
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, failure.Retry("gitlab_response_read_failed", 0)
+	}
+	if int64(len(contents)) > limit {
+		return nil, failure.Failed("gitlab_response_limit_exceeded")
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		return nil, failure.Failed("malformed_gitlab_response")
+	}
+	return response.Header, nil
 }
 
 func (c *Client) statusError(response *http.Response) error {

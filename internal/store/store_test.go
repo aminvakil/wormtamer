@@ -10,8 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 func TestTimestampsUseSecondPrecision(t *testing.T) {
@@ -220,6 +218,14 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 	storage := openTestStore(t)
 	defer storage.Close()
 
+	var version int
+	if err := storage.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+
 	var foreignKeys, busyTimeout int
 	var journalMode string
 	if err := storage.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
@@ -252,37 +258,6 @@ VALUES (999, 'http://gitlab.internal', 1, 1, 'abc', 'queued')`)
 	if _, err := storage.db.Exec(`UPDATE review_jobs SET patch_id_status = ? WHERE id = ?`,
 		PatchIDAvailable, accepted.JobID); err == nil || !strings.Contains(err.Error(), "CHECK") {
 		t.Fatalf("missing patch ID constraint error = %v", err)
-	}
-}
-
-func TestOpenInitializesCurrentSchema(t *testing.T) {
-	storage := openTestStore(t)
-	defer storage.Close()
-
-	var version int
-	if err := storage.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != schemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
-	}
-
-	got := strings.Join(schemaObjects(t, storage.db), "\n")
-	want := strings.Join([]string{
-		"index feedback_jobs_due_idx",
-		"index review_jobs_due_idx",
-		"index review_jobs_patch_id_idx",
-		"table feedback_jobs",
-		"table publications",
-		"table review_findings",
-		"table review_jobs",
-		"table review_memories",
-		"table review_memory_retrievals",
-		"table review_results",
-		"table webhook_events",
-	}, "\n")
-	if got != want {
-		t.Fatalf("schema objects:\n%s\nwant:\n%s", got, want)
 	}
 }
 

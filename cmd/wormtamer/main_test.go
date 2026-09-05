@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -107,7 +108,7 @@ func TestRunStartsAndShutsDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, []string{"-config", configPath}, logger)
+		done <- run(ctx, []string{"-config", configPath}, logger, io.Discard)
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -146,7 +147,7 @@ func TestRunRejectsToolAccessibleConfigurationAndState(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	err = run(context.Background(), []string{"-config", configPath}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	err = run(context.Background(), []string{"-config", configPath}, slog.New(slog.NewJSONHandler(&logs, nil)), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "review-tool identity") {
 		t.Fatalf("credential boundary error = %v", err)
 	}
@@ -159,7 +160,7 @@ func TestRunFailsBeforeListeningWhenDatabaseIsUnavailable(t *testing.T) {
 	directory := t.TempDir()
 	configPath := writeConfig(t, directory, filepath.Join("missing", "wormtamer.db"))
 	var logs bytes.Buffer
-	err := run(context.Background(), []string{"-config", configPath}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	err := run(context.Background(), []string{"-config", configPath}, slog.New(slog.NewJSONHandler(&logs, nil)), io.Discard)
 	if err == nil {
 		t.Fatal("run() error = nil")
 	}
@@ -213,7 +214,7 @@ func TestJobsCommandsDoNotStartServiceOrExposePrivateState(t *testing.T) {
 	var output bytes.Buffer
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	if err := runWithOutput(context.Background(), []string{"-config", configPath, "jobs", "list-failed"}, logger, &output); err != nil {
+	if err := run(context.Background(), []string{"-config", configPath, "jobs", "list-failed"}, logger, &output); err != nil {
 		t.Fatalf("list-failed error = %v", err)
 	}
 	var listed struct {
@@ -250,14 +251,14 @@ func TestJobsCommandsDoNotStartServiceOrExposePrivateState(t *testing.T) {
 
 	output.Reset()
 	jobID := strconv.FormatInt(created.JobID, 10)
-	if err := runWithOutput(context.Background(), []string{"-config", configPath, "jobs", "retry", "review", jobID}, logger, &output); err != nil {
+	if err := run(context.Background(), []string{"-config", configPath, "jobs", "retry", "review", jobID}, logger, &output); err != nil {
 		t.Fatalf("retry error = %v", err)
 	}
 	wantRetry := `{"kind":"review","job_id":` + jobID + `,"retried":true}`
 	if strings.TrimSpace(output.String()) != wantRetry {
 		t.Fatalf("retry output = %s", output.String())
 	}
-	err = runWithOutput(context.Background(), []string{"-config", configPath, "jobs", "retry", "review", jobID}, logger, &output)
+	err = run(context.Background(), []string{"-config", configPath, "jobs", "retry", "review", jobID}, logger, &output)
 	if !errors.Is(err, store.ErrJobNotFailed) {
 		t.Fatalf("repeated retry error = %v", err)
 	}
@@ -267,8 +268,8 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
 	t.Helper()
 	contents := `{
   "listen_address": "127.0.0.1:0",
-  "database_path": ` + quote(databasePath) + `,
-  "review_workspace_path": ` + quote(filepath.Join(filepath.Dir(directory), "reviews-"+filepath.Base(directory))) + `,
+  "database_path": ` + strconv.Quote(databasePath) + `,
+  "review_workspace_path": ` + strconv.Quote(filepath.Join(filepath.Dir(directory), "reviews-"+filepath.Base(directory))) + `,
   "gitlab": {
     "base_url": "http://gitlab.internal",
     "webhook_secret": "secret",
@@ -286,10 +287,6 @@ func writeConfig(t *testing.T, directory, databasePath string) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-func quote(value string) string {
-	return `"` + strings.ReplaceAll(value, `\`, `\\`) + `"`
 }
 
 type syncBuffer struct {

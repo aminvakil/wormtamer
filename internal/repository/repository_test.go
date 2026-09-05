@@ -319,14 +319,8 @@ func TestManagerPreparesGitRepositoriesAndMemory(t *testing.T) {
 }
 
 func TestManagerSetupDeadlineRemovesPrivateStagingAndExposesNothing(t *testing.T) {
-	started := make(chan struct{})
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		select {
-		case <-started:
-		default:
-			close(started)
-		}
 		<-release
 	}))
 	root := filepath.Join(t.TempDir(), "reviews")

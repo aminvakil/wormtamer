@@ -18,13 +18,6 @@ import (
 	"google.golang.org/genai"
 )
 
-func TestEvaluatorPinsDeveloperAPIBaseURL(t *testing.T) {
-	t.Setenv("GOOGLE_GEMINI_BASE_URL", "https://ambient-endpoint.invalid")
-	if got := resolvedGeminiBaseURL(""); got != geminiDeveloperAPIBaseURL {
-		t.Fatalf("resolvedGeminiBaseURL(\"\") = %q, want %q", got, geminiDeveloperAPIBaseURL)
-	}
-}
-
 func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
 	var gotPath, gotAPIKey string
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -47,7 +40,7 @@ func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
 
 func TestEvaluatorSynthesizesOneBoundedLesson(t *testing.T) {
 	generator := &fakeGenerator{output: `{"create_memory":true,"lesson":"Generated files are changed through their source generator."}`}
-	evaluator := NewEvaluatorWithGenerator(generator, "gemini-test", []string{"configured-secret"})
+	evaluator := newEvaluator(generator, "gemini-test", []string{"configured-secret"}, nil)
 	result, err := evaluator.Evaluate(context.Background(), testInput())
 	if err != nil || !result.CreateMemory || result.Lesson == "" {
 		t.Fatalf("Evaluate() = %+v, %v", result, err)
@@ -64,7 +57,7 @@ func TestEvaluatorSynthesizesOneBoundedLesson(t *testing.T) {
 
 func TestEvaluatorModelContract(t *testing.T) {
 	generator := &fakeGenerator{output: `{"create_memory":false,"lesson":""}`}
-	evaluator := NewEvaluatorWithGenerator(generator, "gemini-test", nil)
+	evaluator := newEvaluator(generator, "gemini-test", nil, nil)
 	if _, err := evaluator.Evaluate(context.Background(), testInput()); err != nil {
 		t.Fatal(err)
 	}
@@ -84,14 +77,14 @@ func TestEvaluatorRejectsInvalidOrSensitiveEvidenceAndOutput(t *testing.T) {
 		`{"create_memory":true,"lesson":"configured-secret"}`,
 		`{"create_memory":false,"lesson":"","extra":true}`,
 	} {
-		evaluator := NewEvaluatorWithGenerator(&fakeGenerator{output: output}, "gemini-test", []string{"configured-secret"})
+		evaluator := newEvaluator(&fakeGenerator{output: output}, "gemini-test", []string{"configured-secret"}, nil)
 		if _, err := evaluator.Evaluate(context.Background(), testInput()); failureCategory(err) != "invalid_feedback_model_output" {
 			t.Fatalf("output %s error = %v", output, err)
 		}
 	}
 	input := testInput()
 	input.Comments[0].Body = "configured-secret"
-	evaluator := NewEvaluatorWithGenerator(&fakeGenerator{output: `{"create_memory":false,"lesson":""}`}, "gemini-test", []string{"configured-secret"})
+	evaluator := newEvaluator(&fakeGenerator{output: `{"create_memory":false,"lesson":""}`}, "gemini-test", []string{"configured-secret"}, nil)
 	if _, err := evaluator.Evaluate(context.Background(), input); failureCategory(err) != "sensitive_feedback_input" {
 		t.Fatalf("sensitive input error = %v", err)
 	}
@@ -179,11 +172,7 @@ func (g *fakeGenerator) Generate(_ context.Context, _ string, contents []*genai.
 	if len(contents) == 1 && len(contents[0].Parts) == 1 {
 		g.prompt = contents[0].Parts[0].Text
 	}
-	generation := review.Generation{Content: genai.NewContentFromText(g.output, genai.RoleModel)}
-	if generation.FinishReason == "" {
-		generation.FinishReason = genai.FinishReasonStop
-	}
-	return generation, nil
+	return review.Generation{Content: genai.NewContentFromText(g.output, genai.RoleModel), FinishReason: genai.FinishReasonStop}, nil
 }
 
 func failureCategory(err error) string {

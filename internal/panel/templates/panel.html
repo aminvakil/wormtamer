@@ -58,7 +58,7 @@
       </div>
       <div class="record-updated">
         <span class="cell-label">Updated</span>
-        {{if .Record.UpdatedAt}}<time datetime="{{optionalTimeAttribute .Record.UpdatedAt}}">{{formatCompactOptionalTime .Record.UpdatedAt}}</time>{{else}}<time datetime="{{timeAttribute .Record.CreatedAt}}">{{formatCompactTime .Record.CreatedAt}}</time><span class="record-subtle">Created</span>{{end}}
+        {{if .Record.UpdatedAt}}<time datetime="{{timeAttribute .Record.UpdatedAt}}">{{formatCompactTime .Record.UpdatedAt}}</time>{{else}}<time datetime="{{timeAttribute .Record.CreatedAt}}">{{formatCompactTime .Record.CreatedAt}}</time><span class="record-subtle">Created</span>{{end}}
       </div>
     </article>
   </li>{{else}}<li class="empty-state"><strong>No reviews match this view.</strong><span>New durable review jobs will appear here.</span></li>{{end}}
@@ -104,11 +104,11 @@
 </section>
 
 <section class="workflow-section" aria-labelledby="review-jobs-heading">
-  <div class="section-heading"><div><p class="section-index">01 / REVIEWS</p><h2 id="review-jobs-heading">Review jobs</h2></div><span>{{if .OldestReview}}Oldest queued <time datetime="{{optionalTimeAttribute .OldestReview}}">{{formatCompactOptionalTime .OldestReview}}</time>{{else}}No queued reviews{{end}}</span></div>
+  <div class="section-heading"><div><p class="section-index">01 / REVIEWS</p><h2 id="review-jobs-heading">Review jobs</h2></div><span>{{if .OldestReview}}Oldest queued <time datetime="{{timeAttribute .OldestReview}}">{{formatCompactTime .OldestReview}}</time>{{else}}No queued reviews{{end}}</span></div>
   {{template "state-rail" .ReviewStates}}
 </section>
 <section class="workflow-section" aria-labelledby="feedback-jobs-heading">
-  <div class="section-heading"><div><p class="section-index">02 / MEMORY</p><h2 id="feedback-jobs-heading">Memory synthesis jobs</h2></div><span>{{if .OldestFeedback}}Oldest queued <time datetime="{{optionalTimeAttribute .OldestFeedback}}">{{formatCompactOptionalTime .OldestFeedback}}</time>{{else}}No queued synthesis{{end}}</span></div>
+  <div class="section-heading"><div><p class="section-index">02 / MEMORY</p><h2 id="feedback-jobs-heading">Memory synthesis jobs</h2></div><span>{{if .OldestFeedback}}Oldest queued <time datetime="{{timeAttribute .OldestFeedback}}">{{formatCompactTime .OldestFeedback}}</time>{{else}}No queued synthesis{{end}}</span></div>
   {{template "state-rail" .FeedbackStates}}
 </section>
 
@@ -160,7 +160,7 @@
       <dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd><dt>Discovered by</dt><dd>{{sourceLabel .Detail.Source}}</dd><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd class="attempt-count" data-retried="{{if gt .Detail.AttemptCount 1}}true{{else}}false{{end}}">{{.Detail.AttemptCount}}</dd><dt>Patch identity</dt><dd>{{patchStatusLabel .Detail.PatchIDStatus}}{{if eq .Detail.PatchIDStatus "available"}}<br><code>{{.Detail.PatchIDSHA}}</code>{{end}}</dd>
     </dl></article>
     <article class="panel-card"><h3>Publication</h3>{{if .Detail.Equivalent}}<p>Owned by canonical <a href="/reviews/{{.Detail.EquivalentToJobID}}">review #{{.Detail.EquivalentToJobID}}</a>.</p>{{else if .Detail.Published}}<p>Published as GitLab note #{{.Detail.GitLabNoteID}}.</p>{{if .PublicationURL}}<p><a href="{{.PublicationURL}}">Open published note</a></p>{{end}}{{else}}<p class="muted">No durable publication record.</p>{{end}}</article>
-    <article class="panel-card"><h3>Timeline</h3><dl><dt>Created</dt><dd><time datetime="{{timeAttribute .Detail.CreatedAt}}">{{formatTime .Detail.CreatedAt}}</time></dd><dt>Started</dt><dd>{{if .Detail.StartedAt}}<time datetime="{{optionalTimeAttribute .Detail.StartedAt}}">{{formatOptionalTime .Detail.StartedAt}}</time>{{else}}—{{end}}</dd><dt>Updated</dt><dd>{{if .Detail.UpdatedAt}}<time datetime="{{optionalTimeAttribute .Detail.UpdatedAt}}">{{formatOptionalTime .Detail.UpdatedAt}}</time>{{else}}—{{end}}</dd></dl></article>
+    <article class="panel-card"><h3>Timeline</h3><dl><dt>Created</dt><dd><time datetime="{{timeAttribute .Detail.CreatedAt}}">{{formatTime .Detail.CreatedAt}}</time></dd><dt>Started</dt><dd>{{if .Detail.StartedAt}}<time datetime="{{timeAttribute .Detail.StartedAt}}">{{formatTime .Detail.StartedAt}}</time>{{else}}—{{end}}</dd><dt>Updated</dt><dd>{{if .Detail.UpdatedAt}}<time datetime="{{timeAttribute .Detail.UpdatedAt}}">{{formatTime .Detail.UpdatedAt}}</time>{{else}}—{{end}}</dd></dl></article>
     {{if .Detail.LastErrorCategory}}<article class="panel-card failure-card"><h3>Failure</h3><code>{{.Detail.LastErrorCategory}}</code></article>{{end}}
   </div>
 </section>
