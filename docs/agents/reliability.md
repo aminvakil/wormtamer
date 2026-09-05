@@ -44,6 +44,39 @@ Persist the initial deadline in `next_attempt_at` with job insertion, rounding p
 
 A newly observed head receives its own full delay. At execution, fresh GitLab validation rejects an old head or a no-longer-open MR before repository preparation or Gemini. Superseded jobs remain visible as queued until this validation marks them obsolete; webhook arrival order alone must not cancel another identity because deliveries and reconciliation observations can be stale. For heads first observed at 0s and 20s with a one-minute grace period, the first is checked and discarded at or after 60s, and the second cannot be reviewed before 80s. Already-running reviews are not interrupted by new arrivals and retain the current-head checks before publication.
 
+## Wait for CI
+
+The deployment-wide `wait_on_ci` boolean defaults to `false` when omitted. Explicit null and non-boolean values fail startup. Disabled installations make no CI eligibility requests.
+
+When enabled, check CI after the persisted grace or retry deadline and before starting new repository or model work. Each check first validates the authorized project and confirms that the MR remains open at the job's exact head. A closed/merged MR or superseded head makes the job obsolete before evaluating CI. Then evaluate GitLab's selected current-revision MR pipeline:
+
+| Observation | Outcome |
+| --- | --- |
+| Explicitly confirmed no selected pipeline | Proceed |
+| Aggregate pipeline status `success` | Proceed |
+| `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `failed`, `canceling`, `canceled`, `skipped`, `manual`, `scheduled`, or `waiting_for_callback` | Wait |
+| Request failure, malformed metadata, unknown status, or unresolved association | Normal bounded error handling; never infer success or absence |
+
+A successful non-green observation keeps the job queued, records CI waiting and the last validated status, and sets `next_attempt_at` to one minute after the observation, rounded up to whole seconds. Release the worker immediately; other due reviews remain eligible. Waiting has no expiry or eventual bypass, consumes no review attempts, and preserves earlier failure counts and categories. Actual API or infrastructure errors still consume the finite review-attempt budget, including errors interleaved with successful waits. A crash or cancellation during uncharged preflight leaves queued work recoverable without consuming the last attempt.
+
+Waiting metadata and deadlines survive restart. Duplicate events and scans do not reset schedules or review identity. Refresh pipeline selection on each check so a successful retry or replacement on the same head unblocks its existing job without another grace period. Rechecks may be later because of worker load or GitLab backpressure. Apply the current deployment's `wait_on_ci` on subsequent due checks without resetting existing grace or retry deadlines. Terminal jobs stop polling. The read-only panel shows “Waiting for CI”, the persisted last status, and the next check deadline rather than presenting non-green CI as a review failure; rendering makes no GitLab requests.
+
+CI is only a start condition. Locally saved results and exact-head external-marker recovery bypass CI waiting, and patch-equivalence suppression remains in effect after eligibility. Do not interrupt already-running reviews, regenerate completed results after CI changes, or reapply the gate to publication recovery. Current-head publication checks remain mandatory.
+
+The no-pipeline exception intentionally accepts the pipeline-creation race: grace reduces but cannot eliminate a pipeline appearing after work begins. Do not inspect CI files, traverse jobs, or independently implement allowed-failure or optional-job rules.
+
+### Pipeline Association
+
+Use the single-MR REST response's explicitly present `head_pipeline`, not the legacy `pipeline` field, a project-wide latest pipeline, or a history scan. An explicit null confirms no selected pipeline. An omitted field is malformed/inaccessible metadata, not absence. Validate positive pipeline and project IDs and a well-formed pipeline SHA. For branch-backed or detached MR pipelines, that SHA must match the exact job head.
+
+A merged-results pipeline may run on a generated commit. When the pipeline SHA differs from the source head, query the same MR's GraphQL `headPipeline` and require matching project ID, MR ID, current diff head, pipeline ID, and pipeline SHA, with an open MR and no GraphQL errors. GitLab resolves this field through its source-SHA-aware current-head association. Null or inconsistent pipeline confirmation retries under `merge_request_pipeline_identity_unresolved`; it never confirms absence or lets an old successful pipeline unlock review. Both API paths share the broker's request deadlines, metadata response limit, redirect rejection, rate-limit gate, and sanitized HTTP errors.
+
+Association evidence from GitLab 17.5.5:
+
+- The [REST MR entity](https://gitlab.com/gitlab-org/gitlab/-/blob/v17.5.5-ee/lib/api/entities/merge_request.rb) exposes the raw `head_pipeline` association only with `read_pipeline` permission. The [REST pipeline entity](https://gitlab.com/gitlab-org/gitlab/-/blob/v17.5.5-ee/lib/api/entities/ci/pipeline_basic.rb) does not expose `source_sha`.
+- [GraphQL `headPipeline`](https://gitlab.com/gitlab-org/gitlab/-/blob/v17.5.5-ee/app/graphql/types/merge_request_type.rb) resolves `diff_head_pipeline`. The [MR model](https://gitlab.com/gitlab-org/gitlab/-/blob/v17.5.5-ee/app/models/merge_request.rb) returns that association only when `matches_sha_or_source_sha?(diff_head_sha)` holds; the [pipeline model](https://gitlab.com/gitlab-org/gitlab/-/blob/v17.5.5-ee/app/models/ci/pipeline.rb) checks the pipeline commit or its source commit. This supports generated merged-results commits without guessing from refs or commit parents.
+- GitLab's `find_diff_head_pipeline` selects MR-associated pipelines matching SHA or source SHA. Its [finder](https://gitlab.com/gitlab-org/gitlab/-/blob/v17.5.5-ee/app/finders/ci/pipelines_for_merge_request_finder.rb) includes branch-backed pipelines, prioritizes MR-event pipelines, and orders newest IDs first within that priority. Wormtamer follows GitLab's selection rather than independently aggregating historical, child, or downstream pipelines.
+
 ## Patch Equivalence
 
 For a job without a result or exact existing-head publication, load bounded GitLab diff-version metadata with the review snapshot. Accept a lowercased 40- or 64-character hexadecimal `patch_id_sha` only from a finalized version whose merge request and head SHA match the claimed identity. A matching `collected` version with a null patch ID, or the absence of a matching current version, is pending. Defer the first pending observation once under `merge_request_patch_id_pending` only when at least three later claims remain for normal review and publication. Persist that pending checkpoint with the retry. A repeated pending observation, insufficient retry reserve, or a terminal version without a patch ID proceeds through normal review with an explicit unavailable outcome. Unknown states, malformed values, identity mismatches, and GitLab request failures retain their ordinary failure handling.
@@ -78,9 +111,9 @@ unrecoverable or exhausted retries -> failed
 
 At service startup, before workers begin, one transaction recovers interrupted `running` review and feedback jobs. Jobs with claims remaining return to `queued` and become immediately due; jobs whose fifth claim was interrupted become `failed` with `attempts_exhausted`. Completed, failed, obsolete, and already queued jobs are unchanged. Recovery does not consume another claim.
 
-Each worker atomically claims one due queued job, moves it to `running`, and increments its attempt count. With the supported one-process, one-replica deployment, no other process may claim running work. Result checkpoints, publication completion, retries, and terminal transitions require the expected job identity and `running` state. A validated review result remains in `running`; if the process stops afterward, startup recovery requeues it and the next claim resumes publication without repository preparation or another Gemini review. A running review without a result retains marker-first external recovery. If failure handling cannot durably transition a claimed job, the worker returns an error and stops the service so startup recovery can handle the remaining `running` job; it does not log and continue polling.
+The review worker selects a due queued identity for uncharged marker lookup and optional [CI eligibility](#wait-for-ci), without holding a SQLite transaction across HTTP requests. Only admitted work or a real preflight error conditionally claims that same still-due identity; it must not claim a different job using the first job's eligibility decision. The feedback worker claims due work directly. Each claim atomically moves its job to `running` and increments its attempt count. With the supported one-process, one-replica deployment, no other process may claim running work. Result checkpoints, publication completion, retries, and terminal transitions require the expected job identity and `running` state. A validated review result remains in `running`; if the process stops afterward, startup recovery requeues it and the next claim resumes publication without repository preparation or another Gemini review. A review without a result retains marker-first external recovery on its next preflight. If failure handling cannot durably transition a claimed job, the worker returns an error and stops the service so startup recovery can handle the remaining `running` job; it does not log and continue polling.
 
-Graceful shutdown stops new claims and gives active work a bounded opportunity to finish. Cancellation-interrupted work remains `running` for the next startup recovery; there is no in-process timeout claimant.
+Graceful shutdown stops new claims and gives active work a bounded opportunity to finish. Cancellation-interrupted charged work remains `running` for the next startup recovery; uncharged review preflight remains queued. There is no in-process timeout claimant.
 
 Restart the review rather than persisting an arbitrary model conversation. Persist checkpoints around external effects.
 
@@ -102,9 +135,9 @@ GitLab publication and its local record cannot be committed atomically. The curr
 <!-- wormtamer:review=<review-identity-hash> -->
 ```
 
-For a claimed job without a locally validated result, search the newest notes before loading review evidence or invoking Gemini, examining at most 1,000 notes across ten pages for the exact marker on a note authored by the PAT's authenticated GitLab user. Fail closed if absence cannot be established. When a matching note exists, confirm that the merge request remains open at the exact head SHA, then atomically store its marker and GitLab note ID and complete the job without fabricating or regenerating a structured result. This external-only recovery suppresses duplicate model work and publication but remains ineligible for feedback evaluation.
+For a selected due job without a locally validated result, search the newest notes before claiming work, checking CI, loading review evidence, or invoking Gemini, examining at most 1,000 notes across ten pages for the exact marker on a note authored by the PAT's authenticated GitLab user. Fail closed if absence cannot be established. When a matching note exists, claim that same job and confirm that the merge request remains open at the exact head SHA, then atomically store its marker and GitLab note ID and complete the job without fabricating or regenerating a structured result. This external-only recovery suppresses duplicate model work and publication but remains ineligible for feedback evaluation.
 
-When no matching note exists, load review evidence and first apply patch equivalence. An equivalent head creates no marker or note of its own and does not edit the canonical publication. Otherwise perform the review normally. Before posting, search again to cover an existing publication or a lost response, and reconcile GitLab and SQLite before creating another note. After posting, store the marker and GitLab note ID. Limit the rendered note to 64 KiB and complete a direct job only after the marked note exists and its publication record is durable. Future separate finding discussions require their own stable finding identities.
+When no matching note exists, apply optional CI eligibility, claim the same job, then load review evidence and apply patch equivalence. An equivalent head creates no marker or note of its own and does not edit the canonical publication. Otherwise perform the review normally. Before posting, search again to cover an existing publication or a lost response, and reconcile GitLab and SQLite before creating another note. After posting, store the marker and GitLab note ID. Limit the rendered note to 64 KiB and complete a direct job only after the marked note exists and its publication record is durable. Future separate finding discussions require their own stable finding identities.
 
 ## Reconciliation
 
@@ -120,7 +153,7 @@ SQLite stores the locally validated structured review result before publication 
 
 - Durable merge request webhook events and processing status
 - Terminal merge request events and one immutable feedback job per eligible merge request, without diff or comment bodies
-- Review and feedback job state, attempts, scheduling, and errors
+- Review and feedback job state, attempts, scheduling, and errors; review CI waiting and its last validated bounded status
 - Review patch-ID status and value, plus an equivalent job's canonical job relationship
 - Publication markers and GitLab object IDs; a publication may lack a local review result only when recovered from an existing exact marker before generation, while an equivalent job has neither a result nor publication of its own
 - Application-owned finding identifiers and their ordered positions under validated review results

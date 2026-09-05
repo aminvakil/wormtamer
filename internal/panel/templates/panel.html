@@ -33,6 +33,8 @@
   </a>{{end}}
 </div>{{end}}
 
+{{define "review-status"}}<span class="status" data-state="{{.State}}">{{if .WaitingOnCI}}Waiting for CI{{else}}{{.State}}{{end}}</span>{{end}}
+
 {{define "review-records"}}<div class="record-collection review-records">
   <div class="record-head review-grid" aria-hidden="true"><span>Review / project</span><span>Outcome</span><span>Findings</span><span>Attempts</span><span>Updated</span></div>
   <ol class="record-list">
@@ -45,10 +47,11 @@
       </div>
       <div class="record-outcome">
         <span class="cell-label">Outcome</span>
-        <span class="status" data-state="{{.Record.State}}">{{.Record.State}}</span>
+        {{template "review-status" .Record}}
+        {{if .Record.WaitingOnCI}}<span>Last CI status: <code>{{.Record.CIStatus}}</code></span>{{end}}
         {{if .Record.Equivalent}}<span>Equivalent to <a href="/reviews/{{.Record.EquivalentToJobID}}">review #{{.Record.EquivalentToJobID}}</a></span>{{else if .Record.Published}}<span>Published{{if .Record.ExternalOnly}} · external-only{{end}}</span>{{else}}<span class="muted">Not published</span>{{end}}
         <span class="record-subtle">{{patchStatusLabel .Record.PatchIDStatus}}</span>
-        {{if .Record.LastErrorCategory}}<code class="failure-category">{{.Record.LastErrorCategory}}</code>{{end}}
+        {{if and .Record.LastErrorCategory (not .Record.WaitingOnCI)}}<code class="failure-category">{{.Record.LastErrorCategory}}</code>{{end}}
       </div>
       <div class="record-stat">
         <span class="cell-label">Findings</span><strong>{{.Record.FindingCount}}</strong>
@@ -127,6 +130,7 @@
         <dt>Thinking level</dt><dd>{{.Config.GeminiThinkingLevel}}</dd>
         <dt>Log level</dt><dd>{{.Config.LogLevel}}</dd>
         <dt>Grace period</dt><dd>{{.Config.GracePeriod}}</dd>
+        <dt>Wait on CI</dt><dd>{{.Config.WaitOnCI}}</dd>
       </dl></article>
       <article class="panel-card"><h3>Authorized repositories</h3><ul class="plain-list">{{range .Config.AuthorizedRepositories}}<li><code>{{.}}</code></li>{{else}}<li class="muted">None</li>{{end}}</ul></article>
       <article class="panel-card"><h3>Repository sharing</h3><p>{{.Config.SharingMode}}</p></article>
@@ -145,10 +149,11 @@
 
 {{define "review-detail"}}{{template "head" .}}
 <section class="hero compact detail-hero">
-  <div class="hero-copy"><p class="eyebrow">Review #{{.Detail.ID}}</p><div class="detail-title-line"><h1>{{.Project}} · MR !{{.Detail.MergeRequestIID}}</h1><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></div><p><code>{{.Detail.HeadSHA}}</code></p></div>
+  <div class="hero-copy"><p class="eyebrow">Review #{{.Detail.ID}}</p><div class="detail-title-line"><h1>{{.Project}} · MR !{{.Detail.MergeRequestIID}}</h1>{{template "review-status" .Detail.ReviewRecord}}</div><p><code>{{.Detail.HeadSHA}}</code></p></div>
   {{if .MergeRequestURL}}<a class="button" href="{{.MergeRequestURL}}">Open merge request</a>{{end}}
 </section>
 
+{{if .Detail.WaitingOnCI}}<aside class="notice"><strong>Waiting for CI</strong><p>Last CI status: <code>{{.Detail.CIStatus}}</code>.{{if .Detail.NextAttemptAt}} Next check at or after <time datetime="{{timeAttribute .Detail.NextAttemptAt}}">{{formatTime .Detail.NextAttemptAt}}</time>.{{end}}</p></aside>{{end}}
 {{if .Detail.Equivalent}}<aside class="notice" aria-label="Equivalent review"><strong>Equivalent revision</strong><p>Equivalent to canonical <a href="/reviews/{{.Detail.EquivalentToJobID}}">review #{{.Detail.EquivalentToJobID}}</a>. This revision owns no result, findings, memory audit, or publication.</p></aside>{{end}}
 {{if .Detail.ExternalOnly}}<aside class="notice" aria-label="External-only publication"><strong>External-only recovery</strong><p>An existing publication was recovered. No local structured result is available.</p></aside>{{end}}
 
@@ -158,11 +163,11 @@
 <section aria-labelledby="review-record-heading"><div class="section-heading"><div><p class="section-index">DURABLE RECORD</p><h2 id="review-record-heading">Review record</h2></div></div>
   <div class="detail-grid">
     <article class="panel-card"><h3>Identity</h3><dl>
-      <dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd><dt>Discovered by</dt><dd>{{sourceLabel .Detail.Source}}</dd><dt>State</dt><dd><span class="status" data-state="{{.Detail.State}}">{{.Detail.State}}</span></dd><dt>Attempts</dt><dd class="attempt-count" data-retried="{{if gt .Detail.AttemptCount 1}}true{{else}}false{{end}}">{{.Detail.AttemptCount}}</dd><dt>Patch identity</dt><dd>{{patchStatusLabel .Detail.PatchIDStatus}}{{if eq .Detail.PatchIDStatus "available"}}<br><code>{{.Detail.PatchIDSHA}}</code>{{end}}</dd>
+      <dt>Review ID</dt><dd><code>{{.Detail.ReviewID}}</code></dd><dt>Discovered by</dt><dd>{{sourceLabel .Detail.Source}}</dd><dt>State</dt><dd>{{template "review-status" .Detail.ReviewRecord}}</dd><dt>Attempts</dt><dd class="attempt-count" data-retried="{{if gt .Detail.AttemptCount 1}}true{{else}}false{{end}}">{{.Detail.AttemptCount}}</dd><dt>Patch identity</dt><dd>{{patchStatusLabel .Detail.PatchIDStatus}}{{if eq .Detail.PatchIDStatus "available"}}<br><code>{{.Detail.PatchIDSHA}}</code>{{end}}</dd>
     </dl></article>
     <article class="panel-card"><h3>Publication</h3>{{if .Detail.Equivalent}}<p>Owned by canonical <a href="/reviews/{{.Detail.EquivalentToJobID}}">review #{{.Detail.EquivalentToJobID}}</a>.</p>{{else if .Detail.Published}}<p>Published as GitLab note #{{.Detail.GitLabNoteID}}.</p>{{if .PublicationURL}}<p><a href="{{.PublicationURL}}">Open published note</a></p>{{end}}{{else}}<p class="muted">No durable publication record.</p>{{end}}</article>
     <article class="panel-card"><h3>Timeline</h3><dl><dt>Created</dt><dd><time datetime="{{timeAttribute .Detail.CreatedAt}}">{{formatTime .Detail.CreatedAt}}</time></dd><dt>Started</dt><dd>{{if .Detail.StartedAt}}<time datetime="{{timeAttribute .Detail.StartedAt}}">{{formatTime .Detail.StartedAt}}</time>{{else}}—{{end}}</dd><dt>Updated</dt><dd>{{if .Detail.UpdatedAt}}<time datetime="{{timeAttribute .Detail.UpdatedAt}}">{{formatTime .Detail.UpdatedAt}}</time>{{else}}—{{end}}</dd></dl></article>
-    {{if .Detail.LastErrorCategory}}<article class="panel-card failure-card"><h3>Failure</h3><code>{{.Detail.LastErrorCategory}}</code></article>{{end}}
+    {{if and .Detail.LastErrorCategory (not .Detail.WaitingOnCI)}}<article class="panel-card failure-card"><h3>Failure</h3><code>{{.Detail.LastErrorCategory}}</code></article>{{end}}
   </div>
 </section>
 

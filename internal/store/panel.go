@@ -47,6 +47,9 @@ type ReviewRecord struct {
 	StartedAt         *time.Time
 	UpdatedAt         *time.Time
 	LastErrorCategory string
+	WaitingOnCI       bool
+	CIStatus          string
+	NextAttemptAt     *time.Time
 	PatchIDStatus     string
 	PatchIDSHA        string
 	EquivalentToJobID int64
@@ -194,6 +197,7 @@ func (s *Store) ListReviewRecords(ctx context.Context, state string, beforeID in
 SELECT j.id, j.gitlab_instance, j.project_id, COALESCE(e.project_path, ''), j.merge_request_iid,
        j.head_sha, CASE WHEN j.source_event_id IS NULL THEN 'reconciled' ELSE 'webhook' END,
        j.state, j.attempt_count, j.created_at, j.started_at, j.updated_at,
+       j.waiting_on_ci, COALESCE(j.ci_status, ''), j.next_attempt_at,
        COALESCE(j.last_error_category, ''), j.patch_id_status,
        COALESCE(j.patch_id_sha, ''), COALESCE(j.equivalent_to_job_id, 0),
        (SELECT count(*) FROM review_findings f WHERE f.job_id = j.id),
@@ -247,6 +251,7 @@ func (s *Store) GetReviewRecord(ctx context.Context, jobID int64) (ReviewRecordD
 SELECT j.id, j.gitlab_instance, j.project_id, COALESCE(e.project_path, ''), j.merge_request_iid,
        j.head_sha, CASE WHEN j.source_event_id IS NULL THEN 'reconciled' ELSE 'webhook' END,
        j.state, j.attempt_count, j.created_at, j.started_at, j.updated_at,
+       j.waiting_on_ci, COALESCE(j.ci_status, ''), j.next_attempt_at,
        COALESCE(j.last_error_category, ''), j.patch_id_status,
        COALESCE(j.patch_id_sha, ''), COALESCE(j.equivalent_to_job_id, 0),
        (SELECT count(*) FROM review_findings f WHERE f.job_id = j.id),
@@ -350,11 +355,12 @@ type rowScanner interface {
 func scanReviewRecord(row rowScanner) (ReviewRecord, error) {
 	var record ReviewRecord
 	var created string
-	var started, updated sql.NullString
+	var started, updated, nextAttempt sql.NullString
 	var hasResult, published int
 	if err := row.Scan(&record.ID, &record.GitLabInstance, &record.ProjectID, &record.ProjectPath, &record.MergeRequestIID,
 		&record.HeadSHA, &record.Source, &record.State, &record.AttemptCount, &created, &started,
-		&updated, &record.LastErrorCategory, &record.PatchIDStatus, &record.PatchIDSHA,
+		&updated, &record.WaitingOnCI, &record.CIStatus, &nextAttempt,
+		&record.LastErrorCategory, &record.PatchIDStatus, &record.PatchIDSHA,
 		&record.EquivalentToJobID, &record.FindingCount, &hasResult, &published); err != nil {
 		return ReviewRecord{}, err
 	}
@@ -370,6 +376,10 @@ func scanReviewRecord(row rowScanner) (ReviewRecord, error) {
 	record.UpdatedAt, err = parseOptionalStoredTime(updated)
 	if err != nil {
 		return ReviewRecord{}, fmt.Errorf("parse panel review update time: %w", err)
+	}
+	record.NextAttemptAt, err = parseOptionalStoredTime(nextAttempt)
+	if err != nil {
+		return ReviewRecord{}, fmt.Errorf("parse panel review next attempt time: %w", err)
 	}
 	record.HasResult = hasResult == 1
 	record.Published = published == 1

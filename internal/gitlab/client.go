@@ -152,6 +152,7 @@ type mergeRequestResponse struct {
 	DiffRefs     struct {
 		HeadSHA string `json:"head_sha"`
 	} `json:"diff_refs"`
+	HeadPipeline json.RawMessage `json:"head_pipeline,omitempty"`
 }
 
 type diffVersionResponse struct {
@@ -675,11 +676,15 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, lim
 }
 
 func (c *Client) request(ctx context.Context, method, endpoint string, query url.Values, body []byte, limit int64, target any) (http.Header, error) {
+	return c.requestPath(ctx, method, "/api/v4"+endpoint, query, body, limit, target)
+}
+
+func (c *Client) requestPath(ctx context.Context, method, apiPath string, query url.Values, body []byte, limit int64, target any) (http.Header, error) {
 	if err := c.waitForGate(ctx); err != nil {
 		return nil, err
 	}
 	requestURL := *c.baseURL
-	escapedPath := strings.TrimSuffix(c.baseURL.EscapedPath(), "/") + "/api/v4" + endpoint
+	escapedPath := strings.TrimSuffix(c.baseURL.EscapedPath(), "/") + apiPath
 	decodedPath, err := url.PathUnescape(escapedPath)
 	if err != nil {
 		return nil, failure.Failed("gitlab_request_invalid")

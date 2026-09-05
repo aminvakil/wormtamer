@@ -35,6 +35,7 @@ func TestOverviewRendersStateAndConfiguration(t *testing.T) {
 		!strings.Contains(body, `<time datetime="2026-08-16T10:30:00.000000123Z">2026 Aug 16 · 10:30 UTC</time>`) ||
 		!strings.Contains(body, "gemini-test") || !strings.Contains(body, "Current repository only") ||
 		!strings.Contains(body, "<dt>Grace period</dt><dd>1m30s</dd>") ||
+		!strings.Contains(body, "<dt>Wait on CI</dt><dd>false</dd>") ||
 		!strings.Contains(body, "Review tools") || !strings.Contains(body, "<code>read</code>") ||
 		!strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
@@ -50,6 +51,7 @@ func TestOverviewReportsAllAuthorizedRepositorySharing(t *testing.T) {
 		GitLabBaseURL:                  "http://gitlab.internal",
 		AuthorizedRepositories:         []string{"group/project", "group/shared"},
 		ShareAllAuthorizedRepositories: true,
+		WaitOnCI:                       true,
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
@@ -57,8 +59,33 @@ func TestOverviewReportsAllAuthorizedRepositorySharing(t *testing.T) {
 	response := request(t, handler.Routes(), http.MethodGet, "/")
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, "All authorized repositories") ||
-		strings.Contains(body, "Current repository only") {
+		strings.Contains(body, "Current repository only") || !strings.Contains(body, "<dt>Wait on CI</dt><dd>true</dd>") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
+	}
+}
+
+func TestPanelDistinguishesCIWaitingFromReviewFailure(t *testing.T) {
+	next := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	record := store.ReviewRecord{
+		ID: 9, State: store.JobQueued, WaitingOnCI: true, CIStatus: "failed", NextAttemptAt: &next,
+		LastErrorCategory: "earlier_failure", AttemptCount: 2,
+	}
+	storage := &fakeStore{
+		dashboard:  store.Dashboard{RecentReviews: []store.ReviewRecord{record}},
+		reviewPage: store.ReviewRecordsPage{Records: []store.ReviewRecord{record}},
+		detail:     store.ReviewRecordDetail{ReviewRecord: record},
+	}
+	handler := newTestHandler(t, storage)
+	for _, path := range []string{"/", "/reviews", "/reviews/9"} {
+		response := request(t, handler, http.MethodGet, path)
+		body := response.Body.String()
+		if response.Code != http.StatusOK || !strings.Contains(body, "Waiting for CI") ||
+			!strings.Contains(body, "Last CI status: <code>failed</code>") || strings.Contains(body, "earlier_failure") {
+			t.Fatalf("GET %s status=%d body=%s", path, response.Code, body)
+		}
+		if path == "/reviews/9" && !strings.Contains(body, "2026-09-05 12:00:00 UTC") {
+			t.Fatalf("CI deadline missing: %s", body)
+		}
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	schemaVersion  = 11
+	schemaVersion  = 12
 	MaxJobAttempts = 5
 )
 
@@ -471,8 +471,43 @@ WHERE state = ?`,
 	return nil
 }
 
-func (s *Store) ClaimJob(ctx context.Context, now time.Time) (*Job, error) {
+// NextJob selects a due identity without charging an attempt or holding a
+// transaction across eligibility checks. Only the single review worker polls it.
+func (s *Store) NextJob(ctx context.Context, now time.Time) (*Job, error) {
 	if now.IsZero() {
+		return nil, errors.New("invalid job selection")
+	}
+	job := &Job{}
+	err := s.db.QueryRowContext(ctx, `
+SELECT j.id, j.gitlab_instance, j.project_id, j.merge_request_iid, j.head_sha,
+       j.state, j.attempt_count, COALESCE(r.result_json, '')
+FROM review_jobs j
+LEFT JOIN review_results r ON r.job_id = j.id
+WHERE j.state = ? AND j.attempt_count < ?
+  AND julianday(COALESCE(j.next_attempt_at, j.created_at)) <= julianday(?)
+ORDER BY COALESCE(j.next_attempt_at, j.created_at), j.id
+LIMIT 1`, JobQueued, MaxJobAttempts, formatTime(now)).Scan(
+		&job.ID, &job.GitLabInstance, &job.ProjectID, &job.MergeRequestIID,
+		&job.HeadSHA, &job.State, &job.AttemptCount, &job.ValidatedResultJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select due review job: %w", err)
+	}
+	return job, nil
+}
+
+func (s *Store) ClaimJob(ctx context.Context, now time.Time) (*Job, error) {
+	job, err := s.NextJob(ctx, now)
+	if err != nil || job == nil {
+		return nil, err
+	}
+	return s.ClaimSelectedJob(ctx, job.ID, "", now)
+}
+
+func (s *Store) ClaimSelectedJob(ctx context.Context, jobID int64, ciStatus string, now time.Time) (*Job, error) {
+	if jobID <= 0 || now.IsZero() || len(ciStatus) > 32 {
 		return nil, errors.New("invalid job claim")
 	}
 	nowText := formatTime(now)
@@ -485,18 +520,14 @@ func (s *Store) ClaimJob(ctx context.Context, now time.Time) (*Job, error) {
 	row := tx.QueryRowContext(ctx, `
 UPDATE review_jobs
 SET state = ?, attempt_count = attempt_count + 1,
-    started_at = ?, updated_at = ?
-WHERE id = (
-    SELECT id FROM review_jobs
-    WHERE state = ? AND attempt_count < ?
-      AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?)
-    ORDER BY COALESCE(next_attempt_at, created_at), id
-    LIMIT 1
-)
+    started_at = ?, updated_at = ?, waiting_on_ci = 0,
+    ci_status = COALESCE(NULLIF(?, ''), ci_status)
+WHERE id = ? AND state = ? AND attempt_count < ?
+  AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?)
 RETURNING id, gitlab_instance, project_id, merge_request_iid, head_sha,
           state, attempt_count, patch_id_status,
           COALESCE(patch_id_sha, ''), COALESCE(equivalent_to_job_id, 0)`,
-		JobRunning, nowText, nowText, JobQueued, MaxJobAttempts, nowText)
+		JobRunning, nowText, nowText, ciStatus, jobID, JobQueued, MaxJobAttempts, nowText)
 
 	job := &Job{}
 	if err := row.Scan(&job.ID, &job.GitLabInstance, &job.ProjectID, &job.MergeRequestIID,
@@ -543,6 +574,33 @@ ORDER BY finding_index`, job.ID)
 		return nil, fmt.Errorf("commit review job claim: %w", err)
 	}
 	return job, nil
+}
+
+var ErrJobNotDue = errors.New("job is not due")
+
+func (s *Store) DeferCI(ctx context.Context, jobID int64, status string, now time.Time) error {
+	if jobID <= 0 || now.IsZero() || status == "" || len(status) > 32 {
+		return errors.New("invalid CI wait")
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE review_jobs
+SET waiting_on_ci = 1, ci_status = ?, next_attempt_at = ?, updated_at = ?
+WHERE id = ? AND state = ? AND attempt_count < ?
+  AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?)
+  AND NOT EXISTS (SELECT 1 FROM review_results WHERE job_id = review_jobs.id)`,
+		status, formatDeadline(now.Add(time.Minute)), formatTime(now),
+		jobID, JobQueued, MaxJobAttempts, formatTime(now))
+	if err != nil {
+		return fmt.Errorf("defer review for CI: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect CI wait: %w", err)
+	}
+	if updated != 1 {
+		return ErrJobNotDue
+	}
+	return nil
 }
 
 func (s *Store) DeferPendingPatchID(ctx context.Context, jobID int64, now, nextAttempt time.Time) error {

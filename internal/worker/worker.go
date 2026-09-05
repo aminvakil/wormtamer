@@ -25,7 +25,9 @@ const (
 )
 
 type JobStore interface {
-	ClaimJob(context.Context, time.Time) (*store.Job, error)
+	NextJob(context.Context, time.Time) (*store.Job, error)
+	ClaimSelectedJob(context.Context, int64, string, time.Time) (*store.Job, error)
+	DeferCI(context.Context, int64, string, time.Time) error
 	DeferPendingPatchID(context.Context, int64, time.Time, time.Time) error
 	FindCanonicalReviewJob(context.Context, int64, string) (int64, bool, error)
 	CompleteEquivalentReview(context.Context, int64, int64, string, time.Time) error
@@ -39,6 +41,7 @@ type JobStore interface {
 type GitLabBroker interface {
 	LoadReview(context.Context, gitlab.Identity) (gitlab.Snapshot, error)
 	CheckCurrent(context.Context, gitlab.Identity) error
+	CheckCI(context.Context, gitlab.Identity) (string, error)
 	FindNote(context.Context, gitlab.Identity, string) (int64, bool, error)
 	PostNote(context.Context, gitlab.Identity, string) (int64, error)
 }
@@ -60,14 +63,15 @@ type Worker struct {
 	reviewer      Reviewer
 	logger        *slog.Logger
 	forbidden     []string
+	waitOnCI      bool
 	now           func() time.Time
 	shutdownGrace time.Duration
 }
 
-func New(storage JobStore, gitLab GitLabBroker, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string) *Worker {
+func New(storage JobStore, gitLab GitLabBroker, workspaces RepositoryWorkspaces, reviewer Reviewer, logger *slog.Logger, forbidden []string, waitOnCI bool) *Worker {
 	return &Worker{
 		store: storage, gitlab: gitLab, workspaces: workspaces, reviewer: reviewer, logger: logger,
-		forbidden: append([]string(nil), forbidden...), now: time.Now, shutdownGrace: shutdownGracePeriod,
+		forbidden: append([]string(nil), forbidden...), waitOnCI: waitOnCI, now: time.Now, shutdownGrace: shutdownGracePeriod,
 	}
 }
 
@@ -76,9 +80,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		job, err := w.store.ClaimJob(ctx, w.now().UTC())
+		job, err := w.store.NextJob(ctx, w.now().UTC())
 		if err != nil {
-			w.logger.Error("review job claim failed", "reason", "persistence_failed")
+			w.logger.Error("review job selection failed", "reason", "persistence_failed")
 			if !wait(ctx, pollInterval) {
 				return nil
 			}
@@ -94,7 +98,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		jobCtx, cancelJob := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
-			done <- w.processClaimed(jobCtx, job)
+			done <- w.processDue(jobCtx, ctx, job)
 		}()
 		select {
 		case err := <-done:
@@ -127,16 +131,59 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
-	job, err := w.store.ClaimJob(ctx, w.now().UTC())
+	job, err := w.store.NextJob(ctx, w.now().UTC())
 	if err != nil || job == nil {
 		return false, err
 	}
-	return true, w.processClaimed(ctx, job)
+	return true, w.processDue(ctx, ctx, job)
 }
 
-func (w *Worker) processClaimed(ctx context.Context, job *store.Job) error {
+func (w *Worker) processDue(ctx, admissionCtx context.Context, job *store.Job) error {
+	identity := jobIdentity(job)
+	var noteID int64
+	var ciStatus string
+	var err error
+	if len(job.ValidatedResultJSON) == 0 {
+		// Exact-head marker recovery is not new review work and must not wait
+		// for CI. A saved local result skips this preflight entirely.
+		var found bool
+		noteID, found, err = w.gitlab.FindNote(ctx, identity, publicationMarker(identity))
+		if err == nil && !found && w.waitOnCI {
+			ciStatus, err = w.gitlab.CheckCI(ctx, identity)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err == nil && ciStatus != "success" && ciStatus != gitlab.CINoPipeline {
+				if deferErr := w.store.DeferCI(ctx, job.ID, ciStatus, w.now().UTC()); deferErr != nil {
+					if errors.Is(deferErr, store.ErrJobNotDue) {
+						return deferErr
+					}
+					err = failure.Retry("persistence_failed", 0)
+				} else {
+					w.logger.Info("review job waiting for CI", append(jobLogFields(job), "ci_status", ciStatus)...)
+					return nil
+				}
+			}
+		}
+	}
+	if ctx.Err() != nil || admissionCtx.Err() != nil {
+		return nil
+	}
+	// Charge only admitted work or a real failure, and only for the identity
+	// whose preflight was evaluated. A crash above leaves queued work intact.
+	// Shutdown stops admission, but already-claimed work keeps its grace period.
+	claimed, claimErr := w.store.ClaimSelectedJob(admissionCtx, job.ID, ciStatus, w.now().UTC())
+	if claimErr != nil || claimed == nil {
+		if admissionCtx.Err() != nil {
+			return nil
+		}
+		return claimErr
+	}
+	job = claimed
 	w.logger.Info("review job started", jobLogFields(job)...)
-	err := w.execute(ctx, job)
+	if err == nil {
+		err = w.execute(ctx, job, noteID)
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -150,31 +197,22 @@ func (w *Worker) processClaimed(ctx context.Context, job *store.Job) error {
 	return w.handleFailure(ctx, job, err)
 }
 
-func (w *Worker) execute(ctx context.Context, job *store.Job) error {
-	identity := gitlab.Identity{
-		GitLabInstance: job.GitLabInstance, ProjectID: job.ProjectID,
-		MergeRequestIID: job.MergeRequestIID, HeadSHA: job.HeadSHA,
-	}
+func (w *Worker) execute(ctx context.Context, job *store.Job, existingNoteID int64) error {
+	identity := jobIdentity(job)
 	marker := publicationMarker(identity)
-	if len(job.ValidatedResultJSON) == 0 {
-		noteID, found, err := w.gitlab.FindNote(ctx, identity, marker)
-		if err != nil {
+	if existingNoteID > 0 {
+		if err := w.gitlab.CheckCurrent(ctx, identity); err != nil {
 			return err
 		}
-		if found {
-			if err := w.gitlab.CheckCurrent(ctx, identity); err != nil {
+		if err := w.store.CompletePublication(ctx, job.ID, marker, existingNoteID, w.now().UTC()); err != nil {
+			if errors.Is(err, store.ErrJobNotRunning) {
 				return err
 			}
-			if err := w.store.CompletePublication(ctx, job.ID, marker, noteID, w.now().UTC()); err != nil {
-				if errors.Is(err, store.ErrJobNotRunning) {
-					return err
-				}
-				return failure.Retry("persistence_failed", 0)
-			}
-			w.logger.Info("review generation skipped",
-				append(jobLogFields(job), "outcome", "existing_publication")...)
-			return nil
+			return failure.Retry("persistence_failed", 0)
 		}
+		w.logger.Info("review generation skipped",
+			append(jobLogFields(job), "outcome", "existing_publication")...)
+		return nil
 	}
 
 	var result review.Result
@@ -413,6 +451,13 @@ func wait(ctx context.Context, duration time.Duration) bool {
 		return false
 	case <-timer.C:
 		return true
+	}
+}
+
+func jobIdentity(job *store.Job) gitlab.Identity {
+	return gitlab.Identity{
+		GitLabInstance: job.GitLabInstance, ProjectID: job.ProjectID,
+		MergeRequestIID: job.MergeRequestIID, HeadSHA: job.HeadSHA,
 	}
 }
 

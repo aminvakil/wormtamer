@@ -31,12 +31,12 @@ func TestWorkerPreservesReviewAndWorkspaceCleanupFailures(t *testing.T) {
 	reviewErr := failure.Retry("review_failed", 0)
 	closeErr := errors.New("close failed")
 	workspaces := &fakeWorkspaces{closeErr: closeErr}
-	worker := New(storage, &fakeGitLab{}, workspaces, &fakeReviewer{err: reviewErr}, slog.Default(), nil)
+	worker := New(storage, &fakeGitLab{}, workspaces, &fakeReviewer{err: reviewErr}, slog.Default(), nil, false)
 	job, err := storage.ClaimJob(context.Background(), time.Now().UTC())
 	if err != nil || job == nil {
 		t.Fatalf("claim = %+v, %v", job, err)
 	}
-	err = worker.execute(context.Background(), job)
+	err = worker.execute(context.Background(), job, 0)
 	if !errors.Is(err, reviewErr) || !errors.Is(err, closeErr) {
 		t.Fatalf("combined error = %v", err)
 	}
@@ -112,7 +112,7 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	var logs bytes.Buffer
 	workspaces := &fakeWorkspaces{}
 	worker := New(storage, broker, workspaces, reviewer, slog.New(slog.NewJSONHandler(&logs, nil)),
-		[]string{"gitlab-token", "gemini-key", "webhook-secret"})
+		[]string{"gitlab-token", "gemini-key", "webhook-secret"}, false)
 
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil || !processed {
@@ -128,7 +128,7 @@ func TestWorkerCompletesEndToEndReview(t *testing.T) {
 	assertCount(t, db, "review_results", 1)
 	assertCount(t, db, "review_findings", 1)
 	assertCount(t, db, "publications", 1)
-	if broker.loadCalls != 1 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
+	if broker.ciCalls != 0 || broker.loadCalls != 1 || broker.checkCalls != 2 || broker.postCalls != 1 || reviewer.calls != 1 {
 		t.Fatalf("calls: broker=%+v reviewer=%+v", broker, reviewer)
 	}
 	expectedFindingID := review.FindingID("http://gitlab.internal", 42, 7, workerHead, 1)
@@ -330,6 +330,7 @@ func TestWorkerSkipsReviewForExistingPublication(t *testing.T) {
 	reviewer := &fakeReviewer{err: errors.New("review must not run")}
 	var logs bytes.Buffer
 	worker := newTestWorker(t, storage, broker, reviewer, &logs)
+	worker.waitOnCI = true
 
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil || !processed {
@@ -338,7 +339,7 @@ func TestWorkerSkipsReviewForExistingPublication(t *testing.T) {
 	assertJobState(t, db, store.JobCompleted)
 	assertCount(t, db, "review_results", 0)
 	assertCount(t, db, "publications", 1)
-	if reviewer.calls != 0 || broker.loadCalls != 0 || broker.findCalls != 1 || broker.checkCalls != 1 || broker.postCalls != 0 {
+	if broker.ciCalls != 0 || reviewer.calls != 0 || broker.loadCalls != 0 || broker.findCalls != 1 || broker.checkCalls != 1 || broker.postCalls != 0 {
 		t.Fatalf("broker=%+v reviewer calls=%d", broker, reviewer.calls)
 	}
 	var noteID int64
@@ -439,12 +440,13 @@ func TestWorkerOperatorRetryResumesPublicationWithoutReview(t *testing.T) {
 	reviewer := &fakeReviewer{err: errors.New("review must not run")}
 	worker := newTestWorker(t, storage, broker, reviewer, nil)
 	worker.now = func() time.Time { return retriedAt }
+	worker.waitOnCI = true
 	processed, err := worker.ProcessOne(ctx)
 	if err != nil || !processed {
 		t.Fatalf("ProcessOne() = %t, %v", processed, err)
 	}
 	assertJobState(t, db, store.JobCompleted)
-	if reviewer.calls != 0 || broker.loadCalls != 0 || broker.postCalls != 1 {
+	if broker.ciCalls != 0 || reviewer.calls != 0 || broker.loadCalls != 0 || broker.postCalls != 1 {
 		t.Fatalf("calls: review=%d load=%d post=%d", reviewer.calls, broker.loadCalls, broker.postCalls)
 	}
 }
@@ -617,10 +619,21 @@ func TestWorkerClassifiesTerminalFailures(t *testing.T) {
 			defer storage.Close()
 			defer db.Close()
 			queueJob(t, storage)
-			broker := &fakeGitLab{loadError: test.failure}
+			broker := &fakeGitLab{}
 			workspaces := &fakeWorkspaces{}
 			reviewer := &fakeReviewer{}
-			worker := New(storage, broker, workspaces, reviewer, slog.New(slog.DiscardHandler), nil)
+			worker := New(storage, broker, workspaces, reviewer, slog.New(slog.DiscardHandler), nil, true)
+			now := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+			worker.now = func() time.Time { return now }
+			job, err := storage.NextJob(context.Background(), now)
+			if err != nil || job == nil {
+				t.Fatalf("NextJob() = %+v, %v", job, err)
+			}
+			if err := storage.DeferCI(context.Background(), job.ID, "failed", now); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(time.Minute)
+			broker.ciCheck = func(context.Context, gitlab.Identity) (string, error) { return "", test.failure }
 			processed, err := worker.ProcessOne(context.Background())
 			if err != nil || !processed {
 				t.Fatalf("ProcessOne() = %t, %v", processed, err)
@@ -671,7 +684,7 @@ func newTestWorker(t *testing.T, storage JobStore, broker *fakeGitLab, reviewer 
 	if logs == nil {
 		logs = &bytes.Buffer{}
 	}
-	return New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"})
+	return New(storage, broker, &fakeWorkspaces{}, reviewer, slog.New(slog.NewJSONHandler(logs, nil)), []string{"gitlab-token", "gemini-key", "webhook-secret"}, false)
 }
 
 func workerStore(t *testing.T) (*store.Store, *sql.DB) {
@@ -768,6 +781,8 @@ func assertCount(t *testing.T, db *sql.DB, table string, want int) {
 
 type fakeGitLab struct {
 	loadError        error
+	ciCheck          func(context.Context, gitlab.Identity) (string, error)
+	ciCalls          int
 	patchIDStatus    string
 	patchIDSHA       string
 	checkError       error
@@ -798,6 +813,14 @@ func (g *fakeGitLab) LoadReview(_ context.Context, identity gitlab.Identity) (gi
 		PatchIDStatus: patchIDStatus, PatchIDSHA: patchIDSHA,
 		Files: []gitlab.ChangedFile{{OldPath: "main.go", NewPath: "main.go", Diff: "+private-diff"}},
 	}, nil
+}
+
+func (g *fakeGitLab) CheckCI(ctx context.Context, identity gitlab.Identity) (string, error) {
+	g.ciCalls++
+	if g.ciCheck != nil {
+		return g.ciCheck(ctx, identity)
+	}
+	return "success", nil
 }
 
 func (g *fakeGitLab) CheckCurrent(_ context.Context, _ gitlab.Identity) error {

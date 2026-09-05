@@ -23,6 +23,7 @@ type Config struct {
 	ReviewWorkspacePath            string        `json:"review_workspace_path"`
 	LogLevel                       string        `json:"log_level"`
 	GracePeriod                    time.Duration `json:"-"`
+	WaitOnCI                       bool          `json:"-"`
 	GitLab                         GitLab        `json:"gitlab"`
 	Gemini                         Gemini        `json:"gemini"`
 	AuthorizedRepositories         []string      `json:"authorized_repositories"`
@@ -60,10 +61,12 @@ func Load(path string) (Config, error) {
 
 	var cfg Config
 	defaultGracePeriod := "1m"
+	defaultWaitOnCI := false
 	input := struct {
 		*Config
 		GracePeriod *string `json:"grace_period"`
-	}{Config: &cfg, GracePeriod: &defaultGracePeriod}
+		WaitOnCI    *bool   `json:"wait_on_ci"`
+	}{Config: &cfg, GracePeriod: &defaultGracePeriod, WaitOnCI: &defaultWaitOnCI}
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil {
@@ -72,6 +75,10 @@ func Load(path string) (Config, error) {
 	if err := ensureEOF(decoder); err != nil {
 		return Config{}, err
 	}
+	if input.WaitOnCI == nil {
+		return Config{}, errors.New("wait_on_ci must not be null")
+	}
+	cfg.WaitOnCI = *input.WaitOnCI
 	if input.GracePeriod == nil {
 		return Config{}, errors.New("grace_period must not be null")
 	}

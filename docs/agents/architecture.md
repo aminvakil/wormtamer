@@ -35,6 +35,7 @@ The process starts with an explicit JSON configuration path, for example `wormta
   "review_workspace_path": "/var/lib/wormtamer-reviews",
   "log_level": "info",
   "grace_period": "1m",
+  "wait_on_ci": false,
   "gitlab": {
     "base_url": "https://gitlab.example",
     "webhook_secret": "replace-me",
@@ -51,7 +52,7 @@ The process starts with an explicit JSON configuration path, for example `wormta
 }
 ```
 
-Review scheduling is configured by [`grace_period`](reliability.md#review-grace-period), which is shown in the panel's non-secret effective configuration.
+Review scheduling is configured by [`grace_period`](reliability.md#review-grace-period) and [`wait_on_ci`](reliability.md#wait-for-ci), both shown in the panel's non-secret effective configuration.
 
 Authorized repositories are identified by exact GitLab namespace paths such as `group/project`. The same list authorizes webhook ingress and bounds which internal repositories can be disclosed to and inspected by the model. Authorization remains independent from repository sharing, so an unlisted path is never eligible for trusted preparation.
 
@@ -78,9 +79,9 @@ Validates and durably records merge request webhooks. Ready openings and open-MR
 
 ### Review worker
 
-Atomically claims due queued jobs, retries recoverable failures, and completes generated work only after publication is reconciled. At startup, interrupted running jobs with attempts remaining are requeued before workers start; exhausted interrupted jobs fail. For a claimed job without a locally validated result, the worker checks the deterministic GitLab publication marker before loading review evidence or invoking Gemini; an existing current publication completes as external-only recovery without reconstructing structured review data. A claimed job with a validated result skips repository preparation and Gemini and resumes publication reconciliation.
+Selects due queued jobs for [preflight and conditional claiming](reliability.md#jobs-and-retries), retries recoverable failures, and completes generated work only after publication is reconciled. At startup, interrupted running jobs with attempts remaining are requeued before workers start; exhausted interrupted jobs fail. For a selected due job without a locally validated result, the worker checks the deterministic GitLab publication marker before CI eligibility, claiming work, loading review evidence, or invoking Gemini; an existing current publication completes as external-only recovery without reconstructing structured review data. A claimed job with a validated result skips repository preparation and Gemini and resumes publication reconciliation.
 
-After that exact-head recovery check, the worker validates the GitLab diff version for the current head. Within retained SQLite state, a new head whose available `patch_id_sha` matches the newest completed canonical job for the same merge request completes as equivalent without invoking Gemini, preparing repositories, or publishing another note. The canonical job must have both a local validated result and a durable publication and cannot itself be equivalent. Head SHA remains the revision, repository, review-target, finding, and publication identity; patch identity only suppresses redundant work.
+After exact-head recovery and optional CI eligibility, the claimed job validates the GitLab diff version for the current head. Within retained SQLite state, a new head whose available `patch_id_sha` matches the newest completed canonical job for the same merge request completes as equivalent without invoking Gemini, preparing repositories, or publishing another note. The canonical job must have both a local validated result and a durable publication and cannot itself be equivalent. Head SHA remains the revision, repository, review-target, finding, and publication identity; patch identity only suppresses redundant work.
 
 ### Review agent
 

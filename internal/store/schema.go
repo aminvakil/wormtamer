@@ -27,6 +27,8 @@ CREATE TABLE review_jobs (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     started_at TEXT,
     next_attempt_at TEXT,
+    waiting_on_ci INTEGER NOT NULL DEFAULT 0 CHECK(waiting_on_ci IN (0, 1)),
+    ci_status TEXT CHECK(ci_status IS NULL OR length(ci_status) BETWEEN 1 AND 32),
     last_error_category TEXT,
     last_error_message TEXT,
     updated_at TEXT,

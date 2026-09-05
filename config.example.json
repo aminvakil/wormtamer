@@ -4,6 +4,7 @@
   "review_workspace_path": "/var/lib/wormtamer-reviews",
   "log_level": "info",
   "grace_period": "1m",
+  "wait_on_ci": false,
   "gitlab": {
     "base_url": "https://gitlab.example",
     "webhook_secret": "replace-me",

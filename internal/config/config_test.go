@@ -55,8 +55,27 @@ func TestLoad(t *testing.T) {
 	if cfg.Gemini.ThinkingLevel != "default" {
 		t.Fatalf("Gemini.ThinkingLevel = %q, want default", cfg.Gemini.ThinkingLevel)
 	}
+	if cfg.WaitOnCI {
+		t.Fatal("WaitOnCI = true when omitted")
+	}
 	if cfg.ShareAllAuthorizedRepositories {
 		t.Fatal("ShareAllAuthorizedRepositories = true when omitted")
+	}
+}
+
+func TestLoadWaitOnCI(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			contents := strings.Replace(validConfiguration, `"listen_address": ":8080",`, `"listen_address": ":8080", "wait_on_ci": `+value+`,`, 1)
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil || cfg.WaitOnCI != (value == "true") {
+				t.Fatalf("Load() wait on CI = %t, error = %v", cfg.WaitOnCI, err)
+			}
+		})
 	}
 }
 
@@ -169,6 +188,8 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "malformed grace period", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "grace_period": "soon",`, want: "grace_period must be"},
 		{name: "negative grace period", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "grace_period": "-1m",`, want: "grace_period must be"},
 		{name: "null grace period", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "grace_period": null,`, want: "grace_period must not be null"},
+		{name: "null wait on CI", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "wait_on_ci": null,`, want: "wait_on_ci must not be null"},
+		{name: "non-boolean wait on CI", replace: `"listen_address": ":8080",`, with: `"listen_address": ":8080", "wait_on_ci": "true",`, want: "decode configuration"},
 		{name: "invalid URL scheme", replace: `"http://gitlab.internal"`, with: `"ftp://gitlab.internal"`, want: "HTTP or HTTPS"},
 		{name: "URL credentials", replace: `"http://gitlab.internal"`, with: `"http://user:pass@gitlab.internal"`, want: "must not contain credentials"},
 		{name: "empty URL query", replace: `"http://gitlab.internal"`, with: `"http://gitlab.internal?"`, want: "must not contain credentials"},

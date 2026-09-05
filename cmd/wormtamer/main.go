@@ -91,6 +91,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger, output io.Writ
 		GeminiThinkingLevel:            cfg.Gemini.ThinkingLevel,
 		LogLevel:                       cfg.LogLevel,
 		GracePeriod:                    cfg.GracePeriod,
+		WaitOnCI:                       cfg.WaitOnCI,
 		AuthorizedRepositories:         cfg.AuthorizedRepositories,
 		ShareAllAuthorizedRepositories: cfg.ShareAllAuthorizedRepositories,
 	}, logger.With("component", "panel"))
@@ -118,7 +119,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger, output io.Writ
 		return err
 	}
 	reviewWorker := worker.New(storage, gitLabClient, workspaceManager, geminiReviewer,
-		logger.With("component", "review_worker", "job_kind", "review"), forbidden)
+		logger.With("component", "review_worker", "job_kind", "review"), forbidden, cfg.WaitOnCI)
 	memoryEvaluator, err := memory.NewEvaluator(ctx, cfg.Gemini.APIKey, cfg.Gemini.BaseURL, cfg.Gemini.Model, forbidden,
 		logger.With("component", "feedback", "job_kind", "feedback"))
 	if err != nil {
