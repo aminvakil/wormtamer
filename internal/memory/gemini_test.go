@@ -90,6 +90,31 @@ func TestEvaluatorRejectsInvalidOrSensitiveEvidenceAndOutput(t *testing.T) {
 	}
 }
 
+func TestEvaluatorDiffContentLimit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		size     int
+		category string
+	}{
+		{name: "at limit", size: maxDiffContentBytes},
+		{name: "over limit", size: maxDiffContentBytes + 1, category: "feedback_input_invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := testInput()
+			input.Files[0].Diff = strings.Repeat("x", test.size)
+			generator := &fakeGenerator{output: `{"create_memory":false,"lesson":""}`}
+			evaluator := newEvaluator(generator, "gemini-test", nil, nil)
+			_, err := evaluator.Evaluate(context.Background(), input)
+			if got := failureCategory(err); got != test.category {
+				t.Fatalf("failure category = %q, want %q", got, test.category)
+			}
+			if test.category != "" && generator.prompt != "" {
+				t.Fatal("oversized diff reached Gemini")
+			}
+		})
+	}
+}
+
 func TestEvaluatorDiagnosticsRespectLogLevel(t *testing.T) {
 	secret := "configured\nsecret"
 	for _, test := range []struct {

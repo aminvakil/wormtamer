@@ -504,7 +504,7 @@ func TestRequestTimeoutIsRetryable(t *testing.T) {
 	}
 }
 
-func TestResponseAndInputLimitsFailClosed(t *testing.T) {
+func TestResponseAndInputLimits(t *testing.T) {
 	t.Run("metadata response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, strings.Repeat("x", metadataResponseLimit+1))
@@ -515,15 +515,36 @@ func TestResponseAndInputLimitsFailClosed(t *testing.T) {
 		assertFailure(t, err, "gitlab_response_limit_exceeded", false, false)
 	})
 
-	t.Run("diff content", func(t *testing.T) {
-		server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(t, w, []diffResponse{{OldPath: "a", NewPath: "a", Diff: strings.Repeat("x", maxDiffContentBytes+1)}})
+	for _, test := range []struct {
+		name     string
+		size     int
+		category string
+	}{
+		{name: "diff at limit", size: maxDiffContentBytes},
+		{name: "diff over limit", size: maxDiffContentBytes + 1, category: "merge_request_diff_limit_exceeded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(t, w, []diffResponse{
+					{OldPath: "a", NewPath: "a", Diff: strings.Repeat("x", test.size/2)},
+					{OldPath: "b", NewPath: "b", Diff: strings.Repeat("x", test.size-test.size/2)},
+				})
+			})
+			defer server.Close()
+			client := newTestClient(t, server.URL, "token", server.Client())
+			snapshot, err := client.LoadReview(context.Background(), testIdentity(server.URL))
+			if test.category != "" {
+				assertFailure(t, err, test.category, false, false)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Files) != 2 || len(snapshot.Files[0].Diff)+len(snapshot.Files[1].Diff) != test.size {
+				t.Fatal("diff content was truncated")
+			}
 		})
-		defer server.Close()
-		client := newTestClient(t, server.URL, "token", server.Client())
-		_, err := client.LoadReview(context.Background(), testIdentity(server.URL))
-		assertFailure(t, err, "merge_request_diff_limit_exceeded", false, false)
-	})
+	}
 
 	t.Run("changed files", func(t *testing.T) {
 		server := reviewServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -618,6 +639,8 @@ func reviewServer(t *testing.T, diffs http.HandlerFunc) *httptest.Server {
 			writeMergeRequest(t, w, "opened", testHead)
 		case "/api/v4/projects/42/merge_requests/7/diffs":
 			diffs(w, r)
+		case "/api/v4/projects/42/merge_requests/7/versions":
+			writeJSON(t, w, []diffVersionResponse{})
 		default:
 			t.Fatal("unexpected request: " + r.URL.Path)
 		}
