@@ -3,7 +3,7 @@ module github.com/aminvakil/wormtamer
 go 1.27
 
 require (
-	github.com/mattn/go-sqlite3 v1.14.50
+	github.com/mattn/go-sqlite3 v1.14.52
 	golang.org/x/sys v0.48.0
 	google.golang.org/genai v1.70.0
 )
