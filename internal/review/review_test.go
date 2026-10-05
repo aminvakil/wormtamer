@@ -17,13 +17,13 @@ import (
 	"google.golang.org/genai"
 )
 
-func TestReviewDeclaresExactlyReadAndBash(t *testing.T) {
+func TestReviewDeclaresReadBashAndCodemode(t *testing.T) {
 	config := generationConfig("default", true)
 	if len(config.Tools) != 1 || config.ToolConfig.FunctionCallingConfig.Mode != genai.FunctionCallingConfigModeAuto {
 		t.Fatalf("ordinary generation config = %+v", config)
 	}
 	declarations := config.Tools[0].FunctionDeclarations
-	if len(declarations) != 2 || declarations[0].Name != "read" || declarations[1].Name != "bash" {
+	if len(declarations) != 3 || declarations[0].Name != "read" || declarations[1].Name != "bash" || declarations[2].Name != "codemode" {
 		t.Fatalf("tool declarations = %+v", declarations)
 	}
 	readSchema := declarations[0].ParametersJsonSchema.(map[string]any)
@@ -42,6 +42,12 @@ func TestReviewDeclaresExactlyReadAndBash(t *testing.T) {
 		bashProperties["command"].(map[string]any)["type"] != "string" ||
 		bashProperties["timeout"].(map[string]any)["type"] != "number" || bashProperties["timeout"].(map[string]any)["exclusiveMinimum"] != 0 {
 		t.Fatalf("bash schema = %+v", bashSchema)
+	}
+	codeSchema := declarations[2].ParametersJsonSchema.(map[string]any)
+	codeProperties := codeSchema["properties"].(map[string]any)
+	if codeSchema["additionalProperties"] != false || !slices.Equal(codeSchema["required"].([]string), []string{"code"}) ||
+		len(codeProperties) != 1 || codeProperties["code"].(map[string]any)["type"] != "string" {
+		t.Fatalf("codemode schema = %+v", codeSchema)
 	}
 }
 

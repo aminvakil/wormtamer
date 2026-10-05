@@ -37,7 +37,7 @@ func TestOverviewRendersStateAndConfiguration(t *testing.T) {
 		!strings.Contains(body, "<dt>Grace period</dt><dd>1m30s</dd>") ||
 		!strings.Contains(body, "<dt>Wait on CI</dt><dd>false</dd>") ||
 		!strings.Contains(body, "Review tools") || !strings.Contains(body, "<code>read</code>") ||
-		!strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "group/shared") {
+		!strings.Contains(body, "<code>bash</code>") || !strings.Contains(body, "<code>codemode</code>") || !strings.Contains(body, "group/shared") {
 		t.Fatalf("overview status=%d body=%s", response.Code, body)
 	}
 	assertPanelHeaders(t, response)

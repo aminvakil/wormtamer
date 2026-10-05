@@ -28,7 +28,8 @@ const (
 )
 
 type ToolResult struct {
-	Response map[string]any
+	Response    map[string]any
+	ScriptValue any // Optional structured result for codemode; not the direct tool response.
 }
 
 type ToolBroker interface {

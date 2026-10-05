@@ -18,6 +18,16 @@ import (
 	"github.com/aminvakil/wormtamer/internal/failure"
 )
 
+const maxScriptBashBytes = 1 << 20
+
+type BashScriptResult struct {
+	Output          string  `json:"output"`
+	Truncated       bool    `json:"truncated"`
+	FullOutputPath  string  `json:"full_output_path,omitempty"`
+	ExitCode        int     `json:"exit_code"`
+	WallTimeSeconds float64 `json:"wall_time_seconds"`
+}
+
 var (
 	errBashOutputLimit = errors.New("bash output limit exceeded")
 	errBashSpool       = errors.New("bash output spool failed")
@@ -55,6 +65,7 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 	}
 	command.Stdout = writer
 	command.Stderr = writer
+	started := time.Now()
 	if err := command.Start(); err != nil {
 		reader.Close()
 		writer.Close()
@@ -139,6 +150,7 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 		message += "Command timed out after " + timeoutLabel + " seconds"
 		return correctableError(message), nil
 	}
+	scriptResult := capture.scriptResult(time.Since(started).Seconds())
 	if waitErr != nil {
 		var exitError *exec.ExitError
 		if !errors.As(waitErr, &exitError) {
@@ -149,12 +161,15 @@ func (w *localWorkspace) callBash(ctx context.Context, arguments map[string]any)
 			message += "\n\n"
 		}
 		message += "Command exited with code " + strconv.Itoa(exitError.ExitCode())
-		return correctableError(message), nil
+		scriptResult.ExitCode = exitError.ExitCode()
+		result := correctableError(message)
+		result.ScriptValue = scriptResult
+		return result, nil
 	}
 	if text == "" {
 		text = "(no output)"
 	}
-	return ToolResult{Response: map[string]any{"output": text}}, nil
+	return ToolResult{Response: map[string]any{"output": text}, ScriptValue: scriptResult}, nil
 }
 
 func positiveSeconds(value any) (float64, bool) {
@@ -183,6 +198,7 @@ type bashCapture struct {
 	lastByteNewline       bool
 	lastLineBytes         int64
 	prefix                bytes.Buffer
+	scriptHead            []byte
 	tail                  []byte
 	truncated             bool
 	spool                 *os.File
@@ -246,6 +262,9 @@ func (c *bashCapture) Write(contents []byte) (int, error) {
 }
 
 func (c *bashCapture) addOutput(contents []byte) {
+	if remaining := maxScriptBashBytes/2 - len(c.scriptHead); remaining > 0 {
+		c.scriptHead = append(c.scriptHead, contents[:min(remaining, len(contents))]...)
+	}
 	c.totalBytes += int64(len(contents))
 	for _, character := range contents {
 		if character == '\n' {
@@ -258,7 +277,7 @@ func (c *bashCapture) addOutput(contents []byte) {
 		}
 	}
 	c.tail = append(c.tail, contents...)
-	const retained = MaxToolBytes * 2
+	const retained = maxScriptBashBytes / 2
 	if len(c.tail) > retained {
 		c.tail = append([]byte(nil), c.tail[len(c.tail)-retained:]...)
 	}
@@ -381,6 +400,21 @@ func (c *bashCapture) formatted(includeSpool bool) string {
 			endLine-int64(outputLines)+1, endLine, endLine, formatSize(MaxToolBytes), c.spoolPath)
 	}
 	return text
+}
+
+func (c *bashCapture) scriptResult(seconds float64) BashScriptResult {
+	result := BashScriptResult{WallTimeSeconds: seconds, FullOutputPath: c.spoolPath, Truncated: c.totalBytes > maxScriptBashBytes}
+	switch {
+	case c.totalBytes <= int64(len(c.scriptHead)):
+		result.Output = string(c.scriptHead)
+	case c.totalBytes <= maxScriptBashBytes:
+		remaining := int(c.totalBytes) - len(c.scriptHead)
+		result.Output = string(c.scriptHead) + string(c.tail[len(c.tail)-remaining:])
+	default:
+		result.Output = string(c.scriptHead) + "\n[Output truncated]\n" + string(c.tail)
+	}
+	result.Output = strings.ToValidUTF8(result.Output, "�")
+	return result
 }
 
 func (c *bashCapture) totalLines() int64 {

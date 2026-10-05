@@ -12,7 +12,7 @@
 - Optionally [waits for successful CI](docs/agents/reliability.md#wait-for-ci) without spending review attempts or blocking other reviews
 - Starts reviews with bounded merge request metadata and changed-file diffs
 - Prepares disposable Git working directories for the current repository and, when enabled, every other authorized repository
-- Gives Gemini Pi-style `read` and unrestricted `bash` tools under a credential-free review identity
+- Gives Gemini Pi-style `read` and unrestricted `bash` tools under a credential-free review identity, plus [codemode](docs/agents/architecture.md#codemode) to chain calls and select evidence in one model turn
 - After an MR closes or merges, lets Gemini derive at most one repository-scoped advisory lesson from its diff, comments, and Wormtamer review
 - Validates model output before posting an idempotent review note, while retained SQLite state suppresses another review and note for a rebased head with the same GitLab patch ID
 - Persists webhook, job, patch-equivalence, result, publication, feedback, and advisory-memory state in SQLite
@@ -95,4 +95,4 @@ The executable is written to `bin/wormtamer` and requires an explicit configurat
 
 ## License
 
-Wormtamer is licensed under the [GNU General Public License v3.0](LICENSE).
+Wormtamer is licensed under the [GNU General Public License v3.0](LICENSE). The codemode JavaScript prelude adapts Pi's [MIT-licensed implementation](internal/repository/pi-codemode.LICENSE).

@@ -13,6 +13,7 @@ One installation runs as one process and replica because SQLite and local reposi
 - SQLite through `github.com/mattn/go-sqlite3`, built with CGO, as the only application database
 - Gemini through `google.golang.org/genai`, using the Developer API directly or a configured Gemini Developer API-compatible endpoint, as the only model backend
 - A small explicit Gemini function-calling loop with no general agent framework or automatic tool execution
+- QuickJS embedded through `github.com/buke/quickjs-go`, built with the existing CGO toolchain; codemode needs no Node runtime or external service
 
 A narrow Gemini client interface is used as a test seam, not as a provider abstraction. The Gemini model is an explicit required configuration value. Review output and resource limits remain application-owned; the review thinking level is deployment-configurable.
 
@@ -85,7 +86,7 @@ After exact-head recovery and optional CI eligibility, the claimed job validates
 
 ### Review agent
 
-The worker starts with bounded merge request metadata and changed-file diffs, prepares a disposable Git review root, then runs a small explicit Gemini function-calling loop. Every ordinary generation declares exactly `read` and `bash`; application code dispatches each call under the credential-free review-tool identity. The loop continues until Gemini returns a structured result, the cumulative 16 MiB serialized function-response allowance forces one final-only generation, or the review deadline ends. Application code still requires a final summary and findings whose paths match fetched changed files before persistence.
+The worker starts with bounded merge request metadata and changed-file diffs, prepares a disposable Git review root, then runs a small explicit Gemini function-calling loop. Every ordinary generation declares exactly `read`, `bash`, and `codemode`; application code dispatches the underlying reads, commands, and JavaScript helper under the credential-free review-tool identity. The loop continues until Gemini returns a structured result, the cumulative 16 MiB serialized function-response allowance forces one final-only generation, or the review deadline ends. Application code still requires a final summary and findings whose paths match fetched changed files before persistence.
 
 A finding is a discrete, actionable correctness, security, or reliability defect introduced by the changed diff or made newly reachable or materially worse by it. It must identify concrete affected behavior and a realistic failure scenario without relying on unstated assumptions. Pre-existing issues unaffected by the change, style preferences, generic best practices, speculative risks, and missing tests or documentation without an independent concrete defect are not findings. Attributed tool context may establish impact, but each finding remains attached to an exact changed-file `new_path`. Findings with the same root cause are consolidated and explanations state the changed behavior, trigger, and impact concisely before recommending the smallest relevant correction.
 
@@ -93,9 +94,15 @@ Findings use ordered priorities `P0` through `P3`. `P0` is an immediate deployme
 
 ### Local review agent
 
-The model-facing foundation is exactly two tools. `read` reads relative or absolute file paths as bounded text. `bash` executes an unrestricted Bash command in the current Git working directory with Pi-compatible tail truncation and review-local full-output files. There is no command allowlist, path confinement, network broker, or sandbox. Both tools run as the dedicated review-tool UID/GID with a minimal environment and no service credentials; the application process retains final result validation and GitLab publication. The authoritative trust and credential decision is in [Security](security.md#local-review-agent).
+The underlying capabilities are `read` and `bash`, available directly or composed through [codemode](#codemode). `read` reads relative or absolute file paths as bounded text. `bash` executes an unrestricted Bash command in the current Git working directory with Pi-compatible tail truncation and review-local full-output files. There is no command allowlist, path confinement, network broker, or sandbox. Both tools run as the dedicated review-tool UID/GID with a minimal environment and no service credentials; the application process retains final result validation and GitLab publication. The authoritative trust and credential decision is in [Security](security.md#local-review-agent).
 
 Current-project runtime memory is materialized as an ordinary, provenance-bearing JSON file outside repository-controlled paths in the review root. Trusted code fixes its GitLab instance and numeric project scope. All exposed memory versions are recorded at the successful review-result checkpoint.
+
+### Codemode
+
+The Gemini `codemode` function takes `{ "code": "..." }`, with JavaScript source as an async-function body. It follows Pi's `await tools.read(args)`, `await tools.bash(args)`, `text(value)`, `console.log(...)`, top-level `return`, and `exit()` interface. Scripts can chain calls using previous results and use `Promise.allSettled()` for independent work. Direct tools remain declared; codemode does not replace the explicit Gemini loop or the review rubric.
+
+Each call starts a fresh QuickJS helper process. Only the script's selected output and error, if any, become its Gemini function response. The trusted Go dispatcher handles nested calls and retains their diagnostics; intermediate results never enter the model conversation automatically. There is no persistent JavaScript state, tool discovery, MCP, or nested model access. The helper API and credential boundary are defined in [Security](security.md#local-review-agent), and execution, output, and evidence limits in [Reliability](reliability.md#codemode).
 
 ### Repository workspace
 
@@ -129,7 +136,7 @@ Panel handlers query SQLite through fixed-size cursor pagination and bounded agg
 
 ## Context and State
 
-The model conversation begins with bounded changed-file diffs, relevant metadata, the current Git working directory and exact reviewed head, deterministic paths and initial revisions for prepared related repositories, the review-memory file path and advisory authority, the structured response schema, and exactly the `read` and `bash` declarations. The system instruction keeps tool guidance minimal and does not teach shell or Git command recipes. Function responses are added in same-turn call order. Conversations and command output are not persisted in SQLite.
+The model conversation begins with bounded changed-file diffs, relevant metadata, the current Git working directory and exact reviewed head, deterministic paths and initial revisions for prepared related repositories, the review-memory file path and advisory authority, the structured response schema, and exactly the `read`, `bash`, and `codemode` declarations. The system instruction keeps tool guidance minimal and does not teach shell or Git command recipes. Function responses are added in same-turn call order. Conversations and command output are not persisted in SQLite.
 
 SQLite stores webhook, job, publication, patch-equivalence, merge request progress, and runtime-memory state. A review job may originate from a webhook event or from reconciliation without an event. Each newly generated result records either its validated GitLab patch ID or an explicit unavailable outcome. An equivalent job records the same patch ID and its canonical job ID but owns no result, findings, memory-retrieval audit, or publication. Existing and externally recovered rows without locally validated results retain unknown patch identity. GitLab remains the source of truth for merge requests and published discussions.
 

@@ -33,6 +33,12 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
+	if repository.IsCodemodeHelperInvocation(os.Args[1:]) {
+		if err := repository.RunCodemodeHelper(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if repository.IsReadHelperInvocation(os.Args[1:]) {
 		if err := repository.RunReadHelper(os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)

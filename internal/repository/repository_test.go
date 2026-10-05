@@ -22,6 +22,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if IsCodemodeHelperInvocation(os.Args[1:]) {
+		if err := RunCodemodeHelper(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if IsReadHelperInvocation(os.Args[1:]) {
 		if err := RunReadHelper(os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)
@@ -182,6 +188,10 @@ func TestBashTailTruncationSpoolsFullOutput(t *testing.T) {
 		t.Fatalf("truncated output has %d lines: %q", strings.Count(visible, "line-"), output)
 	}
 	path := strings.TrimSuffix(strings.Split(output, "Full output: ")[1], "]")
+	script := result.ScriptValue.(BashScriptResult)
+	if script.Truncated || script.FullOutputPath != path || !strings.HasPrefix(script.Output, "line-1\n") || !strings.HasSuffix(script.Output, "line-2100\n") {
+		t.Fatalf("script output did not retain the bounded complete output: %+v", script)
+	}
 	contents, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(contents), "line-1\n") || !strings.Contains(string(contents), "line-2100\n") {
 		t.Fatalf("spool %q = %v", path, err)

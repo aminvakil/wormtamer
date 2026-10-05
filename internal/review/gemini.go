@@ -38,10 +38,12 @@ Return only the requested structured result when finished. Do not quote suspecte
 Available tools:
 - read: Read file contents
 - bash: Execute bash commands (ls, grep, find, etc.)
+- codemode: Run JavaScript that calls read and bash
 
 Guidelines:
 - Use bash for file operations like ls, rg, find
-- Use read to examine files instead of cat or sed.`
+- Use read to examine files instead of cat or sed.
+- Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.`
 
 type Generation struct {
 	Content                *genai.Content
@@ -116,7 +118,7 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 	logger := r.logger.With(
 		"model", diagnostics.Redact(r.model, r.forbidden), "project_id", snapshot.Identity.ProjectID,
 		"merge_request_iid", snapshot.Identity.MergeRequestIID, "head_sha", diagnostics.Redact(snapshot.Identity.HeadSHA, r.forbidden))
-	toolBytes := 0
+	budget := &toolEvidenceBudget{}
 	finalOnly := false
 	for turn := 0; ; turn++ {
 		if turn == 0 && logger.Enabled(reviewCtx, slog.LevelDebug) {
@@ -198,7 +200,12 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 				responses = append(responses, limitResponse(call))
 				continue
 			}
-			toolResult, callErr := tools.Call(reviewCtx, call.Name, call.Args)
+			toolResult, callErr := r.callTool(reviewCtx, tools, call, budget, logger, turn)
+			if errors.Is(callErr, repository.ErrToolEvidenceLimit) {
+				exhausted = true
+				responses = append(responses, limitResponse(call))
+				continue
+			}
 			if callErr != nil {
 				if contextErr := reviewContextError(ctx, reviewCtx); contextErr != nil {
 					return Result{}, nil, contextErr
@@ -209,16 +216,14 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			if resultErr != nil {
 				return Result{}, nil, resultErr
 			}
-			serialized, err := json.Marshal(functionResponse)
-			if err != nil {
-				return Result{}, nil, failure.Retry("tool_result_encoding_failed", 0)
-			}
-			if toolBytes+len(serialized) > maxToolResultBytes {
+			if err := budget.admit(functionResponse); err != nil {
+				if !errors.Is(err, repository.ErrToolEvidenceLimit) {
+					return Result{}, nil, err
+				}
 				exhausted = true
 				responses = append(responses, limitResponse(call))
 				continue
 			}
-			toolBytes += len(serialized)
 			responses = append(responses, &genai.Part{FunctionResponse: functionResponse})
 			logger.InfoContext(reviewCtx, "Gemini review tool completed", "turn", turn,
 				"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256), "outcome", "completed")
@@ -332,7 +337,7 @@ func safeToolNames(calls []*genai.FunctionCall) ([]string, int) {
 }
 
 func declaredTool(name string) bool {
-	return name == repository.ToolRead || name == repository.ToolBash
+	return name == repository.ToolRead || name == repository.ToolBash || name == repository.ToolCodemode
 }
 
 func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (Generation, error) {
@@ -400,7 +405,7 @@ func toolDeclarations() []*genai.FunctionDeclaration {
 	return []*genai.FunctionDeclaration{
 		{
 			Name:        repository.ToolRead,
-			Description: "Read the contents of a file. Output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+			Description: "Read the contents of a file. Output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Codemode: tools.read(args) resolves to a string; errors reject.",
 			ParametersJsonSchema: map[string]any{
 				"type": "object", "additionalProperties": false, "required": []string{"path"},
 				"properties": map[string]any{
@@ -412,12 +417,24 @@ func toolDeclarations() []*genai.FunctionDeclaration {
 		},
 		{
 			Name:        repository.ToolBash,
-			Description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+			Description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Codemode: tools.bash(args) resolves to { output, truncated, full_output_path?, exit_code, wall_time_seconds }, including non-zero exits. Script output holds up to 1 MiB, keeping its start and end when truncated. Argument errors and execution timeouts reject.",
 			ParametersJsonSchema: map[string]any{
 				"type": "object", "additionalProperties": false, "required": []string{"command"},
 				"properties": map[string]any{
 					"command": map[string]any{"type": "string", "description": "Bash command to execute"},
 					"timeout": map[string]any{"type": "number", "exclusiveMinimum": 0, "description": "Timeout in seconds (optional, no default timeout)"},
+				},
+			},
+		},
+		{
+			Name: repository.ToolCodemode,
+			Description: `Run JavaScript that calls read and bash. The code is an async function body: top-level await and return work. Use tools.read(args) and tools.bash(args), with the arguments and return values described by those tools. Chain dependent calls, batch independent calls with Promise.allSettled, and filter results before printing. Only text(value), console.log(...), and the top-level return value reach the model. exit() ends the script successfully. Calls still running when the script ends are cancelled. A failed script keeps partial output and reports its error; completed tool effects are not undone.
+Optional first line: // @options: {"max_output_tokens": 10000, "timeout_ms": 60000}
+Output defaults to approximately 10000 tokens, preserving its start and end and saving full text to a review-local file when truncated. timeout_ms is optional; the whole-review deadline always applies. Each script has a fresh QuickJS VM with 256 MiB of memory. No Node, filesystem/network APIs, timers, modules, persistent globals, or nested codemode. Reach the outside world only through tools.read and tools.bash.`,
+			ParametersJsonSchema: map[string]any{
+				"type": "object", "additionalProperties": false, "required": []string{"code"},
+				"properties": map[string]any{
+					"code": map[string]any{"type": "string", "description": "JavaScript source, without a markdown fence, at most 256 KiB."},
 				},
 			},
 		},

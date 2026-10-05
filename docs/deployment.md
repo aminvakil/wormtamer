@@ -1,6 +1,6 @@
 # Container deployment
 
-Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, public CA certificates, Bash, Git, ripgrep (`rg`), fd (`fd`), and curl. Configuration, credentials, SQLite state, and disposable review workspaces remain outside the image.
+Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, public CA certificates, Bash, Git, ripgrep (`rg`), fd (`fd`), and curl. Configuration, credentials, SQLite state, and disposable review workspaces remain outside the image. [Codemode](agents/architecture.md#codemode) uses an embedded QuickJS runtime in a credential-free helper; no Node installation or additional service is needed.
 
 ## Image
 
