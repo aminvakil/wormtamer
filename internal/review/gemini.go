@@ -21,7 +21,7 @@ const (
 	geminiDeveloperAPIBaseURL = "https://generativelanguage.googleapis.com/"
 	geminiHTTPTimeout         = 2 * time.Minute
 	geminiGenerationTimeout   = 2 * time.Minute
-	geminiReviewTimeout       = 5 * time.Minute
+	geminiReviewTimeout       = 10 * time.Minute
 	maxToolResultBytes        = repository.MaxFunctionResponseBytes
 )
 
