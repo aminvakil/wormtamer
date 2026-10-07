@@ -55,10 +55,16 @@
         });
     }
 
+    function stringifyOutput(value) {
+        return stringify(value, (_, nested) => nested instanceof ErrorCtor
+            ? { ...nested, name: nested.name, message: nested.message }
+            : nested);
+    }
+
     function text(value) {
         if (finished) return;
         const rendered = value !== null && (typeof value === "object" || typeof value === "function")
-            ? stringify(value) : String(value);
+            ? stringifyOutput(value) : String(value);
         bridge("output", rendered === undefined ? String(value) : rendered);
     }
 
@@ -72,7 +78,7 @@
         console[level] = (...args) => text(args.map(value => {
             if (value instanceof ErrorCtor) return errorText(value);
             if (typeof value === "string") return value;
-            const json = stringify(value);
+            const json = stringifyOutput(value);
             return json === undefined ? String(value) : json;
         }).join(" "));
     }

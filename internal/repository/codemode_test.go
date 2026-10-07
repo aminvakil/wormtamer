@@ -48,6 +48,29 @@ return "finished";`
 	}
 }
 
+func TestCodemodePreservesNestedErrorsInOutput(t *testing.T) {
+	workspace := testToolWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	code := `
+const error = new TypeError("invalid evidence");
+error.code = "INVALID_EVIDENCE";
+const results = await Promise.allSettled([Promise.resolve("ready"), Promise.reject(error)]);
+text(results);
+console.log({results});
+return results;`
+	result, err := workspace.RunCode(ctx, map[string]any{"code": code}, codeTools(workspace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, _ := result.Response["output"].(string)
+	for _, field := range []string{`"value":"ready"`, `"name":"TypeError"`, `"message":"invalid evidence"`, `"code":"INVALID_EVIDENCE"`} {
+		if strings.Count(output, field) != 3 {
+			t.Fatalf("missing %s in text, console, or return output: %+v", field, result)
+		}
+	}
+}
+
 func TestCodemodePreservesEmbeddedNULs(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	for _, test := range []struct {
