@@ -6,7 +6,7 @@ require (
 	github.com/buke/quickjs-go v0.7.7
 	github.com/mattn/go-sqlite3 v1.14.52
 	golang.org/x/sys v0.48.0
-	google.golang.org/genai v1.71.0
+	google.golang.org/genai v1.72.0
 )
 
 require (
