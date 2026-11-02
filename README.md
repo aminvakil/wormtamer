@@ -76,6 +76,17 @@ Open `https://wormtamer.example/` to inspect persisted review activity, findings
 
 See [Container deployment](docs/deployment.md) for complete configuration, webhook, permissions, TLS termination, health checking, shutdown, persistence, backup, and restore guidance.
 
+### Optional setup script
+
+For deployment-specific tools, start `setup.sh` with:
+
+```bash
+#!/bin/bash
+set -Eeuo pipefail
+```
+
+See [Optional startup setup](docs/deployment.md#optional-startup-setup) for the complete installation example and mounting instructions.
+
 ## Development
 
     make test

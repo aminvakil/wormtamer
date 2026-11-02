@@ -1,6 +1,6 @@
 # Container deployment
 
-Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, public CA certificates, Bash, Git, ripgrep (`rg`), fd (`fd`), and curl. Configuration, credentials, SQLite state, and disposable review workspaces remain outside the image. [Codemode](agents/architecture.md#codemode) uses an embedded QuickJS runtime in a credential-free helper; no Node installation or additional service is needed.
+Wormtamer runs as one process and one replica. The container image includes the application, its CGO runtime libraries, public CA certificates, Bash, Git, ripgrep (`rg`), fd (`fd`), curl, and Python 3. Configuration, credentials, SQLite state, and disposable review workspaces remain outside the image. [Codemode](agents/architecture.md#codemode) uses an embedded QuickJS runtime in a credential-free helper; no Node installation or additional service is needed.
 
 ## Image
 
@@ -47,6 +47,33 @@ The webhook secret in GitLab must equal `gitlab.webhook_secret`. Close and merge
 
 The configuration contains plaintext credentials. Keep it outside version control, set it to mode `0600` or stricter, restrict its parent directory, and mount it read-only. The service process runs as root only so it can own private state and launch tools as fixed UID/GID `65532`; the model never receives a root process. Startup fails if the review-tool identity can access the configuration or SQLite paths. Do not pass credentials through command arguments or bake them into another image.
 
+## Optional startup setup
+
+To install deployment-specific tools without building an image, create an operator-maintained `setup.sh` outside reviewed repositories:
+
+```bash
+#!/bin/bash
+set -Eeuo pipefail
+
+apt-get update
+apt-get install -y --no-install-recommends python3-yaml python3-jinja2 ansible-core
+```
+
+Add its read-only mount to the existing service volumes in `compose.yml`:
+
+```yaml
+services:
+  wormtamer:
+    volumes:
+      - ./setup.sh:/etc/wormtamer/setup.sh:ro
+```
+
+For `docker run`, add `--mount type=bind,src=/absolute/path/setup.sh,dst=/etc/wormtamer/setup.sh,readonly`.
+
+When present, the entrypoint runs `/etc/wormtamer/setup.sh` as root using Bash with `errexit` and `pipefail`; the file does not need to be executable. Setup has a fixed ten-minute deadline, at which its process group is killed. A nonzero exit or timeout exits the container without starting Wormtamer; the container's restart policy may retry setup. Without the file, Wormtamer starts normally. Setup output goes to container logs; do not print credentials.
+
+The script runs on every container start, so make it safe to rerun. Installed packages survive a restart of the same container but not container recreation; installation may require network access again. Setup is trusted deployment code, not a model tool: keep the script read-only and inaccessible to the review-tool identity. Installed tools must be accessible to UID/GID `65532`; review commands use `PATH=/usr/local/bin:/usr/bin:/bin`. Exports in the setup script do not change that environment.
+
 ## Store state and disposable workspaces
 
 Use one persistent volume for `/var/lib/wormtamer`. The SQLite database, WAL, and shared-memory files must remain together on storage that provides reliable filesystem locking. Use a separate disposable volume or filesystem for `/var/lib/wormtamer-reviews` so review activity and disk exhaustion cannot starve persistent SQLite storage.
@@ -80,7 +107,7 @@ Replace the configuration source with its absolute host path. Publishing `8080:8
 
 The minimal panel does not authenticate requests or impose panel-specific request and concurrency limits. Configure the reverse proxy to restrict and limit the panel routes as required for the deployment. The webhook endpoint retains its separate application-owned secret verification and ingress limit; see the [panel security boundary](agents/security.md#read-only-web-panel).
 
-The executable is the image entrypoint, so `SIGTERM` reaches it directly. Keep the stop timeout at 20 seconds or longer; the process uses a bounded ten-second graceful-shutdown period.
+After optional setup succeeds, the entrypoint replaces itself with Wormtamer, so `SIGTERM` reaches the service directly. Stopping the container during setup terminates setup without starting the service. Keep the stop timeout at 20 seconds or longer; the service uses a bounded ten-second graceful-shutdown period.
 
 ## Operate
 

@@ -21,10 +21,11 @@ RUN apt-get update \
     && install -d -m 0700 -o root -g root /etc/wormtamer
 
 COPY --from=build /out/wormtamer /usr/local/bin/wormtamer
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 
 USER root
-ENTRYPOINT ["/usr/local/bin/wormtamer"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["-config", "/etc/wormtamer/config.json"]
