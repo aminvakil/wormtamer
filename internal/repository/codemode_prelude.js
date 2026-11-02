@@ -1,7 +1,93 @@
-// Adapted from @earendil-works/pi-codemode 1.0.3, runtime/prelude-source.ts.
+// Adapted from @earendil-works/pi-codemode 1.0.3 and 1.5.0, runtime/prelude-source.ts.
 // Copyright (c) 2025 Mario Zechner. MIT license: see pi-codemode.LICENSE.
 (function (bridge) {
     "use strict";
+
+    // The prelude and script share built-ins. Lock them before running model code
+    // so prototype or global mutations cannot corrupt tool responses or output.
+    // This protects bridge integrity, not the unrestricted Bash capability.
+    //
+    // Freeze every object reachable from the built-in globals, plus intrinsics
+    // only reachable from instances (iterator and generator prototypes, %TypedArray%).
+    // Freezing alone causes the "override mistake": inherited read-only data
+    // properties reject instance assignments, including this.name in Error subclasses.
+    // Common overrides use setters that define an own property on the instance.
+    (function lockdown() {
+        const OVERRIDABLE = new Set(["constructor", "name", "message", "toString", "toLocaleString", "valueOf", "toJSON"]);
+        const seen = new Set([globalThis]);
+        const queue = [];
+        const add = value => {
+            if ((typeof value === "object" && value !== null) || typeof value === "function") {
+                if (!seen.has(value)) {
+                    seen.add(value);
+                    queue.push(value);
+                }
+            }
+        };
+
+        // Object-literal accessors have no own prototype; function expressions
+        // would introduce prototype.constructor properties to convert without end.
+        function allowOverride(object, key, value, enumerable) {
+            const { get, set } = Object.getOwnPropertyDescriptor({
+                get accessor() {
+                    return value;
+                },
+                set accessor(next) {
+                    if (this === object) {
+                        throw new TypeError("Cannot assign to read only property '" + String(key) + "' of a built-in");
+                    }
+                    if ((typeof this !== "object" || this === null) && typeof this !== "function") return;
+                    Object.defineProperty(this, key, { value: next, writable: true, enumerable: true, configurable: true });
+                },
+            }, "accessor");
+            Object.defineProperty(object, key, { get, set, enumerable, configurable: false });
+            add(get);
+            add(set);
+        }
+
+        for (const key of Reflect.ownKeys(globalThis)) {
+            const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+            add(descriptor.value);
+            add(descriptor.get);
+            add(descriptor.set);
+            if ("value" in descriptor && descriptor.configurable) {
+                Object.defineProperty(globalThis, key, { writable: false, configurable: false });
+            }
+        }
+        add(Object.getPrototypeOf(function* () {}));
+        add(Object.getPrototypeOf(async function () {}));
+        add(Object.getPrototypeOf(async function* () {}));
+        add(Object.getPrototypeOf(Int8Array));
+        add(Object.getPrototypeOf([][Symbol.iterator]()));
+        add(Object.getPrototypeOf(new Map()[Symbol.iterator]()));
+        add(Object.getPrototypeOf(new Set()[Symbol.iterator]()));
+        add(Object.getPrototypeOf(""[Symbol.iterator]()));
+        add(Object.getPrototypeOf(/a/[Symbol.matchAll]("")));
+        if (typeof Iterator === "function") {
+            if (typeof Iterator.prototype.map === "function") add(Object.getPrototypeOf([].values().map(value => value)));
+            if (typeof Iterator.from === "function") add(Object.getPrototypeOf(Iterator.from({ next() {} })));
+        }
+
+        while (queue.length > 0) {
+            const object = queue.pop();
+            add(Object.getPrototypeOf(object));
+            const descriptors = Object.getOwnPropertyDescriptors(object);
+            for (const key of Reflect.ownKeys(descriptors)) {
+                const descriptor = descriptors[key];
+                if ("value" in descriptor) {
+                    add(descriptor.value);
+                    if (descriptor.writable && descriptor.configurable &&
+                        (object === Object.prototype || OVERRIDABLE.has(key))) {
+                        allowOverride(object, key, descriptor.value, descriptor.enumerable);
+                    }
+                } else {
+                    add(descriptor.get);
+                    add(descriptor.set);
+                }
+            }
+            Object.freeze(object);
+        }
+    })();
     const stringify = JSON.stringify;
     const parse = JSON.parse;
     const promiseThen = Promise.prototype.then;

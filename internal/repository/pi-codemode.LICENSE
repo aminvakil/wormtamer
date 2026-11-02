@@ -1,4 +1,5 @@
-Portions of codemode_prelude.js are adapted from @earendil-works/pi-codemode 1.0.3:
+Portions of codemode_prelude.js are adapted from @earendil-works/pi-codemode 1.0.3
+and 1.5.0 (builtin lockdown):
 https://github.com/earendil-works/pi/tree/main/packages/codemode
 
 MIT License
