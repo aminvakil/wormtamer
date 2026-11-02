@@ -11,7 +11,7 @@ RUN CGO_ENABLED=1 go build -v -o /out/wormtamer ./cmd/wormtamer
 FROM debian:trixie-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl fd-find git passwd ripgrep \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl fd-find git passwd python3 ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 wormtamer-review \
     && useradd --system --uid 65532 --gid 65532 --home-dir /nonexistent --shell /usr/sbin/nologin wormtamer-review \
