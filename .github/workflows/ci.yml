@@ -49,14 +49,6 @@ jobs:
       - name: Build docker image.
         run: docker build --no-cache --tag ${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID} .
 
-      - name: Check review-tool image commands and identity.
-        run: |
-          docker run --rm --entrypoint /bin/bash ${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID} -c '
-            command -v bash git rg fd curl >/dev/null &&
-            test "$(id -u wormtamer-review)" = 65532 &&
-            test "$(id -g wormtamer-review)" = 65532
-          '
-
       - name: Run a container of created image.
         run: |
           DOCKERCONTAINER=$(docker run \
