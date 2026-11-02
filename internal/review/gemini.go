@@ -50,6 +50,7 @@ type Generation struct {
 	ModelVersion           string
 	FinishReason           genai.FinishReason
 	CandidateTokenCount    int32
+	PromptTokenCount       int32
 	CandidatesTokenCount   int32
 	ThoughtsTokenCount     int32
 	UsageMetadataAvailable bool
@@ -200,7 +201,9 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 				responses = append(responses, limitResponse(call))
 				continue
 			}
+			toolStartedAt := time.Now()
 			toolResult, callErr := r.callTool(reviewCtx, tools, call, budget, logger, turn)
+			toolDuration := time.Since(toolStartedAt)
 			if errors.Is(callErr, repository.ErrToolEvidenceLimit) {
 				exhausted = true
 				responses = append(responses, limitResponse(call))
@@ -226,7 +229,7 @@ func (r *GeminiReviewer) Review(ctx context.Context, snapshot gitlab.Snapshot, t
 			}
 			responses = append(responses, &genai.Part{FunctionResponse: functionResponse})
 			logger.InfoContext(reviewCtx, "Gemini review tool completed", "turn", turn,
-				"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256), "outcome", "completed")
+				"tool", boundedDiagnosticValue(call.Name, r.forbidden, 256), "outcome", "completed", "duration_ms", toolDuration.Milliseconds())
 			if logger.Enabled(reviewCtx, slog.LevelDebug) {
 				logger.DebugContext(reviewCtx, "Gemini review tool result", "turn", turn,
 					"tool_call_id", boundedDiagnosticValue(call.ID, r.forbidden, 256), "tool", boundedDiagnosticValue(call.Name, r.forbidden, 256),
@@ -317,7 +320,8 @@ func (r *GeminiReviewer) logGeneration(logger *slog.Logger, ctx context.Context,
 		attributes = append(attributes, "resolved_model_version", generation.ModelVersion)
 	}
 	if generation.UsageMetadataAvailable {
-		attributes = append(attributes, "candidates_token_count", generation.CandidatesTokenCount, "thinking_token_count", generation.ThoughtsTokenCount)
+		attributes = append(attributes, "prompt_token_count", generation.PromptTokenCount,
+			"candidates_token_count", generation.CandidatesTokenCount, "thinking_token_count", generation.ThoughtsTokenCount)
 	}
 	logger.InfoContext(ctx, "Gemini review generation", attributes...)
 }
@@ -347,6 +351,7 @@ func (g *sdkGenerator) Generate(ctx context.Context, model string, contents []*g
 	}
 	generation := Generation{ModelVersion: response.ModelVersion}
 	if response.UsageMetadata != nil {
+		generation.PromptTokenCount = response.UsageMetadata.PromptTokenCount
 		generation.CandidatesTokenCount = response.UsageMetadata.CandidatesTokenCount
 		generation.ThoughtsTokenCount = response.UsageMetadata.ThoughtsTokenCount
 		generation.UsageMetadataAvailable = true

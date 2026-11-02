@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/aminvakil/wormtamer/internal/diagnostics"
 	"github.com/aminvakil/wormtamer/internal/failure"
@@ -62,7 +63,9 @@ func (r *GeminiReviewer) callTool(ctx context.Context, broker repository.ToolBro
 			logger.DebugContext(ctx, "Gemini review tool call", "turn", turn,
 				"tool_call_id", nested.ID, "tool", name, "arguments", diagnosticJSON(args, r.forbidden, 4096))
 		}
+		toolStartedAt := time.Now()
 		result, err := broker.Call(ctx, name, args)
+		toolDuration := time.Since(toolStartedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -73,7 +76,8 @@ func (r *GeminiReviewer) callTool(ctx context.Context, broker repository.ToolBro
 		if err := budget.admit(response); err != nil {
 			return nil, err
 		}
-		logger.InfoContext(ctx, "Gemini review tool completed", "turn", turn, "tool", name, "outcome", "completed")
+		logger.InfoContext(ctx, "Gemini review tool completed", "turn", turn, "tool", name,
+			"outcome", "completed", "duration_ms", toolDuration.Milliseconds())
 		if logger.Enabled(ctx, slog.LevelDebug) {
 			logger.DebugContext(ctx, "Gemini review tool result", "turn", turn,
 				"tool_call_id", nested.ID, "tool", name, "result", diagnostics.Redact(string(encoded), r.forbidden))

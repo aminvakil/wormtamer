@@ -3,8 +3,11 @@ package review
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -92,6 +95,59 @@ func TestGeminiReviewerDispatchesSameTurnCallsInOrder(t *testing.T) {
 	}
 }
 
+func TestReviewLogsSDKUsageMetadataWhenAvailable(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		usage      string
+		wantPrompt float64
+	}{
+		{
+			name:       "reported",
+			usage:      `,"usageMetadata":{"promptTokenCount":321,"candidatesTokenCount":12,"thoughtsTokenCount":34}`,
+			wantPrompt: 321,
+		},
+		{
+			name:  "zero",
+			usage: `,"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":12,"thoughtsTokenCount":34}`,
+		},
+		{name: "absent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"ok\",\"findings\":[]}"}],"role":"model"},"finishReason":"STOP"}]` + test.usage + "}"))
+			}))
+			defer server.Close()
+
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			reviewer, err := NewGeminiReviewer(context.Background(), "test-key", server.URL, "gemini-test", "default", nil, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+			if err != nil || result.Summary != "ok" {
+				t.Fatalf("Review() = %+v, %v", result, err)
+			}
+			var event map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event["msg"] != "Gemini review generation" {
+				t.Fatalf("unexpected event: %v", event)
+			}
+			for key, want := range map[string]float64{
+				"prompt_token_count": test.wantPrompt, "candidates_token_count": 12, "thinking_token_count": 34,
+			} {
+				got, present := event[key]
+				if present != (test.usage != "") || (present && got != want) {
+					t.Fatalf("%s = %v (present=%t), want %v (present=%t)", key, got, present, want, test.usage != "")
+				}
+			}
+		})
+	}
+}
+
 func TestReviewDiagnosticsRespectLogLevelAndRedactCredentials(t *testing.T) {
 	secret := "configured\nsecret"
 	for _, test := range []struct {
@@ -115,6 +171,7 @@ func TestReviewDiagnosticsRespectLogLevelAndRedactCredentials(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := logs.String()
+			assertToolDurations(t, output, []string{repository.ToolRead})
 			privateValues := []string{"+changed", "private tool result", "diagnostic response"}
 			if !test.debug {
 				for _, value := range privateValues {
@@ -258,6 +315,31 @@ func TestReviewerClassifiesReviewDeadline(t *testing.T) {
 				t.Fatalf("review deadline error = %v", err)
 			}
 		})
+	}
+}
+
+func assertToolDurations(t *testing.T, output string, wantTools []string) {
+	t.Helper()
+	var tools []string
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		var event struct {
+			Message  string `json:"msg"`
+			Tool     string `json:"tool"`
+			Duration *int64 `json:"duration_ms"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Message != "Gemini review tool completed" {
+			continue
+		}
+		if event.Duration == nil || *event.Duration < 0 {
+			t.Fatalf("missing or negative tool duration: %s", line)
+		}
+		tools = append(tools, event.Tool)
+	}
+	if !slices.Equal(tools, wantTools) {
+		t.Fatalf("completed tools = %v, want %v", tools, wantTools)
 	}
 }
 

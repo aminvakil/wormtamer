@@ -57,6 +57,7 @@ func TestCodemodeExposesOnlySelectedOutputAndLogsNestedCalls(t *testing.T) {
 			if !strings.Contains(logs.String(), `"parent_tool_call_id":"script"`) || !strings.Contains(logs.String(), `"tool":"bash"`) {
 				t.Fatalf("missing nested diagnostics: %s", logs.String())
 			}
+			assertToolDurations(t, logs.String(), []string{repository.ToolBash, repository.ToolCodemode})
 			for _, content := range []string{"private script", "private intermediate", "private command"} {
 				if strings.Contains(logs.String(), content) != (level == slog.LevelDebug) {
 					t.Fatalf("unexpected diagnostic content at %s: %s", level, logs.String())
