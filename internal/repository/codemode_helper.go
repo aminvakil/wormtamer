@@ -38,6 +38,8 @@ type codemodeMessage struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 	Code      string          `json:"code,omitempty"`
 	Text      string          `json:"text,omitempty"`
+	Console   bool            `json:"console,omitempty"`
+	More      bool            `json:"more,omitempty"`
 	Error     string          `json:"error,omitempty"`
 	Response  json.RawMessage `json:"response,omitempty"`
 }
@@ -100,6 +102,10 @@ func RunCodemodeHelper(input io.Reader, output io.Writer) error {
 			}
 			bridgeErr = writeCodemodeMessage(output, message)
 		case "output":
+			if len(args) != 3 {
+				return ctx.ThrowTypeError("Invalid script output")
+			}
+			isConsole := args[2].ToBool()
 			// ToString uses a NUL-terminated C string; this conversion retains its full length.
 			units, err := args[1].ToStringUTF16()
 			if err != nil {
@@ -116,11 +122,11 @@ func RunCodemodeHelper(input io.Reader, output io.Writer) error {
 			// Keep frames small even when text() prints a large string.
 			for len(text) > 64<<10 && bridgeErr == nil {
 				end := utf8PrefixLength(text, 64<<10)
-				bridgeErr = writeCodemodeMessage(output, codemodeMessage{Kind: "output", Text: text[:end]})
+				bridgeErr = writeCodemodeMessage(output, codemodeMessage{Kind: "output", Text: text[:end], Console: isConsole, More: true})
 				text = text[end:]
 			}
 			if bridgeErr == nil {
-				bridgeErr = writeCodemodeMessage(output, codemodeMessage{Kind: "output", Text: text + "\n"})
+				bridgeErr = writeCodemodeMessage(output, codemodeMessage{Kind: "output", Text: text + "\n", Console: isConsole})
 			}
 		case "done":
 			if len(args) != 3 {

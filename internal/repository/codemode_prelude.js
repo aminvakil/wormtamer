@@ -151,7 +151,7 @@
         if (finished) return;
         const rendered = value !== null && (typeof value === "object" || typeof value === "function")
             ? stringifyOutput(value) : String(value);
-        bridge("output", rendered === undefined ? String(value) : rendered);
+        bridge("output", rendered === undefined ? String(value) : rendered, false);
     }
 
     function exit() {
@@ -161,12 +161,16 @@
 
     const console = {};
     for (const level of ["log", "info", "warn", "error", "debug"]) {
-        console[level] = (...args) => text(args.map(value => {
-            if (value instanceof ErrorCtor) return errorText(value);
-            if (typeof value === "string") return value;
-            const json = stringifyOutput(value);
-            return json === undefined ? String(value) : json;
-        }).join(" "));
+        console[level] = (...args) => {
+            if (finished) return;
+            const rendered = args.map(value => {
+                if (value instanceof ErrorCtor) return errorText(value);
+                if (typeof value === "string") return value;
+                const json = stringifyOutput(value);
+                return json === undefined ? String(value) : json;
+            }).join(" ");
+            bridge("output", rendered, true);
+        };
     }
     Object.freeze(console);
     const tools = Object.freeze({ read: caller("read"), bash: caller("bash") });

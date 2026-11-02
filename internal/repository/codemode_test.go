@@ -89,6 +89,33 @@ return "finished";`
 	}
 }
 
+func TestCodemodeOutputBoundaries(t *testing.T) {
+	workspace := testToolWorkspace(t)
+	for _, test := range []struct {
+		name string
+		code string
+		want string
+	}{
+		{"none", `return;`, ""},
+		{"single", `return "only";`, "only\n"},
+		{"console-only", `console.log("log"); console.info({ready: true}); console.warn(""); console.error("error"); console.debug("debug");`,
+			"<console_output>\nlog\n{\"ready\":true}\n\nerror\ndebug\n</console_output>\n"},
+		{"mixed", `console.log("before"); text("first\nline"); console.warn("between"); text(""); return "last";`,
+			"==> text 1/3 <==\nfirst\nline\n==> text 2/3 <==\n\n==> text 3/3 <==\nlast\n<console_output>\nbefore\nbetween\n</console_output>\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := workspace.RunCode(ctx, map[string]any{"code": test.code}, codeTools(workspace))
+			output, _ := result.Response["output"].(string)
+			_, body, found := strings.Cut(output, "Output:\n")
+			if err != nil || !found || body != test.want {
+				t.Fatalf("script output = %+v, %v; want body %q", result, err, test.want)
+			}
+		})
+	}
+}
+
 func TestCodemodePreservesNestedErrorsInOutput(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -164,17 +191,19 @@ func TestCodemodeRunsIndependentCallsConcurrently(t *testing.T) {
 func TestCodemodeScriptFailuresKeepPartialOutput(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	for _, code := range []string{
-		`text("partial"); throw new Error("deliberate");`,
-		`text("partial"); throw "";`,
-		`text("partial"); await Promise.reject("");`,
-		`text("partial"); await new Promise(() => {});`,
-		`text("partial"); const values = []; for (;;) values.push(new ArrayBuffer(16 * 1024 * 1024));`,
+		`throw new Error("deliberate");`,
+		`throw "";`,
+		`await Promise.reject("");`,
+		`await new Promise(() => {});`,
+		`const values = []; for (;;) values.push(new ArrayBuffer(16 * 1024 * 1024));`,
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		code = `text("partial"); console.log("diagnostic"); text("more");` + code
 		result, err := workspace.RunCode(ctx, map[string]any{"code": code}, codeTools(workspace))
 		cancel()
 		output, _ := result.Response["error"].(string)
-		if err != nil || !strings.Contains(output, "partial") || !strings.Contains(output, "Script failed") || !strings.Contains(output, "Script error:") {
+		want := "Output:\n==> text 1/2 <==\npartial\n==> text 2/2 <==\nmore\n<console_output>\ndiagnostic\n</console_output>\nScript error:"
+		if err != nil || !strings.Contains(output, "Script failed") || !strings.Contains(output, want) {
 			t.Fatalf("script failure = %+v, %v", result, err)
 		}
 	}
@@ -216,8 +245,9 @@ func TestCodemodeExplicitTimeoutInterruptsJavaScript(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result, err := workspace.RunCode(ctx, map[string]any{"code": "// @options: {\"timeout_ms\": 100}\ntext('partial'); while(true) {}"}, codeTools(workspace))
-	if err != nil || !strings.Contains(fmt.Sprint(result.Response["error"]), "timeout_ms") {
+	result, err := workspace.RunCode(ctx, map[string]any{"code": "// @options: {\"timeout_ms\": 1000}\nconsole.log('diagnostic'); text('partial'); while(true) {}"}, codeTools(workspace))
+	output, _ := result.Response["error"].(string)
+	if err != nil || !strings.Contains(output, "Output:\npartial\n<console_output>\ndiagnostic\n</console_output>\nScript error:\nScript exceeded timeout_ms") {
 		t.Fatalf("script timeout = %+v, %v", result, err)
 	}
 }
@@ -269,15 +299,28 @@ func TestCodemodeCancelsOutstandingCallsOnReturnAndParentCancellation(t *testing
 
 func TestCodemodeTruncatesAndSpoolsSelectedOutput(t *testing.T) {
 	workspace := testToolWorkspace(t)
-	result, err := workspace.RunCode(context.Background(), map[string]any{"code": "// @options: {\"max_output_tokens\": 5}\ntext('start-' + 'x'.repeat(200) + '-end');"}, codeTools(workspace))
-	output, _ := result.Response["output"].(string)
-	_, path, found := strings.Cut(output, "Full output: ")
-	if err != nil || !found || !strings.Contains(output, "start-") || !strings.Contains(output, "-end") || !strings.Contains(output, "[Output truncated]") {
-		t.Fatalf("truncated script = %+v, %v", result, err)
-	}
-	full, err := os.ReadFile(path)
-	if err != nil || string(full) != "start-"+strings.Repeat("x", 200)+"-end\n" {
-		t.Fatalf("full script output = %q, %v", full, err)
+	for _, test := range []struct {
+		name string
+		code string
+		full string
+	}{
+		{"single", `text('start-' + 'x'.repeat(200) + '-end');`, "start-" + strings.Repeat("x", 200) + "-end\n"},
+		{"chunked-items", `console.log('log-' + '界'.repeat(32769)); text('start-' + 'é'.repeat(32769) + '-end'); return 'last';`,
+			"==> text 1/2 <==\nstart-" + strings.Repeat("é", 32769) + "-end\n==> text 2/2 <==\nlast\n<console_output>\nlog-" + strings.Repeat("界", 32769) + "\n</console_output>\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			code := "// @options: {\"max_output_tokens\": 5}\n" + test.code
+			result, err := workspace.RunCode(context.Background(), map[string]any{"code": code}, codeTools(workspace))
+			output, _ := result.Response["output"].(string)
+			_, path, found := strings.Cut(output, "Full output: ")
+			if err != nil || !found || !strings.Contains(output, test.full[:10]) || !strings.Contains(output, test.full[len(test.full)-10:]) || !strings.Contains(output, "[Output truncated]") {
+				t.Fatalf("truncated script = %+v, %v", result, err)
+			}
+			full, err := os.ReadFile(path)
+			if err != nil || string(full) != test.full {
+				t.Fatalf("full script output differs: got %d bytes, want %d; error %v", len(full), len(test.full), err)
+			}
+		})
 	}
 }
 
@@ -285,7 +328,7 @@ func TestCodemodeBoundsOutputAndReportsSpoolExhaustion(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	code := fmt.Sprintf(`text("partial"); text("x".repeat(%d));`, maxCodemodeOutput+1)
+	code := fmt.Sprintf(`text("partial"); console.log("x".repeat(%d));`, maxCodemodeOutput+1)
 	result, err := workspace.RunCode(ctx, map[string]any{"code": code}, codeTools(workspace))
 	output, _ := result.Response["error"].(string)
 	if err != nil || !strings.Contains(output, "partial") || !strings.Contains(output, "Script output exceeded") {
@@ -295,6 +338,18 @@ func TestCodemodeBoundsOutputAndReportsSpoolExhaustion(t *testing.T) {
 	result, err = workspace.RunCode(ctx, map[string]any{"code": `text("x".repeat(50000));`}, codeTools(workspace))
 	if err != nil || !strings.Contains(fmt.Sprint(result.Response["error"]), "spool allowance exhausted") {
 		t.Fatalf("spool limit = %+v, %v", result, err)
+	}
+}
+
+func TestCodemodeTextAndConsoleShareItemLimit(t *testing.T) {
+	workspace := testToolWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	code := fmt.Sprintf(`text("partial"); for (let i = 1; i < %d; i++) console.log(""); text("unreachable");`, maxCodemodeItems)
+	result, err := workspace.RunCode(ctx, map[string]any{"code": code}, codeTools(workspace))
+	output, _ := result.Response["error"].(string)
+	if err != nil || !strings.Contains(output, "partial") || !strings.Contains(output, "Script output exceeded") || strings.Contains(output, "unreachable") {
+		t.Fatalf("output item limit = %+v, %v", result, err)
 	}
 }
 

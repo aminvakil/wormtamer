@@ -187,8 +187,10 @@ func (w *localWorkspace) RunCode(ctx context.Context, arguments map[string]any, 
 	})
 	slots := make(chan struct{}, maxCodemodeConcurrent)
 	var lastID int64
-	var emitted strings.Builder
-	outputFrames := 0
+	var emitted, console strings.Builder
+	var textStarts []int
+	outputFrames, outputItems := 0, 0
+	outputMore, outputConsole := false, false
 	var scriptError string
 	scriptFailed := false
 loop:
@@ -248,13 +250,30 @@ loop:
 				})
 			case "output":
 				outputFrames++
-				if emitted.Len()+len(message.Text) > maxCodemodeOutput || outputFrames > 2*maxCodemodeItems {
+				if !outputMore {
+					outputItems++
+				} else if outputConsole != message.Console {
+					return ToolResult{}, failure.Retry("codemode_helper_response_invalid", 0)
+				}
+				if emitted.Len()+console.Len()+len(message.Text) > maxCodemodeOutput ||
+					outputItems > maxCodemodeItems || outputFrames > 2*maxCodemodeItems {
 					scriptFailed = true
 					scriptError = "Script output exceeded the limit"
 					break loop
 				}
-				emitted.WriteString(message.Text)
+				if message.Console {
+					console.WriteString(message.Text)
+				} else {
+					if !outputMore {
+						textStarts = append(textStarts, emitted.Len())
+					}
+					emitted.WriteString(message.Text)
+				}
+				outputMore, outputConsole = message.More, message.Console
 			case "done":
+				if outputMore {
+					return ToolResult{}, failure.Retry("codemode_helper_response_invalid", 0)
+				}
 				scriptFailed = !message.OK
 				scriptError = message.Error
 				break loop
@@ -264,8 +283,35 @@ loop:
 		}
 	}
 	cancel()
-	text := emitted.String()
+	// Item boundaries survive chunking, including a partially received final
+	// item on timeout. Presentation is added only after the raw output limits.
+	var formatted strings.Builder
+	for index, start := range textStarts {
+		if len(textStarts) > 1 {
+			fmt.Fprintf(&formatted, "==> text %d/%d <==\n", index+1, len(textStarts))
+		}
+		end := emitted.Len()
+		if index+1 < len(textStarts) {
+			end = textStarts[index+1]
+		}
+		formatted.WriteString(emitted.String()[start:end])
+	}
+	if console.Len() > 0 {
+		if formatted.Len() > 0 && !strings.HasSuffix(formatted.String(), "\n") {
+			formatted.WriteByte('\n')
+		}
+		formatted.WriteString("<console_output>\n")
+		formatted.WriteString(console.String())
+		if !strings.HasSuffix(console.String(), "\n") {
+			formatted.WriteByte('\n')
+		}
+		formatted.WriteString("</console_output>\n")
+	}
+	text := formatted.String()
 	if scriptFailed {
+		if text != "" && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
 		text += "Script error:\n" + scriptError
 	}
 	text, err = w.codemodeOutput(text, int(options.MaxOutputTokens)*4)
