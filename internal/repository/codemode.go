@@ -43,6 +43,11 @@ func parseCodemode(arguments map[string]any) (string, codemodeOptions, error) {
 		return "", options, errors.New("codemode requires code: a non-empty JavaScript string of at most 256 KiB")
 	}
 	line, rest, found := strings.Cut(code, "\n")
+	for index, laterLine := range strings.Split(rest, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(laterLine), "// @options:") {
+			return "", options, fmt.Errorf("codemode // @options: must be on the first input line; found on line %d. Move the options to line 1 and remove any duplicate directive", index+2)
+		}
+	}
 	if strings.HasPrefix(strings.TrimSpace(line), "// @options:") {
 		encoded := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "// @options:"))
 		decoder := json.NewDecoder(strings.NewReader(encoded))

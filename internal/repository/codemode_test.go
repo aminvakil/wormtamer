@@ -23,6 +23,47 @@ func codeTools(workspace *localWorkspace) NestedToolCall {
 	}
 }
 
+func TestParseCodemodePreservesFirstLineOptions(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		code    string
+		want    string
+		options codemodeOptions
+	}{
+		{"defaults", "\nreturn 1;", "\nreturn 1;", codemodeOptions{MaxOutputTokens: 10000}},
+		{"first-line", " \t// @options: {\"max_output_tokens\": 5, \"timeout_ms\": 100}\r\nreturn 1;", "\nreturn 1;", codemodeOptions{MaxOutputTokens: 5, TimeoutMS: 100}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			code, options, err := parseCodemode(map[string]any{"code": test.code})
+			if err != nil || code != test.want || options != test.options {
+				t.Fatalf("parsed codemode = %q, %+v, %v", code, options, err)
+			}
+		})
+	}
+}
+
+func TestCodemodeRejectsMisplacedOptionsBeforeStartingHelper(t *testing.T) {
+	workspace := testToolWorkspace(t)
+	workspace.executable = filepath.Join(t.TempDir(), "must-not-start")
+	for _, test := range []struct {
+		name string
+		code string
+		line string
+	}{
+		{"blank-first-line", "\n// @options: {\"timeout_ms\": 1}\nreturn 1;", "2"},
+		{"after-code", "await tools.bash({command: 'touch unexpected'});\n\n \t// @options: invalid\r\nreturn 1;", "3"},
+		{"duplicate", "// @options: {\"timeout_ms\": 1}\n// @options: {\"timeout_ms\": 2}\nreturn 1;", "2"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := workspace.RunCode(context.Background(), map[string]any{"code": test.code}, codeTools(workspace))
+			message, _ := result.Response["error"].(string)
+			if err != nil || !strings.Contains(message, "first input line") || !strings.Contains(message, "found on line "+test.line) {
+				t.Fatalf("misplaced options = %+v, %v", result, err)
+			}
+		})
+	}
+}
+
 func TestCodemodeChainsBashAndReadWithStructuredResults(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	t.Setenv("WORMTAMER_TEST_SECRET", "must-not-be-inherited")
