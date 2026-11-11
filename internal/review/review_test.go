@@ -289,32 +289,162 @@ func TestReviewerClassifiesGenerationDeadline(t *testing.T) {
 	}
 }
 
-func TestReviewerClassifiesReviewDeadline(t *testing.T) {
-	tests := []struct {
-		name      string
-		generator Generator
-		tools     repository.ToolBroker
-	}{
-		{name: "generation", generator: deadlineGenerator{}, tools: &fakeToolBroker{}},
-		{
-			name: "tool",
-			generator: &fakeGenerator{generations: []Generation{toolGeneration(
-				&genai.FunctionCall{ID: "bash", Name: repository.ToolBash, Args: map[string]any{"command": "sleep"}},
-			)}},
-			tools: deadlineToolBroker{},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			reviewer := newGeminiReviewer(test.generator, "gemini-test", nil, nil)
-			reviewer.generationTimeout = time.Minute
-			reviewer.reviewTimeout = 10 * time.Millisecond
-			_, _, err := reviewer.Review(context.Background(), testSnapshot(), test.tools)
-			var failureError *failure.Error
-			if !errors.As(err, &failureError) || failureError.Category != "review_timeout" || !failureError.Retryable {
-				t.Fatalf("review deadline error = %v", err)
+func TestReviewerWrapsUpAtReviewDeadline(t *testing.T) {
+	for _, duringTool := range []bool{false, true} {
+		name := "generation"
+		if duringTool {
+			name = "tool_batch"
+		}
+		t.Run(name, func(t *testing.T) {
+			calls := []*genai.FunctionCall{{ID: "read", Name: repository.ToolRead, Args: map[string]any{"path": "main.go"}}}
+			if duringTool {
+				calls = append(calls,
+					&genai.FunctionCall{ID: "interrupted", Name: repository.ToolBash, Args: map[string]any{"command": "sleep"}},
+					&genai.FunctionCall{ID: "skipped", Name: repository.ToolRead, Args: map[string]any{"path": "other.go"}})
+			}
+			first := toolGeneration(calls...)
+			first.Content.Parts[0].ThoughtSignature = []byte("signature")
+			var requests []generationRequest
+			generator := generatorFunc(func(ctx context.Context, _ string, contents []*genai.Content, config *genai.GenerateContentConfig) (Generation, error) {
+				requests = append(requests, generationRequest{contents: append([]*genai.Content(nil), contents...), config: config})
+				if config.ToolConfig.FunctionCallingConfig.Mode == genai.FunctionCallingConfigModeNone {
+					deadline, ok := ctx.Deadline()
+					if ctx.Err() != nil || !ok || time.Until(deadline) <= 0 || time.Until(deadline) > time.Second || len(config.Tools) != 0 {
+						t.Fatalf("wrap-up context/config = %v, %+v", ctx.Err(), config)
+					}
+					return textGeneration(`{"summary":"Partial assessment.","findings":[{"priority":"P2","title":"Check error","explanation":"An error is ignored.","recommendation":"Handle it.","path":"main.go"}]}`), nil
+				}
+				if len(requests) == 1 {
+					return first, nil
+				}
+				return deadlineGenerator{}.Generate(ctx, "", contents, config)
+			})
+			toolCalls := 0
+			broker := toolBrokerFunc(func(ctx context.Context, _ string, _ map[string]any) (repository.ToolResult, error) {
+				toolCalls++
+				if toolCalls == 2 {
+					<-ctx.Done()
+					return repository.ToolResult{}, ctx.Err()
+				}
+				return repository.ToolResult{Response: map[string]any{"output": "collected evidence"}}, nil
+			})
+			reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+			reviewer.generationTimeout = time.Second
+			reviewer.reviewTimeout = 20 * time.Millisecond
+			result, encoded, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+			if err != nil || result.Summary != incompleteReviewNotice+"\n\nPartial assessment." || len(result.Findings) != 1 {
+				t.Fatalf("Review() = %+v, %v", result, err)
+			}
+			stored, err := DecodeStored(encoded)
+			if err != nil || stored.Summary != result.Summary || len(stored.Findings) != 1 {
+				t.Fatalf("stored result = %+v, %v", stored, err)
+			}
+			wantRequests, wantTools := 3, 1
+			if duringTool {
+				wantRequests, wantTools = 2, 2
+			}
+			if len(requests) != wantRequests || toolCalls != wantTools {
+				t.Fatalf("generations=%d tools=%d", len(requests), toolCalls)
+			}
+			contents := requests[len(requests)-1].contents
+			if contents[1] != first.Content || string(contents[1].Parts[0].ThoughtSignature) != "signature" {
+				t.Fatal("wrap-up lost the original model content")
+			}
+			responses := functionResponses(contents)
+			if len(responses) != len(calls) || responses[0].Response["output"] != "collected evidence" {
+				t.Fatalf("wrap-up evidence = %+v", responses)
+			}
+			for i, response := range responses {
+				if response.ID != calls[i].ID || response.Name != calls[i].Name || (i > 0 && response.Response["error"] != "review_time_limit_exceeded") {
+					t.Fatalf("response %d = %+v", i, response)
+				}
 			}
 		})
+	}
+}
+
+func TestReviewerUsesNoticeWhenWrapUpCannotFinish(t *testing.T) {
+	for _, name := range []string{"timeout", "server_error", "credentials", "incomplete_finish", "tool_call", "invalid_path"} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			generator := generatorFunc(func(ctx context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (Generation, error) {
+				calls++
+				switch name {
+				case "timeout":
+					<-ctx.Done()
+					return Generation{}, ctx.Err()
+				case "server_error":
+					return Generation{}, genai.APIError{Code: http.StatusServiceUnavailable}
+				case "credentials":
+					return Generation{}, genai.APIError{Code: http.StatusUnauthorized}
+				case "incomplete_finish":
+					return Generation{FinishReason: genai.FinishReasonMaxTokens}, nil
+				case "tool_call":
+					return toolGeneration(&genai.FunctionCall{ID: "unexpected", Name: repository.ToolBash}), nil
+				default:
+					return textGeneration(`{"summary":"invalid","findings":[{"priority":"P2","title":"x","explanation":"x","recommendation":"x","path":"unchanged.go"}]}`), nil
+				}
+			})
+			reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+			reviewer.reviewTimeout = -1
+			reviewer.generationTimeout = 10 * time.Millisecond
+			broker := &fakeToolBroker{}
+			result, encoded, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+			if name == "credentials" {
+				var credentialFailure *failure.Error
+				if !errors.As(err, &credentialFailure) || credentialFailure.Category != "gemini_invalid_credentials" || credentialFailure.Retryable {
+					t.Fatalf("credential failure = %v", err)
+				}
+				return
+			}
+			if err != nil || !strings.HasPrefix(result.Summary, incompleteReviewNotice+"\n\n") || len(result.Findings) != 0 || calls != 1 || broker.calls != 0 {
+				t.Fatalf("Review() = %+v, %v; generations=%d tools=%d", result, err, calls, broker.calls)
+			}
+			if _, err := DecodeStored(encoded); err != nil {
+				t.Fatalf("invalid fallback checkpoint: %v", err)
+			}
+		})
+	}
+}
+
+func TestReviewerPropagatesWrapUpCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	generator := generatorFunc(func(_ context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (Generation, error) {
+		cancel()
+		return textGeneration(`{"summary":"partial","findings":[]}`), nil
+	})
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.reviewTimeout = -1
+	_, _, err := reviewer.Review(ctx, testSnapshot(), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wrap-up cancellation = %v", err)
+	}
+}
+
+func TestReviewerPreservesToolFailureAtReviewDeadline(t *testing.T) {
+	generator := &fakeGenerator{generations: []Generation{toolGeneration(&genai.FunctionCall{ID: "read", Name: repository.ToolRead})}}
+	broker := toolBrokerFunc(func(ctx context.Context, _ string, _ map[string]any) (repository.ToolResult, error) {
+		<-ctx.Done()
+		return repository.ToolResult{}, errors.Join(failure.Failed("sensitive_tool_content"), ctx.Err())
+	})
+	reviewer := newGeminiReviewer(generator, "gemini-test", nil, nil)
+	reviewer.reviewTimeout = 10 * time.Millisecond
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), broker)
+	var toolFailure *failure.Error
+	if !errors.As(err, &toolFailure) || toolFailure.Category != "sensitive_tool_content" || len(generator.requests) != 1 {
+		t.Fatalf("tool failure = %v; generations=%d", err, len(generator.requests))
+	}
+}
+
+func TestReviewerRejectsSensitiveWrapUp(t *testing.T) {
+	generator := &fakeGenerator{generations: []Generation{textGeneration(`{"summary":"configured-secret","findings":[]}`)}}
+	reviewer := newGeminiReviewer(generator, "gemini-test", []string{"configured-secret"}, nil)
+	reviewer.reviewTimeout = -1
+	_, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+	var outputFailure *failure.Error
+	if !errors.As(err, &outputFailure) || outputFailure.Category != "sensitive_model_output" {
+		t.Fatalf("wrap-up credential failure = %v", err)
 	}
 }
 
@@ -413,11 +543,16 @@ func (deadlineGenerator) Generate(ctx context.Context, _ string, _ []*genai.Cont
 	return Generation{}, ctx.Err()
 }
 
-type deadlineToolBroker struct{}
+type generatorFunc func(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (Generation, error)
 
-func (deadlineToolBroker) Call(ctx context.Context, _ string, _ map[string]any) (repository.ToolResult, error) {
-	<-ctx.Done()
-	return repository.ToolResult{}, ctx.Err()
+func (g generatorFunc) Generate(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (Generation, error) {
+	return g(ctx, model, contents, config)
+}
+
+type toolBrokerFunc func(context.Context, string, map[string]any) (repository.ToolResult, error)
+
+func (b toolBrokerFunc) Call(ctx context.Context, name string, arguments map[string]any) (repository.ToolResult, error) {
+	return b(ctx, name, arguments)
 }
 
 func functionResponses(contents []*genai.Content) []*genai.FunctionResponse {

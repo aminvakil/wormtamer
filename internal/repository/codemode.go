@@ -149,7 +149,7 @@ func (w *localWorkspace) RunCode(ctx context.Context, arguments map[string]any, 
 			result, resultErr = ToolResult{}, fatalErr
 		}
 		if err := ctx.Err(); err != nil {
-			result, resultErr = ToolResult{}, err
+			result, resultErr = ToolResult{}, errors.Join(resultErr, err)
 		}
 	}()
 

@@ -423,7 +423,11 @@ func TestWorkerOperatorRetryResumesPublicationWithoutReview(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimJob() = %+v, %v", job, err)
 	}
-	resultJSON := []byte(`{"summary":"Already reviewed.","findings":[]}`)
+	notice := "Incomplete review: The model could not reach a conclusion after 10 minutes. This is not a complete assessment."
+	resultJSON, err := json.Marshal(review.Result{Summary: notice + "\n\nPartial assessment.", Findings: []review.Finding{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := storage.SaveReviewResult(ctx, job.ID, resultJSON, nil, nil, store.PatchIDUnavailable, "", now); err != nil {
 		t.Fatal(err)
 	}
@@ -448,6 +452,9 @@ func TestWorkerOperatorRetryResumesPublicationWithoutReview(t *testing.T) {
 	assertJobState(t, db, store.JobCompleted)
 	if broker.ciCalls != 0 || reviewer.calls != 0 || broker.loadCalls != 0 || broker.postCalls != 1 {
 		t.Fatalf("calls: review=%d load=%d post=%d", reviewer.calls, broker.loadCalls, broker.postCalls)
+	}
+	if !strings.HasPrefix(broker.postedBody, "## Wormtamer review\n\n> "+strings.ReplaceAll(notice, ".", `\.`)+"\n> \n> Partial assessment\\.") {
+		t.Fatalf("publication lost the checkpointed notice: %s", broker.postedBody)
 	}
 }
 

@@ -407,6 +407,21 @@ func TestCodemodeHardFailureOverridesEvidenceLimitDuringCleanup(t *testing.T) {
 	}
 }
 
+func TestCodemodePreservesHardFailureDuringParentCancellation(t *testing.T) {
+	workspace := testToolWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result, err := workspace.RunCode(ctx, map[string]any{"code": `await tools.read({path:"a"});`},
+		func(context.Context, int64, string, map[string]any) (map[string]any, error) {
+			cancel()
+			return nil, failure.Failed("sensitive_tool_content")
+		})
+	var hardFailure *failure.Error
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &hardFailure) || hardFailure.Category != "sensitive_tool_content" || result.Response != nil {
+		t.Fatalf("concurrent cancellation and failure = %+v, %v", result, err)
+	}
+}
+
 func TestCodemodeCannotCatchInfrastructureFailure(t *testing.T) {
 	workspace := testToolWorkspace(t)
 	result, err := workspace.RunCode(context.Background(), map[string]any{"code": `try { await tools.read({path:"a"}); } catch { return "hidden"; }`},
