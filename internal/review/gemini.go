@@ -84,7 +84,7 @@ func NewGeminiReviewer(ctx context.Context, apiKey, baseURL, model, thinkingLeve
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: apiKey, Backend: genai.BackendGeminiAPI, HTTPClient: httpClient,
-		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, RetryOptions: &genai.HTTPRetryOptions{
+		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, APIVersion: "v1", RetryOptions: &genai.HTTPRetryOptions{
 			Attempts: genai.Ptr(int32(5)), InitialDelay: genai.Ptr(1.0), MaxDelay: genai.Ptr(8.0),
 			ExpBase: genai.Ptr(2.0), Jitter: genai.Ptr(1.0), HTTPStatusCodes: []int32{408, 429, 500, 502, 503, 504},
 		}},

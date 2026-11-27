@@ -72,6 +72,29 @@ func TestReviewPromptIdentifiesWorkingDirectoryRelatedRepositoriesAndMemory(t *t
 	}
 }
 
+func TestGeminiReviewerUsesConfiguredBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if got := request.URL.Path; got != "/v1/models/gemini-proxy:generateContent" {
+			t.Errorf("path = %q", got)
+		}
+		if got := request.Header.Get("x-goog-api-key"); got != "gateway-key" {
+			t.Errorf("API key = %q", got)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"ok\",\"findings\":[]}"}],"role":"model"},"finishReason":"STOP"}]}`))
+	}))
+	defer server.Close()
+
+	reviewer, err := NewGeminiReviewer(context.Background(), "gateway-key", server.URL, "gemini-proxy", "default", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := reviewer.Review(context.Background(), testSnapshot(), nil)
+	if err != nil || result.Summary != "ok" {
+		t.Fatalf("Review() = %+v, %v", result, err)
+	}
+}
+
 func TestGeminiReviewerDispatchesSameTurnCallsInOrder(t *testing.T) {
 	generator := &fakeGenerator{generations: []Generation{
 		toolGeneration(

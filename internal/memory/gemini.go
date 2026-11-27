@@ -86,7 +86,7 @@ func NewEvaluator(ctx context.Context, apiKey, baseURL, model string, forbidden 
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: apiKey, Backend: genai.BackendGeminiAPI, HTTPClient: httpClient,
-		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL},
+		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, APIVersion: "v1"},
 	})
 	if err != nil {
 		return nil, errors.New("initialize Gemini memory evaluator")
