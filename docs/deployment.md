@@ -25,7 +25,7 @@ Copy `config.example.json` to a location outside the repository and image, then 
 cp config.example.json /secure/path/config.json
 ```
 
-Leave `gemini.base_url` empty or omit it to use the Gemini Developer API directly. Set it to an HTTP or HTTPS Gemini Developer API-compatible base URL to use a custom endpoint for both reviews and feedback evaluation. Wormtamer appends `/v1beta/models/<model>:generateContent` and sends `gemini.api_key` in the `x-goog-api-key` header.
+Leave `gemini.base_url` empty or omit it to use the Gemini Developer API directly. Set it to an HTTP or HTTPS Gemini Developer API-compatible base URL to use a custom endpoint for both reviews and feedback evaluation. Wormtamer appends `/v1/models/<model>:generateContent` and sends `gemini.api_key` in the `x-goog-api-key` header.
 
 A custom endpoint must accept and return the native Gemini Developer API behavior Wormtamer uses, including function calling, structured JSON response schemas, and thinking configuration. An OpenAI-compatible endpoint serving a Gemini model is not sufficient. The endpoint receives private merge request content and tool results and must serve the configured Gemini 3 or newer model. Wormtamer rejects model endpoint redirects and base URLs containing credentials, queries, or fragments. Use HTTPS unless the endpoint is confined to an appropriate local network.
 

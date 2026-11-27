@@ -33,7 +33,7 @@ func TestEvaluatorUsesConfiguredBaseURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := evaluator.Evaluate(context.Background(), testInput())
-	if err != nil || result.CreateMemory || gotPath != "/v1beta/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
+	if err != nil || result.CreateMemory || gotPath != "/v1/models/gemini-proxy:generateContent" || gotAPIKey != "gateway-key" {
 		t.Fatalf("result=%+v error=%v path=%q key=%q", result, err, gotPath, gotAPIKey)
 	}
 }
